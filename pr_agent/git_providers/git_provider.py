@@ -548,6 +548,14 @@ class GitProvider(ABC):
     def auto_approve(self) -> bool:
         return False
 
+    def submit_review_verdict(self, event: str, body: str = "") -> bool:
+        """Submit a formal review verdict.
+
+        'event' is one of "APPROVE", "REQUEST_CHANGES" or "COMMENT". Providers that cannot set a
+        formal verdict return False, and the caller falls back to the plain review comment.
+        """
+        return False
+
     def calc_pr_statistics(self, pull_request_data: dict):
         return {}
 

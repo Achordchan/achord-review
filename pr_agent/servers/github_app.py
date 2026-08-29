@@ -76,6 +76,25 @@ async def get_body(request):
 _duplicate_push_triggers = DefaultDictWithTimeout(int, ttl=get_settings().github_app.push_trigger_pending_tasks_ttl)
 _pending_task_duplicate_push_conditions = DefaultDictWithTimeout(asyncio.locks.Condition, ttl=get_settings().github_app.push_trigger_pending_tasks_ttl)
 
+def normalize_mention_command(comment_body: str) -> str:
+    """Translate a bot mention into the matching slash command.
+
+    With github_app.mention_trigger set to "@achord-review", a comment saying
+    "@achord-review review" is handled exactly like "/review". A bare mention runs
+    github_app.mention_default_command. Returns the body unchanged when disabled.
+    """
+    mention = get_settings().get("github_app.mention_trigger", "")
+    if not mention or not comment_body or mention not in comment_body:
+        return comment_body
+    # only the text following the mention, on that same line, is treated as the command
+    trailing = comment_body.split(mention, 1)[1].split("\n", 1)[0].strip()
+    if not trailing:
+        return get_settings().get("github_app.mention_default_command", "/review")
+    command = trailing if trailing.startswith("/") else f"/{trailing}"
+    get_logger().info(f"Translated mention '{mention}' into command: {command}")
+    return command
+
+
 async def handle_comments_on_pr(body: Dict[str, Any],
                                 event: str,
                                 sender: str,
@@ -86,6 +105,8 @@ async def handle_comments_on_pr(body: Dict[str, Any],
     if "comment" not in body:
         return {}
     comment_body = body.get("comment", {}).get("body")
+    if comment_body and isinstance(comment_body, str):
+        comment_body = normalize_mention_command(comment_body)
     if comment_body and isinstance(comment_body, str) and not comment_body.lstrip().startswith("/"):
         if '/ask' in comment_body and comment_body.strip().startswith('> ![image]'):
             comment_body_split = comment_body.split('/ask')
@@ -391,6 +412,17 @@ def _check_pull_request_event(action: str, body: dict, log_context: dict) -> Tup
     return pull_request, api_url
 
 
+def is_fork_pr(body: dict) -> bool:
+    """True when the PR's head branch lives in a different repository than its base."""
+    pull_request = body.get("pull_request", {}) or {}
+    head_repo = ((pull_request.get("head") or {}).get("repo") or {}).get("full_name")
+    base_repo = ((pull_request.get("base") or {}).get("repo") or {}).get("full_name")
+    if not head_repo or not base_repo:
+        # GitHub omits head.repo for a deleted fork; treat the unknown case as a fork
+        return True
+    return head_repo != base_repo
+
+
 async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body: dict, api_url: str,
                                         log_context: dict):
     feedback_on_draft = get_settings().github_app.feedback_on_draft_pr
@@ -400,6 +432,10 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
     is_draft = body.get("pull_request", {}).get("draft", True)
     if is_draft and not feedback_on_draft:
         get_logger().info(f"Skipping draft PR {api_url=}")
+        return
+    if get_settings().github_app.get("skip_fork_prs", False) and is_fork_pr(body):
+        # a fork PR's contents are attacker-controlled; only run on explicit request
+        get_logger().info(f"Skipping fork PR {api_url=}")
         return
     if commands_conf == "pr_commands" and get_settings().config.disable_auto_feedback:  # auto commands for PR, and auto feedback is disabled
         get_logger().info(f"Auto feedback is disabled, skipping auto commands for PR {api_url=}")

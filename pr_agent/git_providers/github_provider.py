@@ -1511,6 +1511,32 @@ class GithubProvider(GitProvider):
             get_logger().exception(f"Failed to auto-approve, error: {e}")
             return False
 
+    def submit_review_verdict(self, event: str, body: str = "") -> bool:
+        expected_states = {"APPROVE": "APPROVED",
+                           "REQUEST_CHANGES": "CHANGES_REQUESTED",
+                           "COMMENT": "COMMENTED"}
+        event = (event or "").upper()
+        if event not in expected_states:
+            get_logger().warning(f"Unsupported review verdict '{event}', skipping")
+            return False
+        try:
+            # GitHub rejects REQUEST_CHANGES and COMMENT reviews that carry an empty body
+            if not body and event != "APPROVE":
+                body = "Automated review verdict."
+            kwargs = {"event": event}
+            if body:
+                kwargs["body"] = body
+            if getattr(self, "last_commit_id", None):
+                kwargs["commit"] = self.last_commit_id
+            res = self.pr.create_review(**kwargs)
+            if res.state != expected_states[event]:
+                get_logger().warning(f"Review verdict '{event}' returned unexpected state '{res.state}'")
+                return False
+            return True
+        except Exception as e:
+            get_logger().exception(f"Failed to submit review verdict '{event}', error: {e}")
+            return False
+
     def calc_pr_statistics(self, pull_request_data: dict):
             return {}
 

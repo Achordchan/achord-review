@@ -593,6 +593,7 @@ def test_github_provider_reads_from_default_branch_when_requested():
                 "question_str": "",
                 "require_security_review": True,
                 "require_todo_scan": False,
+                "require_severity": False,
                 "require_estimate_effort_to_review": True,
                 "num_max_findings": 3,
                 "num_pr_files": 1,

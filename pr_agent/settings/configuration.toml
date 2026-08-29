@@ -118,6 +118,13 @@ final_update_message = true
 # review labels
 enable_review_labels_security=true
 enable_review_labels_effort=true
+# formal review verdict (APPROVE / REQUEST_CHANGES / COMMENT). Disabled by default: when off, the review
+# is published as a plain comment, exactly as before.
+enable_review_verdict=false
+# severities (from the model's per-issue 'severity' field) that make the verdict REQUEST_CHANGES
+verdict_blocking_severities=["P0", "P1"]
+# treat a non-"No" answer in 'security_concerns' as blocking, regardless of issue severities
+verdict_blocking_on_security_concerns=true
 # specific configurations for incremental review (/review -i)
 require_all_thresholds_for_incremental_review=false
 minimal_commits_for_incremental_review=0
@@ -281,9 +288,16 @@ publish_as_check_run = false # when true, publish review/description/improve out
 # these toggles allows running the github app from custom deployments
 bot_user = "github-actions[bot]"
 override_deployment_type = true
+# when set (e.g. "@achord-review"), a comment mentioning the bot is translated into the matching
+# slash command: "@achord-review review" -> "/review". Empty disables mention triggering.
+mention_trigger = ""
+mention_default_command = "/review"
 # settings for "pull_request" event
 handle_pr_actions = ['opened', 'reopened', 'ready_for_review']
 feedback_on_draft_pr = false
+# skip automatic runs on PRs opened from a fork: their contents are attacker-controlled, and a
+# review still runs when a maintainer asks for one explicitly. Manual commands are unaffected.
+skip_fork_prs = false
 pr_commands = [
     "/describe --pr_description.final_update_message=false",
     "/review",

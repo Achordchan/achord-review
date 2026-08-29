@@ -80,6 +80,7 @@ class PRReviewer:
         self.patches_diff = None
         self.remaining_files_list = []
         self.prediction = None
+        self.review_data = None
         question_str, answer_str = self._get_user_answers()
         self.pr_description, self.pr_description_files = (
             self.git_provider.get_pr_description(split_changes_walkthrough=True))
@@ -106,6 +107,7 @@ class PRReviewer:
             'require_can_be_split_review': get_settings().pr_reviewer.require_can_be_split_review,
             'require_security_review': get_settings().pr_reviewer.require_security_review,
             'require_todo_scan': get_settings().pr_reviewer.get("require_todo_scan", False),
+            'require_severity': get_settings().pr_reviewer.get("enable_review_verdict", False),
             'question_str': question_str,
             'answer_str': answer_str,
             "extra_instructions": get_settings().pr_reviewer.extra_instructions,
@@ -195,6 +197,7 @@ class PRReviewer:
                     reason += ": no major issues detected."
                 get_logger().info(reason)
                 get_settings().data = {"artifact": pr_review}
+                self._submit_review_verdict()
                 return
 
             # publish the review
@@ -221,6 +224,8 @@ class PRReviewer:
                     )
                     pr_review = add_pr_review_identity(pr_review, identity_marker)
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
+
+            self._submit_review_verdict()
         except Exception as e:
             review_failed = True
             get_logger().error(f"Failed to review PR: {e}")
@@ -241,6 +246,47 @@ class PRReviewer:
 
     def _should_publish_review_no_suggestions(self, pr_review: str) -> bool:
         return get_settings().pr_reviewer.get('publish_output_no_suggestions', True) or "No major issues detected" not in pr_review
+
+    def _determine_review_verdict(self, data: dict) -> Tuple[str, str]:
+        """Map a parsed review into a formal verdict, returning (event, reason)."""
+        review = data.get('review') or {}
+
+        if get_settings().pr_reviewer.get('verdict_blocking_on_security_concerns', True):
+            security_concerns = str(review.get('security_concerns') or '').strip()
+            # the prompt asks for a bare "No" when there is nothing to report
+            if security_concerns and not security_concerns.lower().startswith('no'):
+                return "REQUEST_CHANGES", "security concerns were raised"
+
+        blocking_severities = {str(severity).strip().upper() for severity in
+                               get_settings().pr_reviewer.get('verdict_blocking_severities', ["P0", "P1"])}
+        issues = review.get('key_issues_to_review')
+        issues = issues if isinstance(issues, list) else []
+        found = {str(issue.get('severity') or '').strip().upper() for issue in issues if isinstance(issue, dict)}
+        blocking_found = sorted(found & blocking_severities)
+        if blocking_found:
+            return "REQUEST_CHANGES", f"blocking issues found ({', '.join(blocking_found)})"
+        if issues:
+            return "COMMENT", "non-blocking suggestions only"
+        return "APPROVE", "no blocking issues found"
+
+    def _submit_review_verdict(self) -> None:
+        if not get_settings().pr_reviewer.get('enable_review_verdict', False):
+            return
+        if not get_settings().config.publish_output:
+            return
+        if not self.review_data:
+            # the model output failed to parse: an empty review must never read as "nothing found"
+            get_logger().warning("No parsed review data available, skipping review verdict")
+            return
+        try:
+            event, reason = self._determine_review_verdict(self.review_data)
+        except Exception as e:
+            # a verdict must never block the PR flow - fall back to a non-blocking comment
+            get_logger().exception(f"Failed to determine review verdict, falling back to COMMENT, error: {e}")
+            event, reason = "COMMENT", "the review verdict could not be determined"
+        get_logger().info(f"Submitting review verdict {event}: {reason}")
+        if not self.git_provider.submit_review_verdict(event, f"Automated review: {reason}."):
+            get_logger().info(f"Review verdict {event} was not submitted")
 
     async def _prepare_prediction(self, model: str) -> None:
         output = get_pr_diff(self.git_provider,
@@ -304,6 +350,8 @@ class PRReviewer:
         if 'review' not in data:
             get_logger().exception("Failed to parse review data", artifact={"data": data})
             return ""
+
+        self.review_data = data
 
         structured_publisher = getattr(self.git_provider, "publish_structured_review", None)
         if callable(structured_publisher):
