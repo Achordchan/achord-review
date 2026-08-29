@@ -17,3 +17,6 @@ docs/.cache/
 .qodo
 poetry.lock
 .log
+
+# achord-review live deployment config (secrets)
+deploy/achord-review/config.toml

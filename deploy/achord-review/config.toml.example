@@ -1,0 +1,83 @@
+# achord-review configuration — copy to config.toml and fill in the placeholders.
+#
+# Mounted into the container at /app/pr_agent/settings_prod/.secrets.toml, which
+# pr_agent/config_loader.py already loads. config.toml holds live secrets: keep it
+# out of git (deploy/achord-review/config.toml is gitignored) and chmod 600 it.
+
+[config]
+model = "openai/gpt-5.6-sol"
+fallback_models = ["openai/gpt-5.6-sol"]
+# gpt-5.6-sol is not in litellm's built-in table, so its context size must be declared.
+custom_model_max_tokens = 1000000
+# Global ceiling: get_max_tokens() takes min(max_model_tokens, custom_model_max_tokens),
+# so leaving the 32000 default here would silently cap the 1M context.
+max_model_tokens = 200000
+
+[openai]
+key = "REPLACE_WITH_RELAY_API_KEY"
+api_base = "https://sub.achord.cn:8443/v1"
+
+[github]
+deployment_type = "app"
+app_id = "REPLACE_WITH_APP_ID"
+webhook_secret = "REPLACE_WITH_WEBHOOK_SECRET"
+private_key = """-----BEGIN RSA PRIVATE KEY-----
+REPLACE_WITH_THE_CONTENTS_OF_THE_APP_PRIVATE_KEY_PEM
+-----END RSA PRIVATE KEY-----
+"""
+
+[github_app]
+# Must match the App's slug so the bot recognises its own comments.
+bot_user = "achord-review[bot]"
+# V1 runs review only: /describe rewrites the PR body and /improve pushes code changes,
+# both of which the PRD puts out of scope.
+pr_commands = ["/review"]
+handle_pr_actions = ["opened", "reopened", "ready_for_review"]
+feedback_on_draft_pr = false
+# Re-review on every push; PR-Agent already cancels superseded runs.
+handle_push_trigger = true
+push_commands = ["/review"]
+# "@achord-review review" is handled exactly like "/review".
+mention_trigger = "@achord-review"
+mention_default_command = "/review"
+# Fork PR contents are attacker-controlled and this process holds the relay key,
+# so skip them automatically. A maintainer can still request one by mentioning the bot.
+skip_fork_prs = true
+
+[pr_reviewer]
+# Turn the review into a formal APPROVE / REQUEST_CHANGES / COMMENT verdict.
+enable_review_verdict = true
+verdict_blocking_severities = ["P0", "P1"]
+verdict_blocking_on_security_concerns = true
+num_max_findings = 5
+persistent_comment = true
+# Noise reduction: drop the review dimensions that do not apply to this deployment.
+require_ticket_analysis_review = false
+require_can_be_split_review = false
+require_estimate_effort_to_review = false
+require_score_review = false
+require_todo_scan = false
+require_tests_review = true
+require_security_review = true
+extra_instructions = """
+Severity policy — every issue in key_issues_to_review must carry a `severity`:
+- P0: critical security flaw, authentication or authorization bypass, secret/credential
+  leakage, or irreversible data loss.
+- P1: a definite functional bug, regression, serious logic error, data inconsistency,
+  race condition, or breaking API change.
+- P2: an important missing edge case or error handling, a clear performance regression,
+  or a materially missing test.
+- P3: a small maintenance improvement with a concrete, stated benefit.
+
+Do NOT report:
+- pure formatting, whitespace, or import ordering;
+- naming or refactoring preferences with no behavioural impact;
+- anything a formatter or linter already handles;
+- generic advice not tied to a specific line of this diff.
+
+Scope:
+- Review only problems introduced or exposed by this PR's diff; do not audit pre-existing code.
+- Every issue must state a realistic trigger scenario and its impact.
+- If you are not confident an issue is real, omit it. An empty key_issues_to_review list is
+  the correct output for a clean PR — never pad it with minor remarks.
+"""

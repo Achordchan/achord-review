@@ -1,0 +1,30 @@
+# achord-review — central GitHub App deployment
+#
+# The container binds to loopback only; the host's existing nginx terminates TLS and
+# reverse-proxies to it (see nginx-achord-review.conf). Do not publish 80/443 here:
+# nginx already owns those ports on the target host.
+services:
+  achord-review:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+      target: github_app
+    image: achord-review:latest
+    container_name: achord-review
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:33001:3000"
+    volumes:
+      # All configuration and secrets live here. Never bake them into the image.
+      - ./config.toml:/app/pr_agent/settings_prod/.secrets.toml:ro
+    environment:
+      # gunicorn binds 0.0.0.0:3000 (see servers/gunicorn_config.py) and would otherwise scale
+      # workers to the CPU count. This host has 2 GB of RAM shared with the relay stack, so pin
+      # the documented minimum of 2 - enough that a worker busy on a review still answers health checks.
+      GUNICORN_WORKERS: "2"
+    mem_limit: 900m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
