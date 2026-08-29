@@ -247,3 +247,76 @@ class TestVerdictIsNotRestated:
     ])
     def test_changed_verdict_is_submitted(self, current_state, review, expected):
         assert self._run(current_state, review) == [expected]
+
+
+class TestSingleReviewSubmission:
+    """Summary, findings and verdict go out as one review, or not at all."""
+
+    class _Provider:
+        def __init__(self, current_state=None, publish_ok=True):
+            self.current_state = current_state
+            self.publish_ok = publish_ok
+            self.suggestion_calls = []
+            self.verdict_calls = []
+
+        def get_latest_own_review_state(self):
+            return self.current_state
+
+        def publish_code_suggestions(self, comments, review_body=None, review_event=None):
+            self.suggestion_calls.append((comments, review_body, review_event))
+            return self.publish_ok
+
+        def submit_review_verdict(self, event, body=""):
+            self.verdict_calls.append((event, body))
+            return True
+
+    CLEAN = {"security_concerns": "No", "key_issues_to_review": []}
+    BLOCKING = {"security_concerns": "No",
+                "key_issues_to_review": [{"severity": "P1", "issue_header": "x"}]}
+
+    def _reviewer(self, provider, review, comments):
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": review}
+        reviewer.deferred_review_comments = comments
+        reviewer.git_provider = provider
+        return reviewer
+
+    def test_findings_and_verdict_go_out_together(self):
+        provider = self._Provider()
+        reviewer = self._reviewer(provider, self.BLOCKING, [{"body": "finding"}])
+        reviewer._publish_single_review("SUMMARY")
+        assert len(provider.suggestion_calls) == 1
+        comments, body, event = provider.suggestion_calls[0]
+        assert comments == [{"body": "finding"}]
+        assert body.startswith("SUMMARY")
+        assert event == "REQUEST_CHANGES"
+        # a second, separate verdict review would be a second notification
+        assert provider.verdict_calls == []
+
+    def test_verdict_only_when_there_are_no_inline_findings(self):
+        provider = self._Provider()
+        reviewer = self._reviewer(provider, self.CLEAN, [])
+        reviewer._publish_single_review("SUMMARY")
+        assert provider.suggestion_calls == []
+        assert len(provider.verdict_calls) == 1
+        assert provider.verdict_calls[0][0] == "APPROVE"
+
+    def test_nothing_new_and_unchanged_verdict_stays_silent(self):
+        provider = self._Provider(current_state="CHANGES_REQUESTED")
+        reviewer = self._reviewer(provider, self.BLOCKING, [])
+        reviewer._publish_single_review("SUMMARY")
+        assert provider.suggestion_calls == []
+        assert provider.verdict_calls == []
+
+    def test_new_findings_are_posted_even_when_the_verdict_is_unchanged(self):
+        provider = self._Provider(current_state="CHANGES_REQUESTED")
+        reviewer = self._reviewer(provider, self.BLOCKING, [{"body": "new finding"}])
+        reviewer._publish_single_review("SUMMARY")
+        assert len(provider.suggestion_calls) == 1
+
+    def test_failed_submission_falls_back_to_a_verdict_review(self):
+        provider = self._Provider(publish_ok=False)
+        reviewer = self._reviewer(provider, self.BLOCKING, [{"body": "finding"}])
+        reviewer._publish_single_review("SUMMARY")
+        assert len(provider.suggestion_calls) == 1
+        assert len(provider.verdict_calls) == 1, "the review must still reach the PR"

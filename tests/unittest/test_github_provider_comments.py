@@ -281,7 +281,7 @@ def test_publish_code_suggestions_multi_line_payload_shape():
 
     captured = {}
 
-    def capture(comments, disable_fallback=False):
+    def capture(comments, disable_fallback=False, review_body=None, review_event=None):
         captured["comments"] = comments
 
     provider.publish_inline_comments = capture
@@ -320,7 +320,7 @@ def test_publish_code_suggestions_single_line_payload_shape():
     _stub_validation_passthrough(provider)
 
     captured = {}
-    provider.publish_inline_comments = lambda comments, disable_fallback=False: captured.setdefault("c", comments)
+    provider.publish_inline_comments = lambda comments, disable_fallback=False, review_body=None, review_event=None: captured.setdefault("c", comments)
 
     suggestions = [{
         "body": "fix",
@@ -351,7 +351,7 @@ def test_publish_code_suggestions_skips_invalid_ranges():
     _stub_validation_passthrough(provider)
 
     captured = {}
-    provider.publish_inline_comments = lambda comments, disable_fallback=False: captured.setdefault("c", comments)
+    provider.publish_inline_comments = lambda comments, disable_fallback=False, review_body=None, review_event=None: captured.setdefault("c", comments)
 
     suggestions = [
         {"body": "a", "relevant_file": "f.py",

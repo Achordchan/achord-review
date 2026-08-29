@@ -50,6 +50,8 @@ skip_fork_prs = true
 [pr_reviewer]
 # Turn the review into a formal APPROVE / REQUEST_CHANGES / COMMENT verdict.
 enable_review_verdict = true
+# Summary + inline findings + verdict arrive as one review, so GitHub sends one email.
+single_review_submission = true
 verdict_blocking_severities = ["P0", "P1"]
 verdict_blocking_on_security_concerns = true
 num_max_findings = 5

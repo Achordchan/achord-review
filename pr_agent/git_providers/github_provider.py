@@ -531,7 +531,14 @@ class GithubProvider(GitProvider):
         path = relevant_file.strip()
         return dict(body=body, path=path, position=position) if subject_type == "LINE" else {}
 
-    def publish_inline_comments(self, comments: list[dict], disable_fallback: bool = False):
+    def publish_inline_comments(self, comments: list[dict], disable_fallback: bool = False,
+                                review_body: str = None, review_event: str = None):
+        """Post inline comments, optionally as part of one complete review.
+
+        Passing review_body/review_event folds the summary and the verdict into the same
+        review submission. GitHub notifies once per review, so that is the difference
+        between one notification and three.
+        """
         store = None
         pending_fingerprints = []
         dedup_code_fp_key = "_dedup_code_fp"
@@ -587,7 +594,12 @@ class GithubProvider(GitProvider):
             ]
         try:
             # publish all comments in a single message
-            self.pr.create_review(commit=self.last_commit_id, comments=comments)
+            review_kwargs = {"commit": self.last_commit_id, "comments": comments}
+            if review_body is not None:
+                review_kwargs["body"] = review_body
+            if review_event is not None:
+                review_kwargs["event"] = review_event
+            self.pr.create_review(**review_kwargs)
             # The whole batch posted; record its fingerprints so the rest of this
             # run dedups against them. Cross-run dedup relies on the markers in the
             # posted bodies, so comments the fallback below drops stay unrecorded
@@ -846,7 +858,8 @@ class GithubProvider(GitProvider):
                 get_logger().error(f"Failed to fix inline comment, error: {e}")
         return fixed_comments
 
-    def publish_code_suggestions(self, code_suggestions: list) -> bool:
+    def publish_code_suggestions(self, code_suggestions: list, review_body: str = None,
+                                 review_event: str = None) -> bool:
         """
         Publishes code suggestions as comments on the PR.
         """
@@ -895,7 +908,8 @@ class GithubProvider(GitProvider):
             post_parameters_list.append(post_parameters)
 
         try:
-            self.publish_inline_comments(post_parameters_list)
+            self.publish_inline_comments(post_parameters_list, review_body=review_body,
+                                         review_event=review_event)
             return True
         except Exception as e:
             get_logger().error(f"Failed to publish code suggestion, error: {e}")

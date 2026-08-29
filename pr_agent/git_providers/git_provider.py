@@ -239,7 +239,14 @@ class GitProvider(ABC):
         pass
 
     @abstractmethod
-    def publish_code_suggestions(self, code_suggestions: list) -> bool:
+    def publish_code_suggestions(self, code_suggestions: list, review_body: str = None,
+                                 review_event: str = None) -> bool:
+        """Publish inline suggestions.
+
+        Providers that can submit a whole review at once accept review_body/review_event
+        so the summary, the findings and the verdict arrive as a single notification;
+        the rest ignore them and keep publishing the comments on their own.
+        """
         pass
 
     @abstractmethod

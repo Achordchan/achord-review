@@ -45,6 +45,7 @@ MAX_REVIEW_COVERAGE_FILES = 50
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
 
 
+VERDICT_REASON_PREFIX = "**Verdict:** "
 VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
                           "REQUEST_CHANGES": "CHANGES_REQUESTED",
                           "COMMENT": "COMMENTED"}
@@ -88,6 +89,7 @@ class PRReviewer:
         self.remaining_files_list = []
         self.prediction = None
         self.review_data = None
+        self.deferred_review_comments = []
         question_str, answer_str = self._get_user_answers()
         self.pr_description, self.pr_description_files = (
             self.git_provider.get_pr_description(split_changes_walkthrough=True))
@@ -197,6 +199,10 @@ class PRReviewer:
             pr_review = self._prepare_pr_review()
             get_logger().debug(f"PR output", artifact=pr_review)
 
+            if self._single_review_submission_enabled() and get_settings().config.publish_output:
+                self._publish_single_review(pr_review)
+                return
+
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
             if not should_publish:
                 reason = "Review output is not published"
@@ -254,6 +260,12 @@ class PRReviewer:
     def _should_publish_review_no_suggestions(self, pr_review: str) -> bool:
         return get_settings().pr_reviewer.get('publish_output_no_suggestions', True) or "No major issues detected" not in pr_review
 
+    def _single_review_submission_enabled(self) -> bool:
+        """One review carrying summary, findings and verdict, instead of three notifications."""
+        return bool(get_settings().pr_reviewer.get('single_review_submission', False)
+                    and get_settings().pr_reviewer.get('enable_review_verdict', False)
+                    and callable(getattr(self.git_provider, "submit_review_verdict", None)))
+
     def _determine_review_verdict(self, data: dict) -> Tuple[str, str]:
         """Map a parsed review into a formal verdict, returning (event, reason)."""
         review = data.get('review') or {}
@@ -275,6 +287,34 @@ class PRReviewer:
         if issues:
             return "COMMENT", "non-blocking suggestions only"
         return "APPROVE", "no blocking issues found"
+
+    def _publish_single_review(self, pr_review: str) -> None:
+        """Post the summary, the inline findings and the verdict as one review.
+
+        Silence is the right outcome for a re-review that found nothing new: with no new
+        findings and an unchanged verdict there is nothing to say, and saying it anyway is
+        what turns every push into another notification.
+        """
+        comments = self.deferred_review_comments
+        try:
+            event, reason = self._determine_review_verdict(self.review_data or {})
+        except Exception as e:
+            get_logger().exception(f"Failed to determine review verdict, falling back to COMMENT, error: {e}")
+            event, reason = "COMMENT", "the review verdict could not be determined"
+
+        verdict_changed = self.git_provider.get_latest_own_review_state() != VERDICT_EVENT_TO_STATE.get(event)
+        if not comments and not verdict_changed:
+            get_logger().info(f"Nothing new to report and the verdict is unchanged ({event}); staying silent")
+            return
+
+        body = f"{pr_review}\n\n{VERDICT_REASON_PREFIX}{reason}."
+        get_logger().info(f"Submitting one review: {event} ({reason}), {len(comments)} inline finding(s)")
+        if comments:
+            if self.git_provider.publish_code_suggestions(comments, review_body=body, review_event=event):
+                return
+            get_logger().warning("Single review submission failed; falling back to a verdict-only review")
+        if not self.git_provider.submit_review_verdict(event, body):
+            get_logger().info(f"Review verdict {event} was not submitted")
 
     def _submit_review_verdict(self) -> None:
         if not get_settings().pr_reviewer.get('enable_review_verdict', False):
@@ -555,7 +595,16 @@ class PRReviewer:
                                      artifact={"issue": issue})
                 remaining_issues.append(issue)
 
-        if candidate_comments:
+        if candidate_comments and self._single_review_submission_enabled():
+            # Hand the comments back so run() can post them together with the summary and
+            # the verdict; they are only confirmed once that single review succeeds.
+            self.deferred_review_comments = list(candidate_comments.values())
+            for location_fingerprint in candidate_comments:
+                store.add(candidate_fingerprints[location_fingerprint])
+                store.add(location_fingerprint)
+                store.add(candidate_anchors[location_fingerprint])
+                published += len(candidate_issues[location_fingerprint])
+        elif candidate_comments:
             try:
                 self.git_provider.publish_code_suggestions(list(candidate_comments.values()))
             except Exception as e:

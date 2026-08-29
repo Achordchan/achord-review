@@ -121,6 +121,9 @@ enable_review_labels_effort=true
 # formal review verdict (APPROVE / REQUEST_CHANGES / COMMENT). Disabled by default: when off, the review
 # is published as a plain comment, exactly as before.
 enable_review_verdict=false
+# Post the summary, the inline findings and the verdict as a single review, so a PR gets
+# one notification per review instead of three. Requires enable_review_verdict.
+single_review_submission=false
 # severities (from the model's per-issue 'severity' field) that make the verdict REQUEST_CHANGES
 verdict_blocking_severities=["P0", "P1"]
 # treat a non-"No" answer in 'security_concerns' as blocking, regardless of issue severities
