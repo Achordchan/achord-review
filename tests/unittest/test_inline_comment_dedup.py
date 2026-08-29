@@ -610,3 +610,36 @@ def test_release_leaves_every_other_thread_suppressive():
         store.release({"a1b2c3d4e5f6"})
         assert not store.seen("a1b2c3d4e5f6")
         assert store.seen("d1b2c3d4e5f6")
+
+
+def test_anchor_fingerprint_ignores_wording():
+    """A reworded repeat of the same finding must not post a second comment."""
+    a = d.key_issue_anchor_fingerprint("a.py", 10, 12)
+    b = d.key_issue_anchor_fingerprint("a.py", 10, 12)
+    assert a == b
+
+
+def test_anchor_fingerprint_separates_locations():
+    base = d.key_issue_anchor_fingerprint("a.py", 10, 12)
+    assert d.key_issue_anchor_fingerprint("b.py", 10, 12) != base
+    assert d.key_issue_anchor_fingerprint("a.py", 11, 12) != base
+    assert d.key_issue_anchor_fingerprint("a.py", 10, 13) != base
+
+
+def test_anchor_marker_is_embedded_and_collected():
+    anchor = d.key_issue_anchor_fingerprint("a.py", 3, 4)
+    body = d.key_issue_body_with_markers("finding", "b" * 12, "c" * 12, anchor_fp=anchor)
+    assert f"<!-- pr-agent-key-issue-anchor: {anchor} -->" in body
+    assert anchor in d.marker_fingerprints(body)
+
+
+def test_anchor_marker_is_optional():
+    body = d.key_issue_body_with_markers("finding", "b" * 12, "c" * 12)
+    assert "key-issue-anchor" not in body
+
+
+def test_markers_do_not_change_the_body_fingerprint():
+    """Stripping must cover the new marker, or a marked body re-fingerprints differently."""
+    anchor = d.key_issue_anchor_fingerprint("a.py", 3, 4)
+    marked = d.key_issue_body_with_markers("finding", "b" * 12, "c" * 12, anchor_fp=anchor)
+    assert d.body_fingerprint("a.py", 3, marked) == d.body_fingerprint("a.py", 3, "finding")

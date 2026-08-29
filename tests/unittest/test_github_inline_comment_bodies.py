@@ -1,5 +1,5 @@
 from pr_agent.algo.inline_comment_dedup import can_verify_inline_comment_publication
-from pr_agent.git_providers.github_provider import GithubProvider
+from pr_agent.git_providers.github_provider import VERDICT_MARKER, GithubProvider
 
 
 class _Comment:
@@ -47,9 +47,12 @@ class TestInlineCommentBodies:
 
 
 class _Review:
-    def __init__(self, login, state):
+    """A verdict review by default; pass marked=False for the inline-comment carrier."""
+
+    def __init__(self, login, state, marked=True):
         self.user = type("U", (), {"login": login})()
         self.state = state
+        self.body = VERDICT_MARKER if marked else ""
 
 
 class _PRWithReviews(_PR):
@@ -99,3 +102,12 @@ class TestLatestOwnReviewState:
 
     def test_unconfigured_bot_user_disables_the_check(self):
         assert self._state([_Review("achord-review[bot]", "APPROVED")], bot_user="") is None
+
+    def test_the_inline_comment_carrier_review_is_ignored(self):
+        """Publishing inline comments creates an unmarked COMMENTED review of our own."""
+        reviews = [_Review("achord-review[bot]", "CHANGES_REQUESTED"),
+                   _Review("achord-review[bot]", "COMMENTED", marked=False)]
+        assert self._state(reviews) == "CHANGES_REQUESTED"
+
+    def test_only_carrier_reviews_means_no_standing_verdict(self):
+        assert self._state([_Review("achord-review[bot]", "COMMENTED", marked=False)]) is None

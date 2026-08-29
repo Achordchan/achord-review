@@ -38,7 +38,9 @@ from typing import Iterator, Optional
 BODY_MARKER_RE = re.compile(r"<!-- pr-agent-dedup: ([a-f0-9]{12}) -->")
 CODE_MARKER_RE = re.compile(r"<!-- pr-agent-dedup-code: ([a-f0-9]{12}) -->")
 KEY_ISSUE_LOCATION_MARKER_RE = re.compile(r"<!-- pr-agent-key-issue-location: ([a-f0-9]{12}) -->")
-_MARKER_RES = (BODY_MARKER_RE, CODE_MARKER_RE, KEY_ISSUE_LOCATION_MARKER_RE)
+KEY_ISSUE_ANCHOR_MARKER_RE = re.compile(r"<!-- pr-agent-key-issue-anchor: ([a-f0-9]{12}) -->")
+_MARKER_RES = (BODY_MARKER_RE, CODE_MARKER_RE, KEY_ISSUE_LOCATION_MARKER_RE,
+               KEY_ISSUE_ANCHOR_MARKER_RE)
 
 _LEAD_RE = re.compile(r"^\*\*Suggestion:\*\*\s*", re.IGNORECASE)
 _TAG_RE = re.compile(r"\[[^\]]+?,\s*importance:\s*\d+\]", re.IGNORECASE)
@@ -71,6 +73,8 @@ def _strip_markers(body: str) -> str:
     same as its original (markers are appended after marking)."""
     body = BODY_MARKER_RE.sub("", body or "")
     body = CODE_MARKER_RE.sub("", body)
+    body = KEY_ISSUE_LOCATION_MARKER_RE.sub("", body)
+    body = KEY_ISSUE_ANCHOR_MARKER_RE.sub("", body)
     return body
 
 
@@ -89,6 +93,17 @@ def key_issue_fingerprint(relevant_file: str, body: str) -> str:
 
 def key_issue_location_fingerprint(fingerprint: str, start_line: int, end_line: int) -> str:
     key = f"{fingerprint}|{start_line}|{end_line}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
+def key_issue_anchor_fingerprint(relevant_file: str, start_line: int, end_line: int) -> str:
+    """Identify a finding by where it points, independent of how it is worded.
+
+    The body fingerprint changes whenever the model rephrases the same finding, which
+    would post a second comment on the same lines on every re-review. The anchor stays
+    stable across rewordings, so one place gets at most one inline comment.
+    """
+    key = f"anchor|{relevant_file}|{start_line}|{end_line}"
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
@@ -128,9 +143,12 @@ def body_with_markers(body: str, body_fp: str, code_fp: "Optional[str]",
 
 
 def key_issue_body_with_markers(body: str, body_fp: str, location_fp: str,
-                                max_chars: Optional[int] = None) -> str:
+                                max_chars: Optional[int] = None,
+                                anchor_fp: Optional[str] = None) -> str:
     markers = (f"{build_markers(body_fp, None)}\n"
                f"<!-- pr-agent-key-issue-location: {location_fp} -->")
+    if anchor_fp:
+        markers += f"\n<!-- pr-agent-key-issue-anchor: {anchor_fp} -->"
     return _append_markers(body, markers, max_chars)
 
 

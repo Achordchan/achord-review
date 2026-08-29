@@ -13,6 +13,7 @@ from pr_agent.algo.inline_comment_dedup import (
     can_verify_inline_comment_publication,
     get_inline_comment_store,
     key_issue_body_with_markers,
+    key_issue_anchor_fingerprint,
     key_issue_fingerprint,
     key_issue_location_fingerprint,
 )
@@ -520,6 +521,7 @@ class PRReviewer:
         candidate_comments = {}
         candidate_issues = {}
         candidate_fingerprints = {}
+        candidate_anchors = {}
         published = 0
         for issue in issues:
             try:
@@ -528,7 +530,11 @@ class PRReviewer:
                     remaining_issues.append(issue)
                     continue
                 fingerprint = key_issue_fingerprint(comment["relevant_file"], comment["body"])
-                if store.seen(fingerprint):
+                anchor_fingerprint = key_issue_anchor_fingerprint(
+                    comment["relevant_file"], comment["relevant_lines_start"], comment["relevant_lines_end"])
+                # The body fingerprint misses a reworded repeat of the same finding, so the
+                # anchor is what keeps a re-review from stacking comments on one location.
+                if store.seen(fingerprint) or store.seen(anchor_fingerprint):
                     published += 1
                     continue
                 location_fingerprint = key_issue_location_fingerprint(
@@ -538,10 +544,12 @@ class PRReviewer:
                     continue
                 comment["body"] = key_issue_body_with_markers(
                     comment["body"], fingerprint, location_fingerprint,
-                    getattr(self.git_provider, "max_comment_chars", None))
+                    getattr(self.git_provider, "max_comment_chars", None),
+                    anchor_fp=anchor_fingerprint)
                 candidate_comments[location_fingerprint] = comment
                 candidate_issues[location_fingerprint] = [issue]
                 candidate_fingerprints[location_fingerprint] = fingerprint
+                candidate_anchors[location_fingerprint] = anchor_fingerprint
             except Exception as e:
                 get_logger().warning(f"Failed to prepare a review finding for inline publication, error: {e}",
                                      artifact={"issue": issue})
@@ -564,6 +572,7 @@ class PRReviewer:
                 if location_fingerprint in verified_locations:
                     store.add(candidate_fingerprints[location_fingerprint])
                     store.add(location_fingerprint)
+                    store.add(candidate_anchors[location_fingerprint])
                     published += len(issues_for_location)
                     continue
                 get_logger().warning("Failed to publish a review finding as an inline comment, "

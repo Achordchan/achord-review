@@ -45,6 +45,9 @@ def _next_page_url(headers: dict) -> str:
     return ""
 
 
+VERDICT_MARKER = "<!-- pr-agent-review-verdict -->"
+
+
 class GithubProvider(GitProvider):
     def __init__(self, pr_url: Optional[str] = None):
         self.repo_obj = None
@@ -1533,6 +1536,10 @@ class GithubProvider(GitProvider):
                 user = getattr(review, "user", None)
                 if getattr(user, "login", None) != bot_user:
                     continue
+                # Inline comments arrive as their own COMMENTED review, so only reviews
+                # carrying the verdict marker describe the standing verdict.
+                if VERDICT_MARKER not in (getattr(review, "body", "") or ""):
+                    continue
                 state = getattr(review, "state", None)
                 # PENDING/DISMISSED reviews say nothing about the standing verdict
                 if state in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
@@ -1554,9 +1561,10 @@ class GithubProvider(GitProvider):
             # GitHub rejects REQUEST_CHANGES and COMMENT reviews that carry an empty body
             if not body and event != "APPROVE":
                 body = "Automated review verdict."
-            kwargs = {"event": event}
-            if body:
-                kwargs["body"] = body
+            # Marked so a later run can tell its own verdict apart from the COMMENTED
+            # review that carries the inline comments.
+            body = f"{body}\n\n{VERDICT_MARKER}" if body else VERDICT_MARKER
+            kwargs = {"event": event, "body": body}
             if getattr(self, "last_commit_id", None):
                 kwargs["commit"] = self.last_commit_id
             res = self.pr.create_review(**kwargs)

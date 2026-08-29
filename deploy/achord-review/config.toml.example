@@ -54,6 +54,9 @@ verdict_blocking_severities = ["P0", "P1"]
 verdict_blocking_on_security_concerns = true
 num_max_findings = 5
 persistent_comment = true
+# The persistent summary comment is edited in place; the extra "review updated" notice
+# would add a second comment on every re-review.
+final_update_message = false
 # Anchor each finding as an inline comment on the offending line, the way Codex does,
 # instead of only listing it in the summary comment.
 inline_key_issues = true
