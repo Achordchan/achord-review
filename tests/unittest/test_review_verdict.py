@@ -1,6 +1,7 @@
 import pytest
 from jinja2 import Environment, StrictUndefined
 
+from pr_agent.algo.utils import format_severity_badge
 from pr_agent.config_loader import get_settings
 from pr_agent.tools.pr_reviewer import PRReviewer
 from tests.unittest._settings_helpers import restore_settings, snapshot_settings
@@ -159,3 +160,33 @@ class TestSubmitVerdictGuards:
         reviewer._submit_review_verdict()
         assert len(reviewer.git_provider.calls) == 1
         assert reviewer.git_provider.calls[0][0] == "APPROVE"
+
+
+class TestSeverityBadge:
+    """Severity is surfaced as a visible badge, and absent severities render nothing."""
+
+    @pytest.mark.parametrize("severity, icon", [
+        ("P0", "\U0001F534"), ("P1", "\U0001F7E0"),
+        ("P2", "\U0001F7E1"), ("P3", "\U0001F535"),
+    ])
+    def test_known_levels_render_icon_and_label(self, severity, icon):
+        badge = format_severity_badge(severity)
+        assert icon in badge
+        assert severity in badge
+
+    @pytest.mark.parametrize("severity", ["p1", " P1 "])
+    def test_matching_is_case_and_space_insensitive(self, severity):
+        assert "P1" in format_severity_badge(severity)
+
+    @pytest.mark.parametrize("severity", [None, "", "P9", "critical", 3, {}])
+    def test_unknown_severity_renders_nothing(self, severity):
+        assert format_severity_badge(severity) == ""
+
+    def test_plain_markdown_avoids_html_entities(self):
+        badge = format_severity_badge("P1", gfm_supported=False)
+        assert "&nbsp;" not in badge
+        assert "`P1`" in badge
+
+    def test_badge_ends_with_a_separator_so_titles_do_not_collide(self):
+        assert format_severity_badge("P0").endswith("&nbsp;")
+        assert format_severity_badge("P0", gfm_supported=False).endswith(" ")

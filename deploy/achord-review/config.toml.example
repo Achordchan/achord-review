@@ -51,6 +51,9 @@ verdict_blocking_severities = ["P0", "P1"]
 verdict_blocking_on_security_concerns = true
 num_max_findings = 5
 persistent_comment = true
+# Anchor each finding as an inline comment on the offending line, the way Codex does,
+# instead of only listing it in the summary comment.
+inline_key_issues = true
 # Noise reduction: drop the review dimensions that do not apply to this deployment.
 require_ticket_analysis_review = false
 require_can_be_split_review = false

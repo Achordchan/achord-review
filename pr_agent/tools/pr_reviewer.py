@@ -27,6 +27,7 @@ from pr_agent.algo.utils import (
     PRReviewIdentity,
     add_pr_review_identity,
     convert_to_markdown_v2,
+    format_severity_badge,
     github_action_output,
     load_yaml,
     show_relevant_configurations,
@@ -457,7 +458,8 @@ class PRReviewer:
             return None
 
         relevant_file = file.filename.strip()
-        body = f"**{issue_header}**\n\n{issue_content}" if issue_header else issue_content
+        badge = format_severity_badge(issue.get("severity"), self.git_provider.is_supported("gfm_markdown"))
+        body = f"{badge}**{issue_header}**\n\n{issue_content}" if issue_header else f"{badge}{issue_content}"
         return {"body": body,
                 "relevant_file": relevant_file,
                 "relevant_lines_start": start_line,

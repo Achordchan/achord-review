@@ -245,6 +245,22 @@ def _expand_minute_suffix(text: str) -> str:
     return re.sub(r'(\d+)m\b', r'\1 minutes', text)
 
 
+SEVERITY_ICONS = {"P0": "\U0001F534", "P1": "\U0001F7E0", "P2": "\U0001F7E1", "P3": "\U0001F535"}
+
+
+def format_severity_badge(severity, gfm_supported: bool = True) -> str:
+    """Render an issue's severity as a short badge, or "" when it is absent or unrecognised.
+
+    The trailing space/nbsp is part of the badge so callers can prepend it to a title
+    unconditionally without producing a stray separator when there is no severity.
+    """
+    level = str(severity or "").strip().upper()
+    icon = SEVERITY_ICONS.get(level)
+    if not icon:
+        return ""
+    return f"{icon}&nbsp;<code>{level}</code>&nbsp;" if gfm_supported else f"{icon} `{level}` "
+
+
 def convert_to_markdown_v2(output_data: dict,
                            gfm_supported: bool = True,
                            incremental_review=None,
@@ -414,6 +430,7 @@ def convert_to_markdown_v2(output_data: dict,
                         issue_header = issue.get('issue_header', '').strip()
                         if issue_header.lower() == 'possible bug':
                             issue_header = 'Possible Issue'  # Make the header less frightening
+                        severity_badge = format_severity_badge(issue.get('severity'), gfm_supported)
                         issue_content = issue.get('issue_content', '').strip()
                         start_line = int(str(issue.get('start_line', 0)).strip())
                         end_line = int(str(issue.get('end_line', 0)).strip())
@@ -427,16 +444,16 @@ def convert_to_markdown_v2(output_data: dict,
                         if gfm_supported:
                             if reference_link is not None and len(reference_link) > 0:
                                 if relevant_lines_str:
-                                    issue_str = f"<details><summary><a href='{reference_link}'><strong>{issue_header}</strong></a>\n\n{issue_content}\n</summary>\n\n{relevant_lines_str}\n\n</details>"
+                                    issue_str = f"<details><summary>{severity_badge}<a href='{reference_link}'><strong>{issue_header}</strong></a>\n\n{issue_content}\n</summary>\n\n{relevant_lines_str}\n\n</details>"
                                 else:
-                                    issue_str = f"<a href='{reference_link}'><strong>{issue_header}</strong></a><br>{issue_content}"
+                                    issue_str = f"{severity_badge}<a href='{reference_link}'><strong>{issue_header}</strong></a><br>{issue_content}"
                             else:
-                                issue_str = f"<strong>{issue_header}</strong><br>{issue_content}"
+                                issue_str = f"{severity_badge}<strong>{issue_header}</strong><br>{issue_content}"
                         else:
                             if reference_link is not None and len(reference_link) > 0:
-                                issue_str = f"[**{issue_header}**]({reference_link})\n\n{issue_content}\n\n"
+                                issue_str = f"{severity_badge}[**{issue_header}**]({reference_link})\n\n{issue_content}\n\n"
                             else:
-                                issue_str = f"**{issue_header}**\n\n{issue_content}\n\n"
+                                issue_str = f"{severity_badge}**{issue_header}**\n\n{issue_content}\n\n"
                         markdown_text += f"{issue_str}\n\n"
                     except Exception as e:
                         get_logger().exception(f"Failed to process 'Recommended focus areas for review': {e}")

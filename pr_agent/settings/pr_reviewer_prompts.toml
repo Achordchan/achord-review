@@ -98,9 +98,11 @@ class SubPR(BaseModel):
 
 class KeyIssuesComponentLink(BaseModel):
     relevant_file: str = Field(description="The full file path of the relevant file")
-    issue_header: str = Field(description="One or two word title for the issue. For example: 'Possible Bug', etc.")
 {%- if require_severity %}
+    issue_header: str = Field(description="A short imperative title, at most 8 words, naming the change that resolves the issue. For example: 'Include the final account in the comparison', 'Guard against a zero denominator'. Never a generic label such as 'Possible Bug'.")
     severity: str = Field(description="The severity of the issue. Must be exactly one of: 'P0' - critical security flaw, authentication/authorization bypass, secret leakage, or irreversible data loss; 'P1' - a definite functional bug, regression, serious logic error, data inconsistency, race condition, or breaking API change; 'P2' - an important missing edge case or error handling, a clear performance regression, or a materially missing test; 'P3' - a small maintenance improvement with a concrete benefit. Judge only the impact of the change introduced by this PR.")
+{%- else %}
+    issue_header: str = Field(description="One or two word title for the issue. For example: 'Possible Bug', etc.")
 {%- endif %}
     issue_content: str = Field(description="A short and concise description of the issue, why it matters, and the specific scenario or input that triggers it. Do not mention line numbers in this field.")
     start_line: int = Field(description="The start line that corresponds to this issue in the relevant file")
