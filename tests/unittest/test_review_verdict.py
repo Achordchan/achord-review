@@ -3,6 +3,7 @@ from jinja2 import Environment, StrictUndefined
 
 from pr_agent.algo.utils import format_severity_badge
 from pr_agent.config_loader import get_settings
+from pr_agent.git_providers.github_provider import GithubProvider
 from pr_agent.tools.pr_reviewer import PRReviewer
 from tests.unittest._settings_helpers import restore_settings, snapshot_settings
 
@@ -262,6 +263,9 @@ class TestSingleReviewSubmission:
         def get_latest_own_review_state(self):
             return self.current_state
 
+        def mark_review_verdict_body(self, body):
+            return f"{body}\n\n<!-- marked -->"
+
         def publish_code_suggestions(self, comments, review_body=None, review_event=None):
             self.suggestion_calls.append((comments, review_body, review_event))
             return self.publish_ok
@@ -320,3 +324,35 @@ class TestSingleReviewSubmission:
         reviewer._publish_single_review("SUMMARY")
         assert len(provider.suggestion_calls) == 1
         assert len(provider.verdict_calls) == 1, "the review must still reach the PR"
+
+
+class TestVerdictMarkerTravelsWithTheVerdict:
+    """Whichever review carries the verdict must be recognisable on the next run."""
+
+    def test_single_review_body_is_marked(self):
+        from pr_agent.git_providers.github_provider import VERDICT_MARKER
+
+        provider = TestSingleReviewSubmission._Provider()
+        provider.mark_review_verdict_body = (
+            lambda body: GithubProvider.mark_review_verdict_body(provider, body))
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
+        reviewer.deferred_review_comments = [{"body": "finding"}]
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY")
+        _, body, _ = provider.suggestion_calls[0]
+        assert VERDICT_MARKER in body
+
+    def test_marking_is_idempotent(self):
+        from pr_agent.git_providers.github_provider import VERDICT_MARKER
+
+        provider = GithubProvider.__new__(GithubProvider)
+        once = provider.mark_review_verdict_body("body")
+        assert provider.mark_review_verdict_body(once) == once
+        assert once.count(VERDICT_MARKER) == 1
+
+    def test_marking_an_empty_body_still_produces_a_marker(self):
+        from pr_agent.git_providers.github_provider import VERDICT_MARKER
+
+        provider = GithubProvider.__new__(GithubProvider)
+        assert provider.mark_review_verdict_body("") == VERDICT_MARKER

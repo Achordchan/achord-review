@@ -307,7 +307,10 @@ class PRReviewer:
             get_logger().info(f"Nothing new to report and the verdict is unchanged ({event}); staying silent")
             return
 
-        body = f"{pr_review}\n\n{VERDICT_REASON_PREFIX}{reason}."
+        # The marker must ride on whichever review carries the verdict, or the next run
+        # cannot see the standing verdict and repeats itself.
+        body = self.git_provider.mark_review_verdict_body(
+            f"{pr_review}\n\n{VERDICT_REASON_PREFIX}{reason}.")
         get_logger().info(f"Submitting one review: {event} ({reason}), {len(comments)} inline finding(s)")
         if comments:
             if self.git_provider.publish_code_suggestions(comments, review_body=body, review_event=event):

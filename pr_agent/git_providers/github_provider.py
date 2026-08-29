@@ -1540,6 +1540,11 @@ class GithubProvider(GitProvider):
         """
         return self.get_inline_comment_bodies()
 
+    def mark_review_verdict_body(self, body: str) -> str:
+        if VERDICT_MARKER in (body or ""):
+            return body
+        return f"{body}\n\n{VERDICT_MARKER}" if body else VERDICT_MARKER
+
     def get_latest_own_review_state(self) -> Optional[str]:
         bot_user = get_settings().get("github_app.bot_user", "")
         if not bot_user:
@@ -1577,8 +1582,7 @@ class GithubProvider(GitProvider):
                 body = "Automated review verdict."
             # Marked so a later run can tell its own verdict apart from the COMMENTED
             # review that carries the inline comments.
-            body = f"{body}\n\n{VERDICT_MARKER}" if body else VERDICT_MARKER
-            kwargs = {"event": event, "body": body}
+            kwargs = {"event": event, "body": self.mark_review_verdict_body(body)}
             if getattr(self, "last_commit_id", None):
                 kwargs["commit"] = self.last_commit_id
             res = self.pr.create_review(**kwargs)

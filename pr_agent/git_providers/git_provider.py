@@ -555,6 +555,10 @@ class GitProvider(ABC):
     def auto_approve(self) -> bool:
         return False
 
+    def mark_review_verdict_body(self, body: str) -> str:
+        """Stamp a review body so a later run recognises it as carrying the verdict."""
+        return body
+
     def get_latest_own_review_state(self) -> Optional[str]:
         """State of this bot's most recent formal review, or None when it has not reviewed yet.
 
