@@ -165,12 +165,20 @@ class TestSubmitVerdictGuards:
 class TestSeverityBadge:
     """Severity is surfaced as a visible badge, and absent severities render nothing."""
 
+    @pytest.mark.parametrize("severity, color", [
+        ("P0", "red"), ("P1", "orange"), ("P2", "yellow"), ("P3", "blue"),
+    ])
+    def test_known_levels_render_a_coloured_chip(self, severity, color):
+        badge = format_severity_badge(severity)
+        assert f"{severity}-{color}" in badge
+        assert badge.startswith("<sub>![")
+
     @pytest.mark.parametrize("severity, icon", [
         ("P0", "\U0001F534"), ("P1", "\U0001F7E0"),
         ("P2", "\U0001F7E1"), ("P3", "\U0001F535"),
     ])
-    def test_known_levels_render_icon_and_label(self, severity, icon):
-        badge = format_severity_badge(severity)
+    def test_plain_markdown_falls_back_to_an_emoji(self, severity, icon):
+        badge = format_severity_badge(severity, gfm_supported=False)
         assert icon in badge
         assert severity in badge
 
@@ -182,9 +190,10 @@ class TestSeverityBadge:
     def test_unknown_severity_renders_nothing(self, severity):
         assert format_severity_badge(severity) == ""
 
-    def test_plain_markdown_avoids_html_entities(self):
+    def test_plain_markdown_avoids_html_and_images(self):
         badge = format_severity_badge("P1", gfm_supported=False)
         assert "&nbsp;" not in badge
+        assert "img.shields.io" not in badge
         assert "`P1`" in badge
 
     def test_badge_ends_with_a_separator_so_titles_do_not_collide(self):

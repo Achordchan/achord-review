@@ -245,20 +245,26 @@ def _expand_minute_suffix(text: str) -> str:
     return re.sub(r'(\d+)m\b', r'\1 minutes', text)
 
 
+SEVERITY_COLORS = {"P0": "red", "P1": "orange", "P2": "yellow", "P3": "blue"}
 SEVERITY_ICONS = {"P0": "\U0001F534", "P1": "\U0001F7E0", "P2": "\U0001F7E1", "P3": "\U0001F535"}
 
 
 def format_severity_badge(severity, gfm_supported: bool = True) -> str:
     """Render an issue's severity as a short badge, or "" when it is absent or unrecognised.
 
-    The trailing space/nbsp is part of the badge so callers can prepend it to a title
-    unconditionally without producing a stray separator when there is no severity.
+    Rich markdown gets a coloured shields.io chip; anywhere else falls back to an emoji
+    and plain text, so the level stays readable even when images do not render. The
+    trailing separator is part of the badge, so callers can prepend it to a title
+    unconditionally without emitting a stray space when there is no severity.
     """
     level = str(severity or "").strip().upper()
-    icon = SEVERITY_ICONS.get(level)
-    if not icon:
+    color = SEVERITY_COLORS.get(level)
+    if not color:
         return ""
-    return f"{icon}&nbsp;<code>{level}</code>&nbsp;" if gfm_supported else f"{icon} `{level}` "
+    if not gfm_supported:
+        return f"{SEVERITY_ICONS[level]} `{level}` "
+    badge = f"https://img.shields.io/badge/{level}-{color}?style=flat"
+    return f"<sub>![{level}]({badge})</sub>&nbsp;"
 
 
 def convert_to_markdown_v2(output_data: dict,
