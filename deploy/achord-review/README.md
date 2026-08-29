@@ -89,6 +89,7 @@ docker compose logs -f achord-review
 | Draft PRs skipped | `github_app.feedback_on_draft_pr = false` |
 | Fork PRs skipped automatically | `github_app.skip_fork_prs = true` |
 | `@achord-review review` trigger | `github_app.mention_trigger` |
+| No "Preparing review..." placeholder comment | `config.publish_output_progress = false` |
 | P0/P1 → Request changes, P2/P3 → Comment, none → Approve | `pr_reviewer.enable_review_verdict` + `verdict_blocking_severities` |
 | Severity definitions and noise rules | `pr_reviewer.extra_instructions` |
 
