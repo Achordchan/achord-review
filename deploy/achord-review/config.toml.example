@@ -58,7 +58,10 @@ enable_review_verdict = true
 single_review_submission = true
 verdict_blocking_severities = ["P0", "P1"]
 verdict_blocking_on_security_concerns = true
-num_max_findings = 5
+# A ceiling, not a quota - the noise rules in extra_instructions decide what is worth
+# reporting, so a high ceiling costs nothing when a PR is clean and does not truncate a
+# genuinely messy one. Severity, not count, decides what blocks the merge.
+num_max_findings = 10
 persistent_comment = true
 # The persistent summary comment is edited in place; the extra "review updated" notice
 # would add a second comment on every re-review.
@@ -95,4 +98,6 @@ Scope:
 - Every issue must state a realistic trigger scenario and its impact.
 - If you are not confident an issue is real, omit it. An empty key_issues_to_review list is
   the correct output for a clean PR — never pad it with minor remarks.
+- The findings limit is a ceiling, not a target. Report every real issue up to it and then
+  stop; never extend a short list to approach the limit.
 """

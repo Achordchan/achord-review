@@ -1,5 +1,7 @@
 # achord-review
 
+[中文](README.zh-CN.md) · **English**
+
 A self-hosted AI pull-request reviewer that runs as a single GitHub App across every
 repository you install it on, and answers with **one review**: a summary, findings
 anchored to the offending lines, and a formal Approve / Request changes verdict.
