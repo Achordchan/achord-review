@@ -1,10 +1,10 @@
 import pytest
 from jinja2 import Environment, StrictUndefined
 
-from pr_agent.algo.utils import format_severity_badge
+from pr_agent.algo.utils import CLEAN_REVIEW_MESSAGES, clean_review_message, format_severity_badge
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers.github_provider import GithubProvider
-from pr_agent.tools.pr_reviewer import PRReviewer
+from pr_agent.tools.pr_reviewer import VERDICT_REASON_PREFIX, PRReviewer
 from tests.unittest._settings_helpers import restore_settings, snapshot_settings
 
 VERDICT_KEYS = [
@@ -12,6 +12,7 @@ VERDICT_KEYS = [
     "pr_reviewer.verdict_blocking_on_security_concerns",
     "pr_reviewer.enable_review_verdict",
     "config.publish_output",
+    "config.is_auto_command",
 ]
 
 
@@ -223,6 +224,7 @@ class TestVerdictIsNotRestated:
     def _run(self, current_state, review):
         get_settings().set("pr_reviewer.enable_review_verdict", True)
         get_settings().set("config.publish_output", True)
+        get_settings().set("config.is_auto_command", True)
         reviewer = PRReviewer.__new__(PRReviewer)
         reviewer.review_data = {"review": review}
         reviewer.git_provider = self._Provider(current_state)
@@ -288,6 +290,7 @@ class TestSingleReviewSubmission:
                 "key_issues_to_review": [{"severity": "P1", "issue_header": "x"}]}
 
     def _reviewer(self, provider, review, comments):
+        get_settings().set("config.is_auto_command", True)
         reviewer = PRReviewer.__new__(PRReviewer)
         reviewer.review_data = {"review": review}
         reviewer.deferred_review_comments = comments
@@ -379,6 +382,7 @@ class TestAlreadyReviewedCommit:
     """The same commit is never reviewed twice, however the model rewords itself."""
 
     def _run(self, reviewed_sha, head_sha, comments):
+        get_settings().set("config.is_auto_command", True)
         provider = TestSingleReviewSubmission._Provider(
             current_state="CHANGES_REQUESTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
         reviewer = PRReviewer.__new__(PRReviewer)
@@ -401,3 +405,90 @@ class TestAlreadyReviewedCommit:
         """An older review without a recorded commit must not block all future reviews."""
         provider = self._run(None, "abc123def456", [{"body": "finding"}])
         assert len(provider.suggestion_calls) == 1
+
+
+class TestExplicitRequestIsAlwaysAnswered:
+    """A review someone asked for is never swallowed by the repeat guards."""
+
+    def _run(self, review, comments, current_state, reviewed_sha, head_sha):
+        get_settings().set("config.is_auto_command", False)
+        provider = TestSingleReviewSubmission._Provider(
+            current_state=current_state, reviewed_sha=reviewed_sha, head_sha=head_sha)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": review}
+        reviewer.deferred_review_comments = comments
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY")
+        return provider
+
+    def test_same_commit_is_reviewed_again_on_request(self):
+        """@mention after a fix must answer, not look broken."""
+        provider = self._run(TestSingleReviewSubmission.BLOCKING, [{"body": "finding"}],
+                             "CHANGES_REQUESTED", "abc123def456", "abc123def456")
+        assert len(provider.suggestion_calls) == 1
+
+    def test_unchanged_verdict_with_no_findings_still_answers(self):
+        provider = self._run(TestSingleReviewSubmission.CLEAN, [], "APPROVED", "abc123", "abc123")
+        assert [event for event, _ in provider.verdict_calls] == ["APPROVE"]
+
+    def test_automatic_trigger_still_stays_silent(self):
+        """The guards must keep working for the webhook path they were written for."""
+        get_settings().set("config.is_auto_command", True)
+        provider = TestSingleReviewSubmission._Provider(
+            current_state="CHANGES_REQUESTED", reviewed_sha="abc123", head_sha="abc123")
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
+        reviewer.deferred_review_comments = [{"body": "finding"}]
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY")
+        assert provider.suggestion_calls == []
+        assert provider.verdict_calls == []
+
+    def test_standalone_verdict_is_resubmitted_on_request(self):
+        get_settings().set("pr_reviewer.enable_review_verdict", True)
+        get_settings().set("config.publish_output", True)
+        get_settings().set("config.is_auto_command", False)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": TestVerdictIsNotRestated.CLEAN}
+        reviewer.git_provider = TestVerdictIsNotRestated._Provider("APPROVED")
+        reviewer._submit_review_verdict()
+        assert reviewer.git_provider.calls == ["APPROVE"]
+
+
+class TestCleanReviewSignOff:
+    """A review that found nothing says so in words, not as an empty verdict."""
+
+    def _body(self, review, comments, head_sha="deadbeefcafe"):
+        get_settings().set("config.is_auto_command", True)
+        provider = TestSingleReviewSubmission._Provider(head_sha=head_sha)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": review}
+        reviewer.deferred_review_comments = comments
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY")
+        if comments:
+            return provider.suggestion_calls[0][1]
+        return provider.verdict_calls[0][1]
+
+    def test_clean_review_signs_off_warmly(self):
+        body = self._body(TestSingleReviewSubmission.CLEAN, [])
+        assert any(message in body for message in CLEAN_REVIEW_MESSAGES)
+        assert VERDICT_REASON_PREFIX not in body
+
+    def test_a_review_with_findings_keeps_the_verdict_line(self):
+        body = self._body(TestSingleReviewSubmission.BLOCKING, [{"body": "finding"}])
+        assert VERDICT_REASON_PREFIX in body
+        assert not any(message in body for message in CLEAN_REVIEW_MESSAGES)
+
+    def test_wording_is_stable_for_one_commit(self):
+        """A sign-off that rephrases itself on every run reads as chatter."""
+        assert clean_review_message("abc123") == clean_review_message("abc123")
+
+    def test_wording_varies_across_commits(self):
+        seen = {clean_review_message(f"commit{i}") for i in range(60)}
+        assert len(seen) > 1
+        assert seen <= set(CLEAN_REVIEW_MESSAGES)
+
+    def test_every_preset_is_reachable(self):
+        seen = {clean_review_message(f"commit{i}") for i in range(4000)}
+        assert seen == set(CLEAN_REVIEW_MESSAGES)

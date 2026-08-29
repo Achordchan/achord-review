@@ -267,6 +267,29 @@ def format_severity_badge(severity, gfm_supported: bool = True) -> str:
     return f"<sub>![{level}]({badge})</sub>&nbsp;"
 
 
+CLEAN_REVIEW_MESSAGES = (
+    "No blocking issues found in this diff. Looks good to merge.",
+    "Clean pass - nothing in this change needs fixing before merge.",
+    "Nothing blocking here. This one looks good to me.",
+    "No major issues found. This looks ready to merge.",
+    "Reviewed the whole diff and found nothing that should hold it up. Nice and tidy.",
+    "All clear - no blocking findings in these changes.",
+)
+
+
+def clean_review_message(seed: str = "") -> str:
+    """Pick the closing line for a review that found nothing worth reporting.
+
+    The wording is seeded by the reviewed commit rather than chosen at random, so a
+    repeat run on the same code says the same thing: a sign-off that rephrases itself
+    every time reads as chatter instead of a verdict.
+    """
+    if not CLEAN_REVIEW_MESSAGES:
+        return ""
+    digest = hashlib.sha256(str(seed or "").encode("utf-8")).hexdigest()
+    return CLEAN_REVIEW_MESSAGES[int(digest, 16) % len(CLEAN_REVIEW_MESSAGES)]
+
+
 def convert_to_markdown_v2(output_data: dict,
                            gfm_supported: bool = True,
                            incremental_review=None,

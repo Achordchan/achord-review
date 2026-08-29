@@ -27,6 +27,7 @@ from pr_agent.algo.utils import (
     PRReviewHeader,
     PRReviewIdentity,
     add_pr_review_identity,
+    clean_review_message,
     convert_to_markdown_v2,
     format_severity_badge,
     github_action_output,
@@ -266,6 +267,15 @@ class PRReviewer:
                     and get_settings().pr_reviewer.get('enable_review_verdict', False)
                     and callable(getattr(self.git_provider, "submit_review_verdict", None)))
 
+    def _is_manual_invocation(self) -> bool:
+        """True when a person asked for this review, rather than a webhook replaying it.
+
+        The repeat guards below exist to stop automatic triggers from re-posting a review
+        nobody asked for. Someone typing the command is not that: they are owed an answer,
+        and staying silent there reads as the bot being broken rather than as restraint.
+        """
+        return not get_settings().config.get("is_auto_command", False)
+
     def _determine_review_verdict(self, data: dict) -> Tuple[str, str]:
         """Map a parsed review into a formal verdict, returning (event, reason)."""
         review = data.get('review') or {}
@@ -291,9 +301,10 @@ class PRReviewer:
     def _publish_single_review(self, pr_review: str) -> None:
         """Post the summary, the inline findings and the verdict as one review.
 
-        Silence is the right outcome for a re-review that found nothing new: with no new
-        findings and an unchanged verdict there is nothing to say, and saying it anyway is
-        what turns every push into another notification.
+        Silence is the right outcome for an automatic re-review that found nothing new:
+        with no new findings and an unchanged verdict there is nothing to say, and saying
+        it anyway is what turns every push into another notification. A review someone
+        asked for is never silenced - see _is_manual_invocation.
         """
         comments = self.deferred_review_comments
         try:
@@ -304,20 +315,28 @@ class PRReviewer:
 
         previous_state, reviewed_sha = self.git_provider.get_latest_own_verdict()
         head_sha = self.git_provider.get_head_commit_sha()
-        # The model rewords a finding and shifts its line range between runs, so content
-        # matching cannot recognise a repeat. The reviewed commit can: the same code
-        # reviewed twice has nothing new to say, whatever the wording.
-        if reviewed_sha and head_sha and reviewed_sha == head_sha:
-            get_logger().info(f"Commit {head_sha[:8]} was already reviewed ({previous_state}); staying silent")
-            return
-        if not comments and previous_state == VERDICT_EVENT_TO_STATE.get(event):
-            get_logger().info(f"Nothing new to report and the verdict is unchanged ({event}); staying silent")
-            return
+        if self._is_manual_invocation():
+            get_logger().info("Review was requested explicitly; answering even if this commit was already reviewed")
+        else:
+            # The model rewords a finding and shifts its line range between runs, so content
+            # matching cannot recognise a repeat. The reviewed commit can: the same code
+            # reviewed twice has nothing new to say, whatever the wording.
+            if reviewed_sha and head_sha and reviewed_sha == head_sha:
+                get_logger().info(f"Commit {head_sha[:8]} was already reviewed ({previous_state}); staying silent")
+                return
+            if not comments and previous_state == VERDICT_EVENT_TO_STATE.get(event):
+                get_logger().info(f"Nothing new to report and the verdict is unchanged ({event}); staying silent")
+                return
 
+        # A review that found nothing should say so in words, not report an empty verdict:
+        # "no blocking issues found" is the same news, read as a shrug.
+        if event == "APPROVE" and not comments:
+            closing = f"\u2705 {clean_review_message(head_sha or '')}"
+        else:
+            closing = f"{VERDICT_REASON_PREFIX}{reason}."
         # The marker must ride on whichever review carries the verdict, or the next run
         # cannot see the standing verdict and repeats itself.
-        body = self.git_provider.mark_review_verdict_body(
-            f"{pr_review}\n\n{VERDICT_REASON_PREFIX}{reason}.")
+        body = self.git_provider.mark_review_verdict_body(f"{pr_review}\n\n{closing}")
         get_logger().info(f"Submitting one review: {event} ({reason}), {len(comments)} inline finding(s)")
         if comments:
             if self.git_provider.publish_code_suggestions(comments, review_body=body, review_event=event):
@@ -345,7 +364,7 @@ class PRReviewer:
         # so only speak up when the standing verdict actually changes.
         resulting_state = VERDICT_EVENT_TO_STATE.get(event)
         current_state = self.git_provider.get_latest_own_review_state()
-        if current_state is not None and current_state == resulting_state:
+        if current_state is not None and current_state == resulting_state and not self._is_manual_invocation():
             get_logger().info(f"Review verdict is unchanged ({current_state}), skipping submission")
             return
 
