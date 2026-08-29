@@ -476,7 +476,7 @@ class PRReviewer:
                 store.add_body(body)
         except Exception as e:
             get_logger().warning(
-                f"Inline key-issue publishing cannot verify new Azure DevOps threads, error: {e}; "
+                f"Inline key-issue publishing cannot verify newly published comments, error: {e}; "
                 "keeping findings in the review summary")
             return set()
         return {fingerprint for fingerprint in fingerprints if store.seen(fingerprint)}
@@ -500,7 +500,7 @@ class PRReviewer:
         store = get_inline_comment_store(self.git_provider)
         store.load()
         if store.load_failed:
-            get_logger().warning("Inline key-issue publishing cannot verify existing Azure DevOps threads; "
+            get_logger().warning("Inline key-issue publishing cannot verify existing inline comments; "
                                  "keeping findings in the review summary")
             return data
         remaining_issues = []
@@ -543,7 +543,7 @@ class PRReviewer:
                               "end_line": comment["relevant_lines_end"]}
                              for comment in candidate_comments.values()]
                 get_logger().warning(
-                    f"Failed to publish review findings as Azure DevOps threads, error: {e}",
+                    f"Failed to publish review findings as inline comments, error: {e}",
                     artifact={"locations": locations})
             verified_locations = self._published_inline_key_issue_fingerprints(store, set(candidate_comments))
             for location_fingerprint, comment in candidate_comments.items():
@@ -553,7 +553,7 @@ class PRReviewer:
                     store.add(location_fingerprint)
                     published += len(issues_for_location)
                     continue
-                get_logger().warning("Failed to publish a review finding as an Azure DevOps inline comment, "
+                get_logger().warning("Failed to publish a review finding as an inline comment, "
                                      "keeping it in the summary",
                                      artifact={"relevant_file": comment["relevant_file"],
                                                "start_line": comment["relevant_lines_start"],

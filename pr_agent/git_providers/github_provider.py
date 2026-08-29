@@ -1511,6 +1511,18 @@ class GithubProvider(GitProvider):
             get_logger().exception(f"Failed to auto-approve, error: {e}")
             return False
 
+    def get_inline_comment_bodies(self) -> list[str]:
+        """Bodies of every inline (review) comment currently on the PR."""
+        return [getattr(comment, "body", "") or "" for comment in self.pr.get_comments()]
+
+    def get_recent_inline_comment_bodies(self) -> list[str]:
+        """Re-read the inline comments so the caller can verify what actually landed.
+
+        GitHub silently drops a review comment whose line falls outside the diff, and
+        reports no error for it, so only reading the comments back proves publication.
+        """
+        return self.get_inline_comment_bodies()
+
     def submit_review_verdict(self, event: str, body: str = "") -> bool:
         expected_states = {"APPROVE": "APPROVED",
                            "REQUEST_CHANGES": "CHANGES_REQUESTED",
