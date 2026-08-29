@@ -1,5 +1,5 @@
 from pr_agent.algo.inline_comment_dedup import can_verify_inline_comment_publication
-from pr_agent.git_providers.github_provider import VERDICT_MARKER, GithubProvider
+from pr_agent.git_providers.github_provider import GithubProvider
 
 
 class _Comment:
@@ -49,10 +49,10 @@ class TestInlineCommentBodies:
 class _Review:
     """A verdict review by default; pass marked=False for the inline-comment carrier."""
 
-    def __init__(self, login, state, marked=True):
+    def __init__(self, login, state, marked=True, sha="abc1234"):
         self.user = type("U", (), {"login": login})()
         self.state = state
-        self.body = VERDICT_MARKER if marked else ""
+        self.body = f"<!-- pr-agent-review-verdict: {sha} -->" if marked else ""
 
 
 class _PRWithReviews(_PR):
@@ -111,3 +111,26 @@ class TestLatestOwnReviewState:
 
     def test_only_carrier_reviews_means_no_standing_verdict(self):
         assert self._state([_Review("achord-review[bot]", "COMMENTED", marked=False)]) is None
+
+
+class TestReviewedCommitIsRecovered:
+    def _verdict(self, reviews):
+        from unittest.mock import patch
+        provider = GithubProvider.__new__(GithubProvider)
+        provider.pr = _PRWithReviews(reviews)
+        with patch("pr_agent.git_providers.github_provider.get_settings") as mock:
+            mock.return_value.get.side_effect = lambda key, default=None: (
+                "achord-review[bot]" if key == "github_app.bot_user" else default)
+            return provider.get_latest_own_verdict()
+
+    def test_state_and_sha_come_back_together(self):
+        assert self._verdict([_Review("achord-review[bot]", "CHANGES_REQUESTED", sha="c0ffee1")]) == \
+            ("CHANGES_REQUESTED", "c0ffee1")
+
+    def test_marker_without_a_sha_is_still_a_verdict(self):
+        review = _Review("achord-review[bot]", "APPROVED")
+        review.body = "<!-- pr-agent-review-verdict -->"
+        assert self._verdict([review]) == ("APPROVED", None)
+
+    def test_no_verdict_review_returns_a_pair_of_nones(self):
+        assert self._verdict([]) == (None, None)

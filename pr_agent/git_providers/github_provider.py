@@ -45,7 +45,8 @@ def _next_page_url(headers: dict) -> str:
     return ""
 
 
-VERDICT_MARKER = "<!-- pr-agent-review-verdict -->"
+VERDICT_MARKER = "<!-- pr-agent-review-verdict"
+VERDICT_MARKER_RE = re.compile(r"<!-- pr-agent-review-verdict(?::\s*([0-9a-f]{7,40}))? -->")
 
 
 class GithubProvider(GitProvider):
@@ -1543,13 +1544,21 @@ class GithubProvider(GitProvider):
     def mark_review_verdict_body(self, body: str) -> str:
         if VERDICT_MARKER in (body or ""):
             return body
-        return f"{body}\n\n{VERDICT_MARKER}" if body else VERDICT_MARKER
+        # Record which commit was reviewed: a repeat request on unchanged code is then
+        # recognisable, and does not produce a second identical review.
+        sha = self.get_head_commit_sha() or ""
+        marker = f"{VERDICT_MARKER}: {sha} -->" if sha else f"{VERDICT_MARKER} -->"
+        return f"{body}\n\n{marker}" if body else marker
 
-    def get_latest_own_review_state(self) -> Optional[str]:
+    def get_head_commit_sha(self) -> Optional[str]:
+        return getattr(getattr(self, "last_commit_id", None), "sha", None)
+
+    def get_latest_own_verdict(self) -> tuple:
+        """(state, reviewed_commit_sha) of this bot's most recent verdict review."""
         bot_user = get_settings().get("github_app.bot_user", "")
         if not bot_user:
-            return None
-        latest = None
+            return None, None
+        latest = (None, None)
         try:
             for review in self.pr.get_reviews():
                 user = getattr(review, "user", None)
@@ -1557,16 +1566,20 @@ class GithubProvider(GitProvider):
                     continue
                 # Inline comments arrive as their own COMMENTED review, so only reviews
                 # carrying the verdict marker describe the standing verdict.
-                if VERDICT_MARKER not in (getattr(review, "body", "") or ""):
+                match = VERDICT_MARKER_RE.search(getattr(review, "body", "") or "")
+                if not match:
                     continue
                 state = getattr(review, "state", None)
                 # PENDING/DISMISSED reviews say nothing about the standing verdict
                 if state in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
-                    latest = state
+                    latest = (state, match.group(1))
         except Exception as e:
             get_logger().warning(f"Failed to read existing review states, error: {e}")
-            return None
+            return None, None
         return latest
+
+    def get_latest_own_review_state(self) -> Optional[str]:
+        return self.get_latest_own_verdict()[0]
 
     def submit_review_verdict(self, event: str, body: str = "") -> bool:
         expected_states = {"APPROVE": "APPROVED",

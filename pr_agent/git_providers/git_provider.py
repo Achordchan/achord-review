@@ -559,6 +559,13 @@ class GitProvider(ABC):
         """Stamp a review body so a later run recognises it as carrying the verdict."""
         return body
 
+    def get_latest_own_verdict(self) -> tuple:
+        """(state, reviewed_commit_sha) of this bot's most recent verdict review."""
+        return None, None
+
+    def get_head_commit_sha(self) -> Optional[str]:
+        return None
+
     def get_latest_own_review_state(self) -> Optional[str]:
         """State of this bot's most recent formal review, or None when it has not reviewed yet.
 

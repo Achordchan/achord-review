@@ -302,8 +302,15 @@ class PRReviewer:
             get_logger().exception(f"Failed to determine review verdict, falling back to COMMENT, error: {e}")
             event, reason = "COMMENT", "the review verdict could not be determined"
 
-        verdict_changed = self.git_provider.get_latest_own_review_state() != VERDICT_EVENT_TO_STATE.get(event)
-        if not comments and not verdict_changed:
+        previous_state, reviewed_sha = self.git_provider.get_latest_own_verdict()
+        head_sha = self.git_provider.get_head_commit_sha()
+        # The model rewords a finding and shifts its line range between runs, so content
+        # matching cannot recognise a repeat. The reviewed commit can: the same code
+        # reviewed twice has nothing new to say, whatever the wording.
+        if reviewed_sha and head_sha and reviewed_sha == head_sha:
+            get_logger().info(f"Commit {head_sha[:8]} was already reviewed ({previous_state}); staying silent")
+            return
+        if not comments and previous_state == VERDICT_EVENT_TO_STATE.get(event):
             get_logger().info(f"Nothing new to report and the verdict is unchanged ({event}); staying silent")
             return
 

@@ -254,11 +254,20 @@ class TestSingleReviewSubmission:
     """Summary, findings and verdict go out as one review, or not at all."""
 
     class _Provider:
-        def __init__(self, current_state=None, publish_ok=True):
+        def __init__(self, current_state=None, publish_ok=True, reviewed_sha=None,
+                     head_sha="deadbeefcafe"):
             self.current_state = current_state
             self.publish_ok = publish_ok
+            self.reviewed_sha = reviewed_sha
+            self.head_sha = head_sha
             self.suggestion_calls = []
             self.verdict_calls = []
+
+        def get_latest_own_verdict(self):
+            return self.current_state, self.reviewed_sha
+
+        def get_head_commit_sha(self):
+            return self.head_sha
 
         def get_latest_own_review_state(self):
             return self.current_state
@@ -352,7 +361,43 @@ class TestVerdictMarkerTravelsWithTheVerdict:
         assert once.count(VERDICT_MARKER) == 1
 
     def test_marking_an_empty_body_still_produces_a_marker(self):
-        from pr_agent.git_providers.github_provider import VERDICT_MARKER
+        from pr_agent.git_providers.github_provider import VERDICT_MARKER_RE
 
         provider = GithubProvider.__new__(GithubProvider)
-        assert provider.mark_review_verdict_body("") == VERDICT_MARKER
+        assert VERDICT_MARKER_RE.search(provider.mark_review_verdict_body(""))
+
+    def test_marker_records_the_reviewed_commit(self):
+        from pr_agent.git_providers.github_provider import VERDICT_MARKER_RE
+
+        provider = GithubProvider.__new__(GithubProvider)
+        provider.last_commit_id = type("C", (), {"sha": "abc1234def5678"})()
+        match = VERDICT_MARKER_RE.search(provider.mark_review_verdict_body("body"))
+        assert match.group(1) == "abc1234def5678"
+
+
+class TestAlreadyReviewedCommit:
+    """The same commit is never reviewed twice, however the model rewords itself."""
+
+    def _run(self, reviewed_sha, head_sha, comments):
+        provider = TestSingleReviewSubmission._Provider(
+            current_state="CHANGES_REQUESTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
+        reviewer.deferred_review_comments = comments
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY")
+        return provider
+
+    def test_same_commit_stays_silent_even_with_findings(self):
+        provider = self._run("abc123def456", "abc123def456", [{"body": "reworded finding"}])
+        assert provider.suggestion_calls == []
+        assert provider.verdict_calls == []
+
+    def test_new_commit_is_reviewed(self):
+        provider = self._run("abc123def456", "999999999999", [{"body": "finding"}])
+        assert len(provider.suggestion_calls) == 1
+
+    def test_missing_sha_falls_back_to_the_verdict_check(self):
+        """An older review without a recorded commit must not block all future reviews."""
+        provider = self._run(None, "abc123def456", [{"body": "finding"}])
+        assert len(provider.suggestion_calls) == 1
