@@ -20,3 +20,6 @@ poetry.lock
 
 # achord-review live deployment config (secrets)
 deploy/achord-review/config.toml
+
+# private project dossier (plaintext credentials, never commit)
+ACHORD-PRIVATE-*.md
