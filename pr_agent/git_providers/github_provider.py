@@ -1523,6 +1523,25 @@ class GithubProvider(GitProvider):
         """
         return self.get_inline_comment_bodies()
 
+    def get_latest_own_review_state(self) -> Optional[str]:
+        bot_user = get_settings().get("github_app.bot_user", "")
+        if not bot_user:
+            return None
+        latest = None
+        try:
+            for review in self.pr.get_reviews():
+                user = getattr(review, "user", None)
+                if getattr(user, "login", None) != bot_user:
+                    continue
+                state = getattr(review, "state", None)
+                # PENDING/DISMISSED reviews say nothing about the standing verdict
+                if state in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
+                    latest = state
+        except Exception as e:
+            get_logger().warning(f"Failed to read existing review states, error: {e}")
+            return None
+        return latest
+
     def submit_review_verdict(self, event: str, body: str = "") -> bool:
         expected_states = {"APPROVE": "APPROVED",
                            "REQUEST_CHANGES": "CHANGES_REQUESTED",

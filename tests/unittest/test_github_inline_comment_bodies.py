@@ -44,3 +44,58 @@ class TestInlineCommentBodies:
 
     def test_provider_now_satisfies_the_verification_gate(self):
         assert can_verify_inline_comment_publication(_provider([])) is True
+
+
+class _Review:
+    def __init__(self, login, state):
+        self.user = type("U", (), {"login": login})()
+        self.state = state
+
+
+class _PRWithReviews(_PR):
+    def __init__(self, reviews):
+        super().__init__([])
+        self._reviews = reviews
+
+    def get_reviews(self):
+        return self._reviews
+
+
+class TestLatestOwnReviewState:
+    @staticmethod
+    def _provider(reviews, bot_user="achord-review[bot]"):
+        from unittest.mock import patch
+        provider = GithubProvider.__new__(GithubProvider)
+        provider.pr = _PRWithReviews(reviews)
+        patcher = patch("pr_agent.git_providers.github_provider.get_settings")
+        mock = patcher.start()
+        mock.return_value.get.side_effect = lambda key, default=None: (
+            bot_user if key == "github_app.bot_user" else default)
+        return provider, patcher
+
+    def _state(self, reviews, bot_user="achord-review[bot]"):
+        provider, patcher = self._provider(reviews, bot_user)
+        try:
+            return provider.get_latest_own_review_state()
+        finally:
+            patcher.stop()
+
+    def test_no_reviews_returns_none(self):
+        assert self._state([]) is None
+
+    def test_other_reviewers_are_ignored(self):
+        assert self._state([_Review("someone-else", "APPROVED")]) is None
+
+    def test_latest_own_review_wins(self):
+        reviews = [_Review("achord-review[bot]", "CHANGES_REQUESTED"),
+                   _Review("achord-review[bot]", "APPROVED")]
+        assert self._state(reviews) == "APPROVED"
+
+    def test_pending_and_dismissed_states_are_skipped(self):
+        reviews = [_Review("achord-review[bot]", "CHANGES_REQUESTED"),
+                   _Review("achord-review[bot]", "DISMISSED"),
+                   _Review("achord-review[bot]", "PENDING")]
+        assert self._state(reviews) == "CHANGES_REQUESTED"
+
+    def test_unconfigured_bot_user_disables_the_check(self):
+        assert self._state([_Review("achord-review[bot]", "APPROVED")], bot_user="") is None

@@ -44,6 +44,11 @@ MAX_REVIEW_COVERAGE_FILES = 50
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
 
 
+VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
+                          "REQUEST_CHANGES": "CHANGES_REQUESTED",
+                          "COMMENT": "COMMENTED"}
+
+
 class PRReviewer:
     """
     The PRReviewer class is responsible for reviewing a pull request and generating feedback using an AI model.
@@ -285,6 +290,14 @@ class PRReviewer:
             # a verdict must never block the PR flow - fall back to a non-blocking comment
             get_logger().exception(f"Failed to determine review verdict, falling back to COMMENT, error: {e}")
             event, reason = "COMMENT", "the review verdict could not be determined"
+        # Restating an unchanged verdict adds a second identical review on every push,
+        # so only speak up when the standing verdict actually changes.
+        resulting_state = VERDICT_EVENT_TO_STATE.get(event)
+        current_state = self.git_provider.get_latest_own_review_state()
+        if current_state is not None and current_state == resulting_state:
+            get_logger().info(f"Review verdict is unchanged ({current_state}), skipping submission")
+            return
+
         get_logger().info(f"Submitting review verdict {event}: {reason}")
         if not self.git_provider.submit_review_verdict(event, f"Automated review: {reason}."):
             get_logger().info(f"Review verdict {event} was not submitted")

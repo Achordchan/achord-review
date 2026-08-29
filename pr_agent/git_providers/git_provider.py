@@ -548,6 +548,13 @@ class GitProvider(ABC):
     def auto_approve(self) -> bool:
         return False
 
+    def get_latest_own_review_state(self) -> Optional[str]:
+        """State of this bot's most recent formal review, or None when it has not reviewed yet.
+
+        Used to avoid restating an unchanged verdict on every push.
+        """
+        return None
+
     def submit_review_verdict(self, event: str, body: str = "") -> bool:
         """Submit a formal review verdict.
 

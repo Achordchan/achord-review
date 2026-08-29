@@ -128,6 +128,9 @@ class TestSubmitVerdictGuards:
         def __init__(self):
             self.calls = []
 
+        def get_latest_own_review_state(self):
+            return None
+
         def submit_review_verdict(self, event, body=""):
             self.calls.append((event, body))
             return True
@@ -199,3 +202,48 @@ class TestSeverityBadge:
     def test_badge_ends_with_a_separator_so_titles_do_not_collide(self):
         assert format_severity_badge("P0").endswith("&nbsp;")
         assert format_severity_badge("P0", gfm_supported=False).endswith(" ")
+
+
+class TestVerdictIsNotRestated:
+    """A verdict is submitted only when the standing review state actually changes."""
+
+    class _Provider:
+        def __init__(self, current_state):
+            self.current_state = current_state
+            self.calls = []
+
+        def get_latest_own_review_state(self):
+            return self.current_state
+
+        def submit_review_verdict(self, event, body=""):
+            self.calls.append(event)
+            return True
+
+    def _run(self, current_state, review):
+        get_settings().set("pr_reviewer.enable_review_verdict", True)
+        get_settings().set("config.publish_output", True)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": review}
+        reviewer.git_provider = self._Provider(current_state)
+        reviewer._submit_review_verdict()
+        return reviewer.git_provider.calls
+
+    CLEAN = {"security_concerns": "No", "key_issues_to_review": []}
+    BLOCKING = {"security_concerns": "No",
+                "key_issues_to_review": [{"severity": "P1", "issue_header": "x"}]}
+
+    @pytest.mark.parametrize("current_state, review", [
+        ("APPROVED", CLEAN),
+        ("CHANGES_REQUESTED", BLOCKING),
+    ])
+    def test_unchanged_verdict_is_not_resubmitted(self, current_state, review):
+        assert self._run(current_state, review) == []
+
+    @pytest.mark.parametrize("current_state, review, expected", [
+        (None, CLEAN, "APPROVE"),                       # first review on the PR
+        ("CHANGES_REQUESTED", CLEAN, "APPROVE"),        # issues were fixed
+        ("APPROVED", BLOCKING, "REQUEST_CHANGES"),      # a regression was pushed
+        ("COMMENTED", BLOCKING, "REQUEST_CHANGES"),
+    ])
+    def test_changed_verdict_is_submitted(self, current_state, review, expected):
+        assert self._run(current_state, review) == [expected]

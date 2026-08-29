@@ -12,6 +12,9 @@ custom_model_max_tokens = 1000000
 # Global ceiling: get_max_tokens() takes min(max_model_tokens, custom_model_max_tokens),
 # so leaving the 32000 default here would silently cap the 1M context.
 max_model_tokens = 200000
+# gpt-5.6-sol is a GPT-5 family model, so litellm forwards reasoning_effort to it.
+# The stock default is "medium"; code review is worth the extra thinking.
+reasoning_effort = "xhigh"
 
 [openai]
 key = "REPLACE_WITH_RELAY_API_KEY"
