@@ -365,6 +365,13 @@ class PRReviewer:
         _standing_verdict, and is what distinguishes a concurrent run from a repeat
         request.
         """
+        if not self.review_data:
+            # _prepare_pr_review returns "" and leaves review_data unset when the model
+            # output fails to parse. _determine_review_verdict reads empty data as "no
+            # blocking issues" and would sign this off as a clean APPROVE - a broken review
+            # dressed up as a pass, the one outcome the gate must never produce. Fail loudly
+            # instead, the same stance _submit_review_verdict takes for the older path.
+            raise ValueError("No parsed review data available; refusing to publish a review verdict")
         comments = self.deferred_review_comments
         try:
             event, reason = self._determine_review_verdict(self.review_data or {})

@@ -168,6 +168,17 @@ class TestSubmitVerdictGuards:
         assert len(reviewer.git_provider.calls) == 1
         assert reviewer.git_provider.calls[0][0] == "APPROVE"
 
+    @pytest.mark.parametrize("review_data", [None, {}])
+    def test_single_review_never_passes_an_unparsed_review(self, review_data):
+        # The single-review path shares the older path's rule: a parse failure leaves
+        # review_data empty, and _determine_review_verdict would read that as a clean
+        # APPROVE. It must fail loudly rather than sign off a review that never ran.
+        reviewer = self._reviewer(review_data)
+        reviewer.deferred_review_comments = []
+        with pytest.raises(ValueError):
+            reviewer._publish_single_review("", None)
+        assert reviewer.git_provider.calls == []
+
 
 class TestSeverityBadge:
     """Severity is surfaced as a visible badge, and absent severities render nothing."""
