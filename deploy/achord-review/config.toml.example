@@ -6,7 +6,10 @@
 
 [config]
 model = "openai/gpt-5.6-sol"
-fallback_models = ["openai/gpt-5.6-sol"]
+# Listing the same model twice was never a fallback route: it only doubled the cost of
+# every failure (2 models x 2 tenacity attempts x 3 SDK retries = 24 min at 120s each).
+# The retry layers underneath already cover a transient relay error.
+fallback_models = []
 # gpt-5.6-sol is not in litellm's built-in table, so its context size must be declared.
 custom_model_max_tokens = 1000000
 # Global ceiling: get_max_tokens() takes min(max_model_tokens, custom_model_max_tokens),
@@ -15,6 +18,11 @@ max_model_tokens = 200000
 # gpt-5.6-sol is a GPT-5 family model, so litellm forwards reasoning_effort to it.
 # The stock default is "medium"; code review is worth the extra thinking.
 reasoning_effort = "xhigh"
+# xhigh reasoning over a large diff takes minutes, not seconds: an 11-file, 17356-token
+# PR measured 208s. The stock 120s cut every attempt off mid-generation, so large PRs
+# failed every time while small ones passed. Keep this below the relay vhost's
+# proxy_read_timeout (3600s) with room to spare.
+ai_timeout = 600
 # The "Preparing review..." placeholder is posted, then deleted once the review lands -
 # but GitHub has already emailed it by then, so it costs a notification and delivers
 # nothing. The eyes reaction on the triggering comment already says "working on it".
