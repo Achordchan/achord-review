@@ -50,6 +50,9 @@ VERDICT_REASON_PREFIX = "**Verdict:** "
 VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
                           "REQUEST_CHANGES": "CHANGES_REQUESTED",
                           "COMMENT": "COMMENTED"}
+# "the standing verdict was never read", as distinct from "no verdict was standing".
+# Only the former disables the concurrent-run guard in _publish_single_review.
+_VERDICT_SNAPSHOT_UNSET = object()
 
 
 class PRReviewer:
@@ -193,6 +196,13 @@ class PRReviewer:
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
                 progress_response = self.git_provider.publish_comment("Preparing review...", is_temporary=True)
 
+            # Read before the model call, not after: the guard in _publish_single_review needs
+            # to tell a verdict that was already standing from one a concurrent run posted
+            # while this one was thinking.
+            verdict_sha_at_start = _VERDICT_SNAPSHOT_UNSET
+            if self._single_review_submission_enabled() and get_settings().config.publish_output:
+                verdict_sha_at_start = self._standing_verdict_sha()
+
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
                 return None
@@ -201,7 +211,7 @@ class PRReviewer:
             get_logger().debug(f"PR output", artifact=pr_review)
 
             if self._single_review_submission_enabled() and get_settings().config.publish_output:
-                self._publish_single_review(pr_review)
+                self._publish_single_review(pr_review, verdict_sha_at_start)
                 return
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -267,6 +277,18 @@ class PRReviewer:
                     and get_settings().pr_reviewer.get('enable_review_verdict', False)
                     and callable(getattr(self.git_provider, "submit_review_verdict", None)))
 
+    def _standing_verdict_sha(self):
+        """The commit that already carried this bot's verdict when the run began.
+
+        Returns _VERDICT_SNAPSHOT_UNSET when the standing verdict cannot be read, which
+        disables the concurrent-run guard rather than risking a silenced review.
+        """
+        try:
+            return self.git_provider.get_latest_own_verdict()[1]
+        except Exception as e:
+            get_logger().warning(f"Failed to read the standing review verdict, error: {e}")
+            return _VERDICT_SNAPSHOT_UNSET
+
     def _is_manual_invocation(self) -> bool:
         """True when a person asked for this review, rather than a webhook replaying it.
 
@@ -298,13 +320,17 @@ class PRReviewer:
             return "COMMENT", "non-blocking suggestions only"
         return "APPROVE", "no blocking issues found"
 
-    def _publish_single_review(self, pr_review: str) -> None:
+    def _publish_single_review(self, pr_review: str, verdict_sha_at_start=_VERDICT_SNAPSHOT_UNSET) -> None:
         """Post the summary, the inline findings and the verdict as one review.
 
         Silence is the right outcome for an automatic re-review that found nothing new:
         with no new findings and an unchanged verdict there is nothing to say, and saying
         it anyway is what turns every push into another notification. A review someone
         asked for is never silenced - see _is_manual_invocation.
+
+        'verdict_sha_at_start' is the commit that already carried a verdict when this run
+        began, from _standing_verdict_sha, and is what distinguishes a concurrent run from
+        a repeat request.
         """
         comments = self.deferred_review_comments
         try:
@@ -315,6 +341,18 @@ class PRReviewer:
 
         previous_state, reviewed_sha = self.git_provider.get_latest_own_verdict()
         head_sha = self.git_provider.get_head_commit_sha()
+        # A push and a mention of the bot in the comment that follows it are two triggers
+        # seconds apart on the same head commit, so both runs read the standing verdict
+        # before either posts and neither can see the other by state alone. A verdict for
+        # our own head commit that was not standing when we started came from that other
+        # run: it is the answer, and repeating it is the duplicate review. This outranks
+        # the explicit-request exemption below - the requester has been answered.
+        if (head_sha and reviewed_sha == head_sha
+                and verdict_sha_at_start is not _VERDICT_SNAPSHOT_UNSET
+                and verdict_sha_at_start != head_sha):
+            get_logger().info(f"Commit {head_sha[:8]} was reviewed by a concurrent run while this one was "
+                              f"thinking; staying silent instead of posting the same review twice")
+            return
         if self._is_manual_invocation():
             get_logger().info("Review was requested explicitly; answering even if this commit was already reviewed")
         else:

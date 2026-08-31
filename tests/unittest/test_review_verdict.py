@@ -492,3 +492,90 @@ class TestCleanReviewSignOff:
     def test_every_preset_is_reachable(self):
         seen = {clean_review_message(f"commit{i}") for i in range(4000)}
         assert seen == set(CLEAN_REVIEW_MESSAGES)
+
+
+class TestConcurrentRunOnTheSameCommit:
+    """A push trigger and a mention seconds apart must not answer the same commit twice."""
+
+    def _run(self, is_auto, verdict_sha_at_start, reviewed_sha, head_sha="cbdb45ab8b91"):
+        get_settings().set("config.is_auto_command", is_auto)
+        provider = TestSingleReviewSubmission._Provider(
+            current_state="CHANGES_REQUESTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
+        reviewer.deferred_review_comments = [{"body": "finding"}]
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY", verdict_sha_at_start)
+        return provider
+
+    def _silent(self, provider):
+        return provider.suggestion_calls == [] and provider.verdict_calls == []
+
+    @pytest.mark.parametrize("is_auto", [True, False])
+    def test_a_verdict_posted_mid_run_silences_this_one(self, is_auto):
+        """The other run reviewed our head commit while we were thinking - it answered."""
+        provider = self._run(is_auto, verdict_sha_at_start="46abe5425a92", reviewed_sha="cbdb45ab8b91")
+        assert self._silent(provider), "the same commit must not be reviewed twice"
+
+    def test_a_first_ever_review_is_still_silenced_by_a_concurrent_one(self):
+        provider = self._run(False, verdict_sha_at_start=None, reviewed_sha="cbdb45ab8b91")
+        assert self._silent(provider)
+
+    def test_a_repeat_request_on_an_already_reviewed_commit_is_still_answered(self):
+        """The verdict was standing before we started, so nobody has answered this request."""
+        provider = self._run(False, verdict_sha_at_start="cbdb45ab8b91", reviewed_sha="cbdb45ab8b91")
+        assert len(provider.suggestion_calls) == 1
+
+    def test_an_unread_snapshot_does_not_silence_a_requested_review(self):
+        """Failing to read the standing verdict must not turn into silence."""
+        from pr_agent.tools.pr_reviewer import _VERDICT_SNAPSHOT_UNSET
+
+        provider = self._run(False, verdict_sha_at_start=_VERDICT_SNAPSHOT_UNSET,
+                             reviewed_sha="cbdb45ab8b91")
+        assert len(provider.suggestion_calls) == 1
+
+    def test_a_new_commit_is_reviewed_normally(self):
+        provider = self._run(True, verdict_sha_at_start="46abe5425a92", reviewed_sha="46abe5425a92")
+        assert len(provider.suggestion_calls) == 1
+
+    def test_snapshot_failure_disables_the_guard_rather_than_the_review(self):
+        from pr_agent.tools.pr_reviewer import _VERDICT_SNAPSHOT_UNSET
+
+        class _Broken:
+            def get_latest_own_verdict(self):
+                raise RuntimeError("GitHub is down")
+
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.git_provider = _Broken()
+        assert reviewer._standing_verdict_sha() is _VERDICT_SNAPSHOT_UNSET
+
+
+class TestConcurrentApprovalIsNotDoubled:
+    """The verdict-only path (no inline findings) must be guarded too.
+
+    Observed on PR 27: push 0a7ad8c and a mention 19s later both approved it, and the
+    second approval was posted 87s after the first because the manual run is exempt from
+    the already-reviewed guard.
+    """
+
+    def _run(self, is_auto, verdict_sha_at_start, reviewed_sha, head_sha="0a7ad8cd1234"):
+        get_settings().set("config.is_auto_command", is_auto)
+        provider = TestSingleReviewSubmission._Provider(
+            current_state="COMMENTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.review_data = {"review": TestSingleReviewSubmission.CLEAN}
+        reviewer.deferred_review_comments = []
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY", verdict_sha_at_start)
+        return provider
+
+    def test_the_run_that_finishes_first_approves(self):
+        """Nothing landed while it was thinking, so the standing verdict is still the old commit."""
+        provider = self._run(True, verdict_sha_at_start="7100c7d89999", reviewed_sha="7100c7d89999")
+        assert [event for event, _ in provider.verdict_calls] == ["APPROVE"]
+
+    @pytest.mark.parametrize("is_auto", [True, False])
+    def test_the_run_that_finishes_second_stays_silent(self, is_auto):
+        provider = self._run(is_auto, verdict_sha_at_start="7100c7d89999", reviewed_sha="0a7ad8cd1234")
+        assert provider.verdict_calls == [], "one commit must not be approved twice"
+        assert provider.suggestion_calls == []

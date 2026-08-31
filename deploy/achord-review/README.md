@@ -77,7 +77,8 @@ docker compose logs -f achord-review
 2. Open a test PR in an installed repository → a review from `achord-review[bot]` appears,
    with a formal **Approve** / **Request changes** / **Comment** verdict.
 3. Comment `@achord-review review` on that PR → the comment gets a 👀 reaction, then a re-review.
-4. Push a new commit → the PR is reviewed again; superseded runs are cancelled automatically.
+4. Push a new commit → nothing happens on its own; mentioning the bot is what asks for the
+   re-review. Turn `github_app.handle_push_trigger` back on to review every push instead.
 
 ## Behaviour summary
 
@@ -85,7 +86,7 @@ docker compose logs -f achord-review
 |---|---|
 | Review only (no `/describe`, no `/improve`) | `github_app.pr_commands` |
 | Auto review on open / reopen / ready-for-review | `github_app.handle_pr_actions` |
-| Re-review on push | `github_app.handle_push_trigger` |
+| Re-review on push (off — a mention is the request) | `github_app.handle_push_trigger` |
 | Draft PRs skipped | `github_app.feedback_on_draft_pr = false` |
 | Fork PRs skipped automatically | `github_app.skip_fork_prs = true` |
 | `@achord-review review` trigger | `github_app.mention_trigger` |
