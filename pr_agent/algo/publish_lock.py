@@ -13,10 +13,14 @@ try:
 except ImportError:  # not POSIX - the lock degrades to a no-op, see publish_lock
     fcntl = None
 
-# The section under this lock is two provider calls, normally seconds. The timeout only
-# has to outlast a slow provider, not a model call, and waiting is cheaper than the
-# duplicate review a premature give-up allows.
-LOCK_TIMEOUT_SECONDS = 120.0
+# The section under this lock is two provider calls, normally seconds. A waiter that gives
+# up publishes unlocked, and it can then read a verdict the holder has not submitted yet -
+# the one case the standing-verdict comparison cannot catch, because the other review does
+# not exist to be seen. So the ceiling is set past anything two API calls can plausibly
+# take, matching config.ai_timeout; the caller waits in a thread, so this costs no
+# webhook responsiveness. Past it, liveness wins over exclusion on purpose: a review that
+# never lands reads as the bot being down, which is the worse failure of the two.
+LOCK_TIMEOUT_SECONDS = 600.0
 _POLL_SECONDS = 0.05
 
 

@@ -79,3 +79,30 @@ class TestPublishLock:
     def test_the_lock_file_lives_outside_the_repository(self):
         path = publish_lock_module._lock_path("pr-9")
         assert os.path.isabs(path) and path.endswith(".lock")
+
+
+class TestPublishingOffTheEventLoop:
+    """The publish path waits on the lock in a thread, so the wait can afford to be long.
+
+    That only holds if the request-scoped settings survive the hop. They are read from a
+    contextvar, and losing them would silently fall back to global_settings - the publish
+    would then run without the repo's overrides and without config.is_auto_command, which
+    decides whether a review may be silenced at all. Nothing would raise.
+    """
+
+    def test_request_scoped_settings_survive_the_thread_hop(self):
+        import asyncio
+
+        from starlette_context import context, request_cycle_context
+
+        async def main():
+            with request_cycle_context({"settings": "request-scoped"}):
+                def in_thread():
+                    try:
+                        return context["settings"]
+                    except Exception as e:
+                        return f"lost: {type(e).__name__}"
+
+                return await asyncio.to_thread(in_thread)
+
+        assert asyncio.run(main()) == "request-scoped"

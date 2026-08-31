@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import datetime
 import re
@@ -227,7 +228,10 @@ class PRReviewer:
             get_logger().debug(f"PR output", artifact=pr_review)
 
             if self._single_review_submission_enabled() and get_settings().config.publish_output:
-                self._publish_single_review(pr_review, verdict_at_start)
+                # Off the event loop: the publish path waits on a cross-process lock, and a
+                # worker that blocks there stops answering webhooks. In a thread the wait
+                # can be long enough to be worth having.
+                await asyncio.to_thread(self._publish_single_review, pr_review, verdict_at_start)
                 return
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
