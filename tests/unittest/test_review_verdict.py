@@ -627,3 +627,56 @@ class TestTwoConcurrentRequestsOnAnAlreadyReviewedCommit:
     def test_a_later_request_on_an_untouched_verdict_is_answered(self):
         provider = self._run(verdict_at_start=("cbdb45ab8b91", 11), review_id=11)
         assert len(provider.suggestion_calls) == 1
+
+
+class TestSuppressionNeedsEvidence:
+    """Two ways the guard could silence a review nobody actually answered."""
+
+    def _run(self, provider_kwargs, verdict_at_start):
+        get_settings().set("config.is_auto_command", False)
+        provider = TestSingleReviewSubmission._Provider(
+            current_state="COMMENTED", head_sha="cbdb45ab8b91", **provider_kwargs)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
+        reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
+        reviewer.deferred_review_comments = [{"body": "finding"}]
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY", verdict_at_start)
+        return provider
+
+    def test_a_dismissed_newest_review_does_not_look_like_a_concurrent_run(self):
+        """Dismissing the newest review makes an older one stand again - a smaller id."""
+        provider = self._run({"reviewed_sha": "cbdb45ab8b91", "review_id": 7},
+                             verdict_at_start=("cbdb45ab8b91", 10))
+        assert len(provider.suggestion_calls) == 1, "nobody answered this request"
+
+    def test_a_newer_review_still_suppresses(self):
+        provider = self._run({"reviewed_sha": "cbdb45ab8b91", "review_id": 12},
+                             verdict_at_start=("cbdb45ab8b91", 10))
+        assert provider.suggestion_calls == [] and provider.verdict_calls == []
+
+    def test_a_failed_snapshot_read_is_not_an_empty_verdict(self):
+        """A provider that swallows its own read error must not arm the guard."""
+        from pr_agent.git_providers.git_provider import OwnVerdict as _OV
+        from pr_agent.tools.pr_reviewer import _VERDICT_SNAPSHOT_UNSET
+
+        class _Unreadable:
+            def get_latest_own_verdict(self):
+                return _OV(read_ok=False)
+
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
+        reviewer.git_provider = _Unreadable()
+        assert reviewer._standing_verdict() is _VERDICT_SNAPSHOT_UNSET
+
+    def test_a_readable_empty_verdict_still_arms_the_guard(self):
+        from pr_agent.git_providers.git_provider import OwnVerdict as _OV
+
+        class _Empty:
+            def get_latest_own_verdict(self):
+                return _OV()
+
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
+        reviewer.git_provider = _Empty()
+        assert reviewer._standing_verdict() == (None, None)

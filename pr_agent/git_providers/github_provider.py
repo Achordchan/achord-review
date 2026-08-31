@@ -1575,7 +1575,7 @@ class GithubProvider(GitProvider):
                     latest = OwnVerdict(state, match.group(1), getattr(review, "id", None))
         except Exception as e:
             get_logger().warning(f"Failed to read existing review states, error: {e}")
-            return OwnVerdict()
+            return OwnVerdict(read_ok=False)
         return latest
 
     def get_latest_own_review_state(self) -> Optional[str]:

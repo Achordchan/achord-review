@@ -56,6 +56,21 @@ VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
 _VERDICT_SNAPSHOT_UNSET = object()
 
 
+def _verdict_is_newer(standing, snapshot) -> bool:
+    """True when `standing` was published after `snapshot` was taken.
+
+    Both are (commit, review id). GitHub review ids increase monotonically, so "newer" is
+    decidable; plain inequality is not enough, because dismissing the newest review makes
+    an older one stand again, and reading that as a concurrent publication would silence a
+    review nobody else had answered. Providers that expose no id fall back to the commit.
+    """
+    standing_sha, standing_id = standing
+    snapshot_sha, snapshot_id = snapshot
+    if isinstance(standing_id, int) and isinstance(snapshot_id, int):
+        return standing_id > snapshot_id
+    return standing_sha != snapshot_sha
+
+
 class PRReviewer:
     """
     The PRReviewer class is responsible for reviewing a pull request and generating feedback using an AI model.
@@ -291,10 +306,17 @@ class PRReviewer:
         """
         try:
             standing = self.git_provider.get_latest_own_verdict()
-            return standing.sha, standing.review_id
         except Exception as e:
             get_logger().warning(f"Failed to read the standing review verdict, error: {e}")
             return _VERDICT_SNAPSHOT_UNSET
+        if not getattr(standing, "read_ok", True):
+            # A provider that swallows its own read error hands back an empty verdict, which
+            # would snapshot as "nothing was standing" and make any verdict found later look
+            # like a concurrent run's - silencing a review someone asked for.
+            get_logger().warning("The standing review verdict could not be read; "
+                                 "the concurrent-run guard is off for this run")
+            return _VERDICT_SNAPSHOT_UNSET
+        return standing.sha, standing.review_id
 
     def _is_manual_invocation(self) -> bool:
         """True when a person asked for this review, rather than a webhook replaying it.
@@ -366,7 +388,7 @@ class PRReviewer:
         # outranks the explicit-request exemption below - the requester has been answered.
         if (head_sha and reviewed_sha == head_sha
                 and verdict_at_start is not _VERDICT_SNAPSHOT_UNSET
-                and (reviewed_sha, standing.review_id) != verdict_at_start):
+                and _verdict_is_newer((reviewed_sha, standing.review_id), verdict_at_start)):
             get_logger().info(f"Commit {head_sha[:8]} was reviewed by a concurrent run while this one was "
                               f"thinking; staying silent instead of posting the same review twice")
             return

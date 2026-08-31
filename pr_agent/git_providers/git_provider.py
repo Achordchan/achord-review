@@ -126,6 +126,11 @@ class OwnVerdict(NamedTuple):
     state: Optional[str] = None
     sha: Optional[str] = None
     review_id: Optional[int] = None
+    # False when the reviews could not be read at all. "No verdict is standing" and "we
+    # could not find out" look identical otherwise, and a caller that snapshots the
+    # standing verdict would read a failed snapshot as "nothing was there" - then treat
+    # whatever it finds later as a concurrent run's answer, and silence itself.
+    read_ok: bool = True
 
 
 class GitProvider(ABC):
