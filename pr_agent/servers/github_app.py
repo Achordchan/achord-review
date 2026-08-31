@@ -12,7 +12,7 @@ from starlette.middleware import Middleware
 from starlette_context import context
 from starlette_context.middleware import RawContextMiddleware
 
-from pr_agent.agent.pr_agent import PRAgent, prepare_command
+from pr_agent.agent.pr_agent import PRAgent, command2class, prepare_command
 from pr_agent.config_loader import get_settings, global_settings
 from pr_agent.git_providers import (get_git_provider,
                                     get_git_provider_with_context)
@@ -80,7 +80,8 @@ def normalize_mention_command(comment_body: str) -> str:
     """Translate a bot mention into the matching slash command.
 
     With github_app.mention_trigger set to "@achord-review", a comment saying
-    "@achord-review review" is handled exactly like "/review". A bare mention runs
+    "@achord-review review" is handled exactly like "/review". A bare mention, or one
+    followed by prose rather than a command name, runs
     github_app.mention_default_command. Returns the body unchanged when disabled.
     """
     mention = get_settings().get("github_app.mention_trigger", "")
@@ -89,6 +90,14 @@ def normalize_mention_command(comment_body: str) -> str:
     # only the text following the mention, on that same line, is treated as the command
     trailing = comment_body.split(mention, 1)[1].split("\n", 1)[0].strip()
     if not trailing:
+        return get_settings().get("github_app.mention_default_command", "/review")
+    if not trailing.startswith("/") and trailing.split()[0].lower() not in command2class:
+        # Prose, not a command - "@achord-review please take another look at this".
+        # Forwarding it as a command is worse than useless: handle_request returns on the
+        # unknown name before notify() runs, so the person gets no eyes reaction, no
+        # review and no error, which is indistinguishable from the bot being down.
+        # Mentioning the bot is itself the request, so treat it like a bare mention.
+        get_logger().info(f"Mention '{mention}' was followed by prose, not a command; using the default")
         return get_settings().get("github_app.mention_default_command", "/review")
     command = trailing if trailing.startswith("/") else f"/{trailing}"
     get_logger().info(f"Translated mention '{mention}' into command: {command}")

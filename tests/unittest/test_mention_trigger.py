@@ -46,6 +46,27 @@ class TestNormalizeMentionCommand:
         assert normalize_mention_command(comment_body) == expected
 
     @pytest.mark.parametrize("comment_body", [
+        "@achord-review please take another look",
+        "@achord-review 复审这一轮改动。",
+        "已按 P2 建议修复并推送 `5d4e26e`，请 @achord-review 复审这一轮改动。",
+        "@achord-review can you re-run this?",
+    ])
+    def test_prose_after_the_mention_falls_back_to_the_default_command(self, mention_enabled, comment_body):
+        # Prose used to be forwarded verbatim as "/复审这一轮改动。", which handle_request
+        # rejects as an unknown command before it adds the eyes reaction - no reaction, no
+        # review, no error, which looks exactly like the bot being down.
+        assert normalize_mention_command(comment_body) == "/review"
+
+    @pytest.mark.parametrize("comment_body, expected", [
+        ("@achord-review /describe", "/describe"),
+        ("@achord-review /nope", "/nope"),
+    ])
+    def test_an_explicit_slash_command_is_passed_through(self, mention_enabled, comment_body, expected):
+        # An explicit slash is a deliberate command: keep forwarding it, even when unknown,
+        # so it fails where the operator can see it rather than being silently rewritten.
+        assert normalize_mention_command(comment_body) == expected
+
+    @pytest.mark.parametrize("comment_body", [
         "/review",
         "a comment that does not mention the bot",
         "",
