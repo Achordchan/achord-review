@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import datetime
 import re
@@ -18,6 +19,7 @@ from pr_agent.algo.inline_comment_dedup import (
     key_issue_location_fingerprint,
 )
 from pr_agent.algo.pr_processing import add_ai_metadata_to_diff_files, get_pr_diff, retry_with_fallback_models
+from pr_agent.algo.publish_lock import publish_lock
 from pr_agent.algo.repo_context import build_repo_context
 from pr_agent.algo.run_details import get_run_details, init_run_details
 from pr_agent.algo.skills_loader import get_skills_context
@@ -50,6 +52,24 @@ VERDICT_REASON_PREFIX = "**Verdict:** "
 VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
                           "REQUEST_CHANGES": "CHANGES_REQUESTED",
                           "COMMENT": "COMMENTED"}
+# "the standing verdict was never read", as distinct from "no verdict was standing".
+# Only the former disables the concurrent-run guard in _publish_single_review.
+_VERDICT_SNAPSHOT_UNSET = object()
+
+
+def _verdict_is_newer(standing, snapshot) -> bool:
+    """True when `standing` was published after `snapshot` was taken.
+
+    Both are (commit, review id). GitHub review ids increase monotonically, so "newer" is
+    decidable; plain inequality is not enough, because dismissing the newest review makes
+    an older one stand again, and reading that as a concurrent publication would silence a
+    review nobody else had answered. Providers that expose no id fall back to the commit.
+    """
+    standing_sha, standing_id = standing
+    snapshot_sha, snapshot_id = snapshot
+    if isinstance(standing_id, int) and isinstance(snapshot_id, int):
+        return standing_id > snapshot_id
+    return standing_sha != snapshot_sha
 
 
 class PRReviewer:
@@ -193,6 +213,13 @@ class PRReviewer:
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
                 progress_response = self.git_provider.publish_comment("Preparing review...", is_temporary=True)
 
+            # Read before the model call, not after: the guard in _publish_single_review needs
+            # to tell a verdict that was already standing from one a concurrent run posted
+            # while this one was thinking.
+            verdict_at_start = _VERDICT_SNAPSHOT_UNSET
+            if self._single_review_submission_enabled() and get_settings().config.publish_output:
+                verdict_at_start = self._standing_verdict()
+
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
                 return None
@@ -201,7 +228,10 @@ class PRReviewer:
             get_logger().debug(f"PR output", artifact=pr_review)
 
             if self._single_review_submission_enabled() and get_settings().config.publish_output:
-                self._publish_single_review(pr_review)
+                # Off the event loop: the publish path waits on a cross-process lock, and a
+                # worker that blocks there stops answering webhooks. In a thread the wait
+                # can be long enough to be worth having.
+                await asyncio.to_thread(self._publish_single_review, pr_review, verdict_at_start)
                 return
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -267,6 +297,31 @@ class PRReviewer:
                     and get_settings().pr_reviewer.get('enable_review_verdict', False)
                     and callable(getattr(self.git_provider, "submit_review_verdict", None)))
 
+    def _standing_verdict(self):
+        """Identity of the verdict standing when this run began, as (commit, review id).
+
+        The commit alone is not enough to recognise a concurrent run: when the head
+        already carried a verdict, two concurrent re-reviews of it snapshot the same sha,
+        and the second could not tell the first's new review from the one that was
+        already there. The review id distinguishes them.
+
+        Returns _VERDICT_SNAPSHOT_UNSET when the standing verdict cannot be read, which
+        disables the concurrent-run guard rather than risking a silenced review.
+        """
+        try:
+            standing = self.git_provider.get_latest_own_verdict()
+        except Exception as e:
+            get_logger().warning(f"Failed to read the standing review verdict, error: {e}")
+            return _VERDICT_SNAPSHOT_UNSET
+        if not getattr(standing, "read_ok", True):
+            # A provider that swallows its own read error hands back an empty verdict, which
+            # would snapshot as "nothing was standing" and make any verdict found later look
+            # like a concurrent run's - silencing a review someone asked for.
+            get_logger().warning("The standing review verdict could not be read; "
+                                 "the concurrent-run guard is off for this run")
+            return _VERDICT_SNAPSHOT_UNSET
+        return standing.sha, standing.review_id
+
     def _is_manual_invocation(self) -> bool:
         """True when a person asked for this review, rather than a webhook replaying it.
 
@@ -298,13 +353,17 @@ class PRReviewer:
             return "COMMENT", "non-blocking suggestions only"
         return "APPROVE", "no blocking issues found"
 
-    def _publish_single_review(self, pr_review: str) -> None:
+    def _publish_single_review(self, pr_review: str, verdict_at_start=_VERDICT_SNAPSHOT_UNSET) -> None:
         """Post the summary, the inline findings and the verdict as one review.
 
         Silence is the right outcome for an automatic re-review that found nothing new:
         with no new findings and an unchanged verdict there is nothing to say, and saying
         it anyway is what turns every push into another notification. A review someone
         asked for is never silenced - see _is_manual_invocation.
+
+        'verdict_at_start' is the verdict standing when this run began, from
+        _standing_verdict, and is what distinguishes a concurrent run from a repeat
+        request.
         """
         comments = self.deferred_review_comments
         try:
@@ -313,8 +372,30 @@ class PRReviewer:
             get_logger().exception(f"Failed to determine review verdict, falling back to COMMENT, error: {e}")
             event, reason = "COMMENT", "the review verdict could not be determined"
 
-        previous_state, reviewed_sha = self.git_provider.get_latest_own_verdict()
+        # Reading the standing verdict and then publishing is two operations, and the guard
+        # below is only as good as the gap between them: two runs that finish together would
+        # both read the old verdict and both publish. Holding the lock across the whole
+        # section makes the check and the publication one step for a given PR.
+        with publish_lock(self.pr_url):
+            self._publish_single_review_locked(pr_review, verdict_at_start, comments, event, reason)
+
+    def _publish_single_review_locked(self, pr_review: str, verdict_at_start, comments, event, reason) -> None:
+        """The check-and-publish section of _publish_single_review, run under its lock."""
+        standing = self.git_provider.get_latest_own_verdict()
+        previous_state, reviewed_sha = standing.state, standing.sha
         head_sha = self.git_provider.get_head_commit_sha()
+        # A push and a mention of the bot in the comment that follows it are two triggers
+        # seconds apart on the same head commit, so both runs read the standing verdict
+        # before either posts and neither can see the other by state alone. A verdict for
+        # our own head commit that is not the one standing when we started came from that
+        # other run: it is the answer, and repeating it is the duplicate review. This
+        # outranks the explicit-request exemption below - the requester has been answered.
+        if (head_sha and reviewed_sha == head_sha
+                and verdict_at_start is not _VERDICT_SNAPSHOT_UNSET
+                and _verdict_is_newer((reviewed_sha, standing.review_id), verdict_at_start)):
+            get_logger().info(f"Commit {head_sha[:8]} was reviewed by a concurrent run while this one was "
+                              f"thinking; staying silent instead of posting the same review twice")
+            return
         if self._is_manual_invocation():
             get_logger().info("Review was requested explicitly; answering even if this commit was already reviewed")
         else:

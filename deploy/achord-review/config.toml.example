@@ -49,8 +49,12 @@ bot_user = "achord-review[bot]"
 pr_commands = ["/review"]
 handle_pr_actions = ["opened", "reopened", "ready_for_review"]
 feedback_on_draft_pr = false
-# Re-review on every push; PR-Agent already cancels superseded runs.
-handle_push_trigger = true
+# Off: the workflow here is to push and then ask the bot in the comment that follows.
+# With the push trigger on, those are two triggers seconds apart on the same head commit,
+# so both runs pay for a full model call and only one of them can speak - see the
+# concurrent-run guard in pr_reviewer._publish_single_review. Mentioning the bot is the
+# request; the push on its own is not.
+handle_push_trigger = false
 push_commands = ["/review"]
 # "@achord-review review" is handled exactly like "/review".
 mention_trigger = "@achord-review"

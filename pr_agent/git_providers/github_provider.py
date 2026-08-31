@@ -31,7 +31,7 @@ from ..config_loader import get_settings
 from ..log import get_logger
 from ..servers.utils import RateLimitExceeded
 from .git_provider import (MAX_FILES_ALLOWED_FULL, FilePatchInfo, GitProvider,
-                           IncrementalPR, get_cached_global_settings)
+                           IncrementalPR, OwnVerdict, get_cached_global_settings)
 
 
 def _next_page_url(headers: dict) -> str:
@@ -1553,12 +1553,12 @@ class GithubProvider(GitProvider):
     def get_head_commit_sha(self) -> Optional[str]:
         return getattr(getattr(self, "last_commit_id", None), "sha", None)
 
-    def get_latest_own_verdict(self) -> tuple:
-        """(state, reviewed_commit_sha) of this bot's most recent verdict review."""
+    def get_latest_own_verdict(self) -> OwnVerdict:
+        """This bot's most recent verdict review - see OwnVerdict."""
         bot_user = get_settings().get("github_app.bot_user", "")
         if not bot_user:
-            return None, None
-        latest = (None, None)
+            return OwnVerdict()
+        latest = OwnVerdict()
         try:
             for review in self.pr.get_reviews():
                 user = getattr(review, "user", None)
@@ -1572,14 +1572,14 @@ class GithubProvider(GitProvider):
                 state = getattr(review, "state", None)
                 # PENDING/DISMISSED reviews say nothing about the standing verdict
                 if state in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
-                    latest = (state, match.group(1))
+                    latest = OwnVerdict(state, match.group(1), getattr(review, "id", None))
         except Exception as e:
             get_logger().warning(f"Failed to read existing review states, error: {e}")
-            return None, None
+            return OwnVerdict(read_ok=False)
         return latest
 
     def get_latest_own_review_state(self) -> Optional[str]:
-        return self.get_latest_own_verdict()[0]
+        return self.get_latest_own_verdict().state
 
     def submit_review_verdict(self, event: str, body: str = "") -> bool:
         expected_states = {"APPROVE": "APPROVED",
