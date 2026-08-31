@@ -139,6 +139,7 @@ class TestSubmitVerdictGuards:
 
     def _reviewer(self, review_data):
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = review_data
         reviewer.git_provider = self._Provider()
         return reviewer
@@ -226,6 +227,7 @@ class TestVerdictIsNotRestated:
         get_settings().set("config.publish_output", True)
         get_settings().set("config.is_auto_command", True)
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": review}
         reviewer.git_provider = self._Provider(current_state)
         reviewer._submit_review_verdict()
@@ -292,6 +294,7 @@ class TestSingleReviewSubmission:
     def _reviewer(self, provider, review, comments):
         get_settings().set("config.is_auto_command", True)
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": review}
         reviewer.deferred_review_comments = comments
         reviewer.git_provider = provider
@@ -348,6 +351,7 @@ class TestVerdictMarkerTravelsWithTheVerdict:
         provider.mark_review_verdict_body = (
             lambda body: GithubProvider.mark_review_verdict_body(provider, body))
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
         reviewer.deferred_review_comments = [{"body": "finding"}]
         reviewer.git_provider = provider
@@ -386,6 +390,7 @@ class TestAlreadyReviewedCommit:
         provider = TestSingleReviewSubmission._Provider(
             current_state="CHANGES_REQUESTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
         reviewer.deferred_review_comments = comments
         reviewer.git_provider = provider
@@ -415,6 +420,7 @@ class TestExplicitRequestIsAlwaysAnswered:
         provider = TestSingleReviewSubmission._Provider(
             current_state=current_state, reviewed_sha=reviewed_sha, head_sha=head_sha)
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": review}
         reviewer.deferred_review_comments = comments
         reviewer.git_provider = provider
@@ -437,6 +443,7 @@ class TestExplicitRequestIsAlwaysAnswered:
         provider = TestSingleReviewSubmission._Provider(
             current_state="CHANGES_REQUESTED", reviewed_sha="abc123", head_sha="abc123")
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
         reviewer.deferred_review_comments = [{"body": "finding"}]
         reviewer.git_provider = provider
@@ -449,6 +456,7 @@ class TestExplicitRequestIsAlwaysAnswered:
         get_settings().set("config.publish_output", True)
         get_settings().set("config.is_auto_command", False)
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": TestVerdictIsNotRestated.CLEAN}
         reviewer.git_provider = TestVerdictIsNotRestated._Provider("APPROVED")
         reviewer._submit_review_verdict()
@@ -462,6 +470,7 @@ class TestCleanReviewSignOff:
         get_settings().set("config.is_auto_command", True)
         provider = TestSingleReviewSubmission._Provider(head_sha=head_sha)
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": review}
         reviewer.deferred_review_comments = comments
         reviewer.git_provider = provider
@@ -502,6 +511,7 @@ class TestConcurrentRunOnTheSameCommit:
         provider = TestSingleReviewSubmission._Provider(
             current_state="CHANGES_REQUESTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
         reviewer.deferred_review_comments = [{"body": "finding"}]
         reviewer.git_provider = provider
@@ -546,6 +556,7 @@ class TestConcurrentRunOnTheSameCommit:
                 raise RuntimeError("GitHub is down")
 
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.git_provider = _Broken()
         assert reviewer._standing_verdict_sha() is _VERDICT_SNAPSHOT_UNSET
 
@@ -563,6 +574,7 @@ class TestConcurrentApprovalIsNotDoubled:
         provider = TestSingleReviewSubmission._Provider(
             current_state="COMMENTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
         reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": TestSingleReviewSubmission.CLEAN}
         reviewer.deferred_review_comments = []
         reviewer.git_provider = provider

@@ -18,6 +18,7 @@ from pr_agent.algo.inline_comment_dedup import (
     key_issue_location_fingerprint,
 )
 from pr_agent.algo.pr_processing import add_ai_metadata_to_diff_files, get_pr_diff, retry_with_fallback_models
+from pr_agent.algo.publish_lock import publish_lock
 from pr_agent.algo.repo_context import build_repo_context
 from pr_agent.algo.run_details import get_run_details, init_run_details
 from pr_agent.algo.skills_loader import get_skills_context
@@ -339,6 +340,15 @@ class PRReviewer:
             get_logger().exception(f"Failed to determine review verdict, falling back to COMMENT, error: {e}")
             event, reason = "COMMENT", "the review verdict could not be determined"
 
+        # Reading the standing verdict and then publishing is two operations, and the guard
+        # below is only as good as the gap between them: two runs that finish together would
+        # both read the old verdict and both publish. Holding the lock across the whole
+        # section makes the check and the publication one step for a given PR.
+        with publish_lock(self.pr_url):
+            self._publish_single_review_locked(pr_review, verdict_sha_at_start, comments, event, reason)
+
+    def _publish_single_review_locked(self, pr_review: str, verdict_sha_at_start, comments, event, reason) -> None:
+        """The check-and-publish section of _publish_single_review, run under its lock."""
         previous_state, reviewed_sha = self.git_provider.get_latest_own_verdict()
         head_sha = self.git_provider.get_head_commit_sha()
         # A push and a mention of the bot in the comment that follows it are two triggers
