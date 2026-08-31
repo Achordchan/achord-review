@@ -1,4 +1,5 @@
 from pr_agent.algo.inline_comment_dedup import can_verify_inline_comment_publication
+from pr_agent.git_providers.git_provider import OwnVerdict
 from pr_agent.git_providers.github_provider import GithubProvider
 
 
@@ -124,13 +125,20 @@ class TestReviewedCommitIsRecovered:
             return provider.get_latest_own_verdict()
 
     def test_state_and_sha_come_back_together(self):
-        assert self._verdict([_Review("achord-review[bot]", "CHANGES_REQUESTED", sha="c0ffee1")]) == \
-            ("CHANGES_REQUESTED", "c0ffee1")
+        verdict = self._verdict([_Review("achord-review[bot]", "CHANGES_REQUESTED", sha="c0ffee1")])
+        assert (verdict.state, verdict.sha) == ("CHANGES_REQUESTED", "c0ffee1")
 
     def test_marker_without_a_sha_is_still_a_verdict(self):
         review = _Review("achord-review[bot]", "APPROVED")
         review.body = "<!-- pr-agent-review-verdict -->"
-        assert self._verdict([review]) == ("APPROVED", None)
+        verdict = self._verdict([review])
+        assert (verdict.state, verdict.sha) == ("APPROVED", None)
 
-    def test_no_verdict_review_returns_a_pair_of_nones(self):
-        assert self._verdict([]) == (None, None)
+    def test_no_verdict_review_returns_an_empty_verdict(self):
+        assert self._verdict([]) == OwnVerdict()
+
+    def test_the_review_id_identifies_which_verdict_is_standing(self):
+        """Two concurrent re-reviews of one commit share a sha; only the id separates them."""
+        review = _Review("achord-review[bot]", "COMMENTED", sha="c0ffee1")
+        review.id = 4242
+        assert self._verdict([review]).review_id == 4242

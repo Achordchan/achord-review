@@ -11,7 +11,8 @@ from pr_agent.algo.publish_lock import publish_lock
 def _hold(key, path, seconds):
     """Take the lock in a separate process and hold it for `seconds`."""
     with publish_lock(key) as held:
-        open(path, "w").write("1" if held else "0")
+        with open(path, "w") as f:
+            f.write("1" if held else "0")
         time.sleep(seconds)
 
 

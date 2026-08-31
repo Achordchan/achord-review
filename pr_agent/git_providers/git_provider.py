@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import time
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 from pr_agent.algo.types import FilePatchInfo
 from pr_agent.algo.utils import (Range, add_pr_review_identity,
@@ -113,6 +113,19 @@ def get_git_ssl_env() -> dict[str, str]:
     if chosen_cert_file:
         returned_env.update({"GIT_SSL_CAINFO": chosen_cert_file, "REQUESTS_CA_BUNDLE": chosen_cert_file})
     return returned_env
+
+
+class OwnVerdict(NamedTuple):
+    """This bot's most recent verdict review: what it said, on which commit, and which review.
+
+    The id matters as much as the sha. A run that snapshots the standing verdict before
+    thinking and compares afterwards can only spot a concurrent run's review if the two
+    are distinguishable - and when the head commit already carried a verdict, two
+    concurrent re-reviews of it share the same sha. The id is what separates them.
+    """
+    state: Optional[str] = None
+    sha: Optional[str] = None
+    review_id: Optional[int] = None
 
 
 class GitProvider(ABC):
@@ -559,9 +572,9 @@ class GitProvider(ABC):
         """Stamp a review body so a later run recognises it as carrying the verdict."""
         return body
 
-    def get_latest_own_verdict(self) -> tuple:
-        """(state, reviewed_commit_sha) of this bot's most recent verdict review."""
-        return None, None
+    def get_latest_own_verdict(self) -> "OwnVerdict":
+        """This bot's most recent verdict review - see OwnVerdict."""
+        return OwnVerdict()
 
     def get_head_commit_sha(self) -> Optional[str]:
         return None

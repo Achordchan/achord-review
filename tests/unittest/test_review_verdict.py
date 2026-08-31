@@ -3,6 +3,7 @@ from jinja2 import Environment, StrictUndefined
 
 from pr_agent.algo.utils import CLEAN_REVIEW_MESSAGES, clean_review_message, format_severity_badge
 from pr_agent.config_loader import get_settings
+from pr_agent.git_providers.git_provider import OwnVerdict
 from pr_agent.git_providers.github_provider import GithubProvider
 from pr_agent.tools.pr_reviewer import VERDICT_REASON_PREFIX, PRReviewer
 from tests.unittest._settings_helpers import restore_settings, snapshot_settings
@@ -259,16 +260,17 @@ class TestSingleReviewSubmission:
 
     class _Provider:
         def __init__(self, current_state=None, publish_ok=True, reviewed_sha=None,
-                     head_sha="deadbeefcafe"):
+                     head_sha="deadbeefcafe", review_id=None):
             self.current_state = current_state
             self.publish_ok = publish_ok
             self.reviewed_sha = reviewed_sha
             self.head_sha = head_sha
+            self.review_id = review_id
             self.suggestion_calls = []
             self.verdict_calls = []
 
         def get_latest_own_verdict(self):
-            return self.current_state, self.reviewed_sha
+            return OwnVerdict(self.current_state, self.reviewed_sha, self.review_id)
 
         def get_head_commit_sha(self):
             return self.head_sha
@@ -506,16 +508,17 @@ class TestCleanReviewSignOff:
 class TestConcurrentRunOnTheSameCommit:
     """A push trigger and a mention seconds apart must not answer the same commit twice."""
 
-    def _run(self, is_auto, verdict_sha_at_start, reviewed_sha, head_sha="cbdb45ab8b91"):
+    def _run(self, is_auto, verdict_at_start, reviewed_sha, head_sha="cbdb45ab8b91", review_id=1):
         get_settings().set("config.is_auto_command", is_auto)
         provider = TestSingleReviewSubmission._Provider(
-            current_state="CHANGES_REQUESTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
+            current_state="CHANGES_REQUESTED", reviewed_sha=reviewed_sha, head_sha=head_sha,
+            review_id=review_id)
         reviewer = PRReviewer.__new__(PRReviewer)
         reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
         reviewer.deferred_review_comments = [{"body": "finding"}]
         reviewer.git_provider = provider
-        reviewer._publish_single_review("SUMMARY", verdict_sha_at_start)
+        reviewer._publish_single_review("SUMMARY", verdict_at_start)
         return provider
 
     def _silent(self, provider):
@@ -524,28 +527,29 @@ class TestConcurrentRunOnTheSameCommit:
     @pytest.mark.parametrize("is_auto", [True, False])
     def test_a_verdict_posted_mid_run_silences_this_one(self, is_auto):
         """The other run reviewed our head commit while we were thinking - it answered."""
-        provider = self._run(is_auto, verdict_sha_at_start="46abe5425a92", reviewed_sha="cbdb45ab8b91")
+        provider = self._run(is_auto, verdict_at_start=("46abe5425a92", 1),
+                             reviewed_sha="cbdb45ab8b91", review_id=2)
         assert self._silent(provider), "the same commit must not be reviewed twice"
 
     def test_a_first_ever_review_is_still_silenced_by_a_concurrent_one(self):
-        provider = self._run(False, verdict_sha_at_start=None, reviewed_sha="cbdb45ab8b91")
+        provider = self._run(False, verdict_at_start=(None, None), reviewed_sha="cbdb45ab8b91", review_id=2)
         assert self._silent(provider)
 
     def test_a_repeat_request_on_an_already_reviewed_commit_is_still_answered(self):
         """The verdict was standing before we started, so nobody has answered this request."""
-        provider = self._run(False, verdict_sha_at_start="cbdb45ab8b91", reviewed_sha="cbdb45ab8b91")
+        provider = self._run(False, verdict_at_start=("cbdb45ab8b91", 1), reviewed_sha="cbdb45ab8b91")
         assert len(provider.suggestion_calls) == 1
 
     def test_an_unread_snapshot_does_not_silence_a_requested_review(self):
         """Failing to read the standing verdict must not turn into silence."""
         from pr_agent.tools.pr_reviewer import _VERDICT_SNAPSHOT_UNSET
 
-        provider = self._run(False, verdict_sha_at_start=_VERDICT_SNAPSHOT_UNSET,
+        provider = self._run(False, verdict_at_start=_VERDICT_SNAPSHOT_UNSET,
                              reviewed_sha="cbdb45ab8b91")
         assert len(provider.suggestion_calls) == 1
 
     def test_a_new_commit_is_reviewed_normally(self):
-        provider = self._run(True, verdict_sha_at_start="46abe5425a92", reviewed_sha="46abe5425a92")
+        provider = self._run(True, verdict_at_start=("46abe5425a92", 1), reviewed_sha="46abe5425a92")
         assert len(provider.suggestion_calls) == 1
 
     def test_snapshot_failure_disables_the_guard_rather_than_the_review(self):
@@ -558,7 +562,7 @@ class TestConcurrentRunOnTheSameCommit:
         reviewer = PRReviewer.__new__(PRReviewer)
         reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.git_provider = _Broken()
-        assert reviewer._standing_verdict_sha() is _VERDICT_SNAPSHOT_UNSET
+        assert reviewer._standing_verdict() is _VERDICT_SNAPSHOT_UNSET
 
 
 class TestConcurrentApprovalIsNotDoubled:
@@ -569,25 +573,57 @@ class TestConcurrentApprovalIsNotDoubled:
     the already-reviewed guard.
     """
 
-    def _run(self, is_auto, verdict_sha_at_start, reviewed_sha, head_sha="0a7ad8cd1234"):
+    def _run(self, is_auto, verdict_at_start, reviewed_sha, head_sha="0a7ad8cd1234", review_id=1):
         get_settings().set("config.is_auto_command", is_auto)
         provider = TestSingleReviewSubmission._Provider(
-            current_state="COMMENTED", reviewed_sha=reviewed_sha, head_sha=head_sha)
+            current_state="COMMENTED", reviewed_sha=reviewed_sha, head_sha=head_sha,
+            review_id=review_id)
         reviewer = PRReviewer.__new__(PRReviewer)
         reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
         reviewer.review_data = {"review": TestSingleReviewSubmission.CLEAN}
         reviewer.deferred_review_comments = []
         reviewer.git_provider = provider
-        reviewer._publish_single_review("SUMMARY", verdict_sha_at_start)
+        reviewer._publish_single_review("SUMMARY", verdict_at_start)
         return provider
 
     def test_the_run_that_finishes_first_approves(self):
         """Nothing landed while it was thinking, so the standing verdict is still the old commit."""
-        provider = self._run(True, verdict_sha_at_start="7100c7d89999", reviewed_sha="7100c7d89999")
+        provider = self._run(True, verdict_at_start=("7100c7d89999", 1), reviewed_sha="7100c7d89999")
         assert [event for event, _ in provider.verdict_calls] == ["APPROVE"]
 
     @pytest.mark.parametrize("is_auto", [True, False])
     def test_the_run_that_finishes_second_stays_silent(self, is_auto):
-        provider = self._run(is_auto, verdict_sha_at_start="7100c7d89999", reviewed_sha="0a7ad8cd1234")
+        provider = self._run(is_auto, verdict_at_start=("7100c7d89999", 1),
+                             reviewed_sha="0a7ad8cd1234", review_id=2)
         assert provider.verdict_calls == [], "one commit must not be approved twice"
         assert provider.suggestion_calls == []
+
+
+class TestTwoConcurrentRequestsOnAnAlreadyReviewedCommit:
+    """Review feedback on the first cut: the commit alone cannot separate these two.
+
+    Both runs are manual, the head already carried a verdict, so both snapshot the same
+    sha. Only the review id tells the second one that the first has already answered.
+    """
+
+    def _run(self, verdict_at_start, review_id):
+        get_settings().set("config.is_auto_command", False)
+        provider = TestSingleReviewSubmission._Provider(
+            current_state="COMMENTED", reviewed_sha="cbdb45ab8b91", head_sha="cbdb45ab8b91",
+            review_id=review_id)
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
+        reviewer.review_data = {"review": TestSingleReviewSubmission.BLOCKING}
+        reviewer.deferred_review_comments = [{"body": "finding"}]
+        reviewer.git_provider = provider
+        reviewer._publish_single_review("SUMMARY", verdict_at_start)
+        return provider
+
+    def test_the_second_request_sees_the_first_run_answered(self):
+        """Same sha both times - the id is the only thing that moved."""
+        provider = self._run(verdict_at_start=("cbdb45ab8b91", 11), review_id=12)
+        assert provider.suggestion_calls == [] and provider.verdict_calls == []
+
+    def test_a_later_request_on_an_untouched_verdict_is_answered(self):
+        provider = self._run(verdict_at_start=("cbdb45ab8b91", 11), review_id=11)
+        assert len(provider.suggestion_calls) == 1

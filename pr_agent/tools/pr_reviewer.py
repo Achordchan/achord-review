@@ -200,9 +200,9 @@ class PRReviewer:
             # Read before the model call, not after: the guard in _publish_single_review needs
             # to tell a verdict that was already standing from one a concurrent run posted
             # while this one was thinking.
-            verdict_sha_at_start = _VERDICT_SNAPSHOT_UNSET
+            verdict_at_start = _VERDICT_SNAPSHOT_UNSET
             if self._single_review_submission_enabled() and get_settings().config.publish_output:
-                verdict_sha_at_start = self._standing_verdict_sha()
+                verdict_at_start = self._standing_verdict()
 
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
@@ -212,7 +212,7 @@ class PRReviewer:
             get_logger().debug(f"PR output", artifact=pr_review)
 
             if self._single_review_submission_enabled() and get_settings().config.publish_output:
-                self._publish_single_review(pr_review, verdict_sha_at_start)
+                self._publish_single_review(pr_review, verdict_at_start)
                 return
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -278,14 +278,20 @@ class PRReviewer:
                     and get_settings().pr_reviewer.get('enable_review_verdict', False)
                     and callable(getattr(self.git_provider, "submit_review_verdict", None)))
 
-    def _standing_verdict_sha(self):
-        """The commit that already carried this bot's verdict when the run began.
+    def _standing_verdict(self):
+        """Identity of the verdict standing when this run began, as (commit, review id).
+
+        The commit alone is not enough to recognise a concurrent run: when the head
+        already carried a verdict, two concurrent re-reviews of it snapshot the same sha,
+        and the second could not tell the first's new review from the one that was
+        already there. The review id distinguishes them.
 
         Returns _VERDICT_SNAPSHOT_UNSET when the standing verdict cannot be read, which
         disables the concurrent-run guard rather than risking a silenced review.
         """
         try:
-            return self.git_provider.get_latest_own_verdict()[1]
+            standing = self.git_provider.get_latest_own_verdict()
+            return standing.sha, standing.review_id
         except Exception as e:
             get_logger().warning(f"Failed to read the standing review verdict, error: {e}")
             return _VERDICT_SNAPSHOT_UNSET
@@ -321,7 +327,7 @@ class PRReviewer:
             return "COMMENT", "non-blocking suggestions only"
         return "APPROVE", "no blocking issues found"
 
-    def _publish_single_review(self, pr_review: str, verdict_sha_at_start=_VERDICT_SNAPSHOT_UNSET) -> None:
+    def _publish_single_review(self, pr_review: str, verdict_at_start=_VERDICT_SNAPSHOT_UNSET) -> None:
         """Post the summary, the inline findings and the verdict as one review.
 
         Silence is the right outcome for an automatic re-review that found nothing new:
@@ -329,9 +335,9 @@ class PRReviewer:
         it anyway is what turns every push into another notification. A review someone
         asked for is never silenced - see _is_manual_invocation.
 
-        'verdict_sha_at_start' is the commit that already carried a verdict when this run
-        began, from _standing_verdict_sha, and is what distinguishes a concurrent run from
-        a repeat request.
+        'verdict_at_start' is the verdict standing when this run began, from
+        _standing_verdict, and is what distinguishes a concurrent run from a repeat
+        request.
         """
         comments = self.deferred_review_comments
         try:
@@ -345,21 +351,22 @@ class PRReviewer:
         # both read the old verdict and both publish. Holding the lock across the whole
         # section makes the check and the publication one step for a given PR.
         with publish_lock(self.pr_url):
-            self._publish_single_review_locked(pr_review, verdict_sha_at_start, comments, event, reason)
+            self._publish_single_review_locked(pr_review, verdict_at_start, comments, event, reason)
 
-    def _publish_single_review_locked(self, pr_review: str, verdict_sha_at_start, comments, event, reason) -> None:
+    def _publish_single_review_locked(self, pr_review: str, verdict_at_start, comments, event, reason) -> None:
         """The check-and-publish section of _publish_single_review, run under its lock."""
-        previous_state, reviewed_sha = self.git_provider.get_latest_own_verdict()
+        standing = self.git_provider.get_latest_own_verdict()
+        previous_state, reviewed_sha = standing.state, standing.sha
         head_sha = self.git_provider.get_head_commit_sha()
         # A push and a mention of the bot in the comment that follows it are two triggers
         # seconds apart on the same head commit, so both runs read the standing verdict
         # before either posts and neither can see the other by state alone. A verdict for
-        # our own head commit that was not standing when we started came from that other
-        # run: it is the answer, and repeating it is the duplicate review. This outranks
-        # the explicit-request exemption below - the requester has been answered.
+        # our own head commit that is not the one standing when we started came from that
+        # other run: it is the answer, and repeating it is the duplicate review. This
+        # outranks the explicit-request exemption below - the requester has been answered.
         if (head_sha and reviewed_sha == head_sha
-                and verdict_sha_at_start is not _VERDICT_SNAPSHOT_UNSET
-                and verdict_sha_at_start != head_sha):
+                and verdict_at_start is not _VERDICT_SNAPSHOT_UNSET
+                and (reviewed_sha, standing.review_id) != verdict_at_start):
             get_logger().info(f"Commit {head_sha[:8]} was reviewed by a concurrent run while this one was "
                               f"thinking; staying silent instead of posting the same review twice")
             return

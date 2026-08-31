@@ -13,7 +13,10 @@ try:
 except ImportError:  # not POSIX - the lock degrades to a no-op, see publish_lock
     fcntl = None
 
-LOCK_TIMEOUT_SECONDS = 30.0
+# The section under this lock is two provider calls, normally seconds. The timeout only
+# has to outlast a slow provider, not a model call, and waiting is cheaper than the
+# duplicate review a premature give-up allows.
+LOCK_TIMEOUT_SECONDS = 120.0
 _POLL_SECONDS = 0.05
 
 
@@ -37,6 +40,14 @@ def publish_lock(key: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[bo
     Yields True when the lock is held, False when it is not - and the body runs either
     way. Failing open is deliberate: a duplicated review is a bad day, a missed one reads
     as the bot being broken.
+
+    Two limits worth stating rather than implying. The lock is a file on the local
+    filesystem, so it covers processes on one machine - the deployment this serves is a
+    single container - and separate replicas would each hold their own. And a waiter that
+    exceeds the timeout proceeds unlocked. Neither leaves the section unguarded: the
+    caller still compares the standing verdict's identity against the one it snapshotted
+    before thinking, which is what catches a concurrent publication in both cases. The
+    lock removes the window; that comparison is what survives losing it.
     """
     if fcntl is None:
         get_logger().debug("flock is unavailable on this platform; publishing without the lock")
@@ -58,7 +69,8 @@ def publish_lock(key: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[bo
                     raise
                 if time.monotonic() >= deadline:
                     get_logger().warning(
-                        f"Timed out after {timeout}s waiting for the publish lock; publishing unlocked")
+                        f"Timed out after {timeout}s waiting for the publish lock; falling back to the "
+                        f"standing-verdict comparison and publishing unlocked")
                     break
                 time.sleep(_POLL_SECONDS)
     except Exception as e:
@@ -75,5 +87,7 @@ def publish_lock(key: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[bo
                     get_logger().warning(f"Failed to release the publish lock, error: {e}")
             try:
                 os.close(fd)
-            except Exception:
-                pass
+            except OSError as e:
+                # The descriptor is on its way out either way, and the flock above has
+                # already been released, so a failure here cannot hold up another run.
+                get_logger().debug(f"Failed to close the publish lock file, error: {e}")
