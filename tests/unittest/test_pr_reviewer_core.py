@@ -485,6 +485,29 @@ def test_key_issue_already_anchored_on_the_pr_is_not_published_again():
     assert "key_issues_to_review" not in result["review"]
 
 
+def test_carried_over_finding_is_reposted_when_dedup_is_off():
+    # C1: with dedup_carried_over_key_issues off, a finding already anchored on the PR is
+    # posted again on re-review instead of being suppressed, so each review is a self-contained
+    # snapshot showing every finding it raised.
+    issue = _key_issue()
+    reviewer, data = _reviewer_with_findings(issue)
+    store = get_inline_comment_store(reviewer.git_provider)
+    store.add(key_issue_fingerprint(
+        "app.py", "**Possible Issue**\n\nThe new branch never releases the lock."
+    ))
+    settings = get_settings()
+    original = settings.pr_reviewer.get("dedup_carried_over_key_issues", True)
+    try:
+        settings.pr_reviewer.dedup_carried_over_key_issues = False
+        reviewer._publish_key_issues_as_inline_comments(data)
+    finally:
+        settings.pr_reviewer.dedup_carried_over_key_issues = original
+
+    # It is re-posted, not deduped or counted as a carry-over.
+    reviewer.git_provider.publish_code_suggestions.assert_called_once()
+    assert reviewer.carried_over_findings == 0
+
+
 def test_key_issue_path_without_leading_slash_uses_azure_diff_path():
     reviewer, data = _reviewer_with_findings(_key_issue())
     reviewer.git_provider.get_diff_files.return_value[0].filename = "/app.py"

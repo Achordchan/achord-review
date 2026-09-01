@@ -699,6 +699,9 @@ class PRReviewer:
         candidate_anchors = {}
         published = 0
         self.carried_over_findings = 0
+        # When off, a finding already posted on an earlier review is posted again on re-review
+        # instead of being deduped, so each review shows every finding it raised.
+        dedup_carried_over = get_settings().pr_reviewer.get("dedup_carried_over_key_issues", True)
         for issue in issues:
             try:
                 comment = self._build_key_issue_comment(issue, diff_files)
@@ -710,7 +713,7 @@ class PRReviewer:
                     comment["relevant_file"], comment["relevant_lines_start"], comment["relevant_lines_end"])
                 # The body fingerprint misses a reworded repeat of the same finding, so the
                 # anchor is what keeps a re-review from stacking comments on one location.
-                if store.seen(fingerprint) or store.seen(anchor_fingerprint):
+                if dedup_carried_over and (store.seen(fingerprint) or store.seen(anchor_fingerprint)):
                     published += 1
                     self.carried_over_findings += 1
                     continue

@@ -112,6 +112,11 @@ persistent_comment=true
 # Visible base heading for full and incremental review comments. Identity is tracked separately.
 review_heading = "PR Reviewer Guide"
 inline_key_issues=false
+# With inline_key_issues on, a finding already posted as an inline comment on an earlier review
+# is skipped on re-review so the same comment does not stack on one line. Set false to re-post
+# carried-over findings on every re-review - each review then shows every finding it raised, at
+# the cost of duplicate comment threads on findings that stay open across pushes.
+dedup_carried_over_key_issues = true
 extra_instructions = ""
 num_max_findings = 3
 final_update_message = true

@@ -81,6 +81,10 @@ final_update_message = false
 # Anchor each finding as an inline comment on the offending line, the way Codex does,
 # instead of only listing it in the summary comment.
 inline_key_issues = true
+# Re-post a still-open finding on every re-review instead of deduping it, so each review is a
+# self-contained snapshot of every finding it raised. A finding left unfixed across pushes will
+# therefore appear once per re-review.
+dedup_carried_over_key_issues = false
 # Noise reduction: drop the review dimensions that do not apply to this deployment.
 require_ticket_analysis_review = false
 require_can_be_split_review = false
