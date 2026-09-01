@@ -111,6 +111,10 @@ class PRReviewer:
         self.prediction = None
         self.review_data = None
         self.deferred_review_comments = []
+        # Findings the model raised again that were already posted on an earlier review and
+        # deduped here, so they produce no new inline comment. Counted so a re-review with
+        # nothing new to show can say so rather than emit a verdict pointing at nothing.
+        self.carried_over_findings = 0
         question_str, answer_str = self._get_user_answers()
         self.pr_description, self.pr_description_files = (
             self.git_provider.get_pr_description(split_changes_walkthrough=True))
@@ -418,8 +422,22 @@ class PRReviewer:
 
         # A review that found nothing should say so in words, not report an empty verdict:
         # "no blocking issues found" is the same news, read as a shrug.
+        carried_over = getattr(self, "carried_over_findings", 0)
         if event == "APPROVE" and not comments:
             closing = f"\u2705 {clean_review_message(head_sha or '')}"
+        elif not comments and carried_over:
+            # A non-APPROVE verdict with no comments to show reads as broken: the findings
+            # behind it were all raised on an earlier review and deduped here, so there is
+            # nothing new to attach. Say that plainly instead of a bare verdict pointing at
+            # comments that are not on this review - they still stand as inline comments
+            # already on the PR.
+            sha_ref = f" `{head_sha[:8]}`" if head_sha else ""
+            point = "point" if carried_over == 1 else "points"
+            stands = "still stands" if carried_over == 1 else "still stand"
+            closing = (f"\U0001F501 Re-reviewed{sha_ref} - no new findings on this commit. "
+                       f"{carried_over} {point} from the earlier review {stands}; "
+                       f"see the inline comments already on this PR.\n\n"
+                       f"{VERDICT_REASON_PREFIX}{reason}.")
         else:
             closing = f"{VERDICT_REASON_PREFIX}{reason}."
         # The marker must ride on whichever review carries the verdict, or the next run
@@ -680,6 +698,7 @@ class PRReviewer:
         candidate_fingerprints = {}
         candidate_anchors = {}
         published = 0
+        self.carried_over_findings = 0
         for issue in issues:
             try:
                 comment = self._build_key_issue_comment(issue, diff_files)
@@ -693,6 +712,7 @@ class PRReviewer:
                 # anchor is what keeps a re-review from stacking comments on one location.
                 if store.seen(fingerprint) or store.seen(anchor_fingerprint):
                     published += 1
+                    self.carried_over_findings += 1
                     continue
                 location_fingerprint = key_issue_location_fingerprint(
                     fingerprint, comment["relevant_lines_start"], comment["relevant_lines_end"])

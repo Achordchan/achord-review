@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 import pytest
 from jinja2 import Environment, StrictUndefined
 
@@ -5,7 +7,7 @@ from pr_agent.algo.utils import CLEAN_REVIEW_MESSAGES, clean_review_message, for
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers.git_provider import OwnVerdict
 from pr_agent.git_providers.github_provider import GithubProvider
-from pr_agent.tools.pr_reviewer import VERDICT_REASON_PREFIX, PRReviewer
+from pr_agent.tools.pr_reviewer import _VERDICT_SNAPSHOT_UNSET, VERDICT_REASON_PREFIX, PRReviewer
 from tests.unittest._settings_helpers import restore_settings, snapshot_settings
 
 VERDICT_KEYS = [
@@ -178,6 +180,59 @@ class TestSubmitVerdictGuards:
         with pytest.raises(ValueError):
             reviewer._publish_single_review("", None)
         assert reviewer.git_provider.calls == []
+
+
+class TestCarriedOverFindingsClosing:
+    """A re-review whose only findings were already posted must say so, not emit a verdict
+    that points at inline comments which are not on this review (the empty-looking review on #32)."""
+
+    def _reviewer(self, carried_over):
+        reviewer = PRReviewer.__new__(PRReviewer)
+        reviewer.pr_url = "https://api.github.com/repos/o/r/pulls/1"
+        reviewer.carried_over_findings = carried_over
+        provider = MagicMock()
+        provider.get_latest_own_verdict.return_value = OwnVerdict()
+        provider.get_head_commit_sha.return_value = "abcd1234ef567890"
+        provider.mark_review_verdict_body.side_effect = lambda body: body
+        provider.submit_review_verdict.return_value = True
+        provider.publish_code_suggestions.return_value = True
+        reviewer.git_provider = provider
+        return reviewer
+
+    def test_no_new_findings_but_carryovers_explains_instead_of_empty_verdict(self):
+        get_settings().set("config.is_auto_command", False)  # a manual re-review must answer
+        reviewer = self._reviewer(carried_over=1)
+        reviewer._publish_single_review_locked(
+            "## PR Reviewer Guide", _VERDICT_SNAPSHOT_UNSET, [], "COMMENT",
+            "non-blocking suggestions only")
+        event, body = reviewer.git_provider.submit_review_verdict.call_args.args
+        assert event == "COMMENT"
+        assert "no new findings" in body.lower()
+        assert "1 point" in body and "still stands" in body
+        assert "non-blocking suggestions only" in body  # the verdict is still stated
+        assert "abcd1234" in body
+
+    def test_carryover_count_is_pluralised(self):
+        get_settings().set("config.is_auto_command", False)
+        reviewer = self._reviewer(carried_over=3)
+        reviewer._publish_single_review_locked(
+            "## Guide", _VERDICT_SNAPSHOT_UNSET, [], "REQUEST_CHANGES", "blocking issues found (P1)")
+        _, body = reviewer.git_provider.submit_review_verdict.call_args.args
+        assert "3 points" in body and "still stand" in body
+
+    def test_new_findings_present_use_the_plain_verdict(self):
+        # When there are new inline findings to show, the plain verdict line is used and the
+        # re-review note is not - the findings speak for themselves.
+        get_settings().set("config.is_auto_command", False)
+        reviewer = self._reviewer(carried_over=2)
+        new_comments = [{"body": "a new finding"}]
+        reviewer._publish_single_review_locked(
+            "## Guide", _VERDICT_SNAPSHOT_UNSET, new_comments, "COMMENT",
+            "non-blocking suggestions only")
+        _, kwargs = reviewer.git_provider.publish_code_suggestions.call_args
+        body = kwargs["review_body"]
+        assert "no new findings" not in body.lower()
+        assert "non-blocking suggestions only" in body
 
 
 class TestSeverityBadge:
