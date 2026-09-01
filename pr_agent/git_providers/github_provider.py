@@ -618,7 +618,8 @@ class GithubProvider(GitProvider):
                 raise e # will end up with publishing the comments one by one
 
             try:
-                self._publish_inline_comments_fallback_with_verification(comments)
+                self._publish_inline_comments_fallback_with_verification(
+                    comments, review_body=review_body, review_event=review_event)
             except Exception as e:
                 get_logger().error(f"Failed to publish inline code comments fallback, error: {e}")
                 raise
@@ -777,17 +778,35 @@ class GithubProvider(GitProvider):
             get_logger().exception(f"Failed to resolve comment thread: {e}")
             return False
 
-    def _publish_inline_comments_fallback_with_verification(self, comments: list[dict]):
+    def _publish_inline_comments_fallback_with_verification(self, comments: list[dict],
+                                                            review_body: str = None,
+                                                            review_event: str = None):
         """
         Check each inline comment separately against the GitHub API and discard of invalid comments,
         then publish all the remaining valid comments in a single review.
         For invalid comments, also try removing the suggestion part and posting the comment just on the first line.
+
+        review_body/review_event ride along on this review too. The combined create_review that
+        failed carried the summary and verdict, and without folding them back in they are lost
+        whenever a single finding cannot be anchored to the diff - a completed review then vanishes
+        with no trace. They are posted even when nothing verified, so the verdict always lands.
         """
         verified_comments, invalid_comments = self._verify_code_comments(comments)
 
-        # publish as a group the verified comments
+        # publish as a group the verified comments, carrying the summary and verdict along
+        review_kwargs = {"commit": self.last_commit_id}
         if verified_comments:
-            self.pr.create_review(commit=self.last_commit_id, comments=verified_comments)
+            review_kwargs["comments"] = verified_comments
+        if review_body is not None:
+            review_kwargs["body"] = review_body
+        if review_event is not None:
+            review_kwargs["event"] = review_event
+        elif review_body is not None:
+            # create_review with no event opens a PENDING (invisible) review; a summary meant to
+            # be seen must be submitted, so default to COMMENT when the caller gave no verdict.
+            review_kwargs["event"] = "COMMENT"
+        if verified_comments or review_body is not None:
+            self.pr.create_review(**review_kwargs)
 
         # try to publish one by one the invalid comments as a one-line code comment
         if invalid_comments and get_settings().github.try_fix_invalid_inline_comments:

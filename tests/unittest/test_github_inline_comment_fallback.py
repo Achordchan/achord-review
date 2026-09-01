@@ -52,3 +52,40 @@ def test_publish_code_suggestions_returns_false_so_retry_triggers(monkeypatch):
     }]
 
     assert provider.publish_code_suggestions(suggestions) is False
+
+
+def test_summary_and_verdict_survive_when_a_finding_cannot_be_anchored(monkeypatch):
+    """Regression for PR #32: the initial combined create_review carries the summary and
+    verdict alongside the inline findings. When a finding sits outside the diff GitHub 422s
+    the whole review, so the summary and verdict must be re-posted in the fallback rather than
+    vanishing with it - otherwise a completed review is dropped with no trace on the PR."""
+    comments = [{"body": "finding", "path": "a.py", "line": 999, "side": "RIGHT"}]
+    # 1st create_review (initial bulk) -> 422; 2nd (fallback, verdict-only) -> ok
+    provider = _make_provider([_Status422Error("line not in diff"), None])
+    # No comment verifies (all sit outside the diff), matching the #32 scenario.
+    monkeypatch.setattr(provider, "_verify_code_comments", lambda c: ([], [(c[0], _Status422Error("x"))]))
+    monkeypatch.setattr(provider, "_try_fix_invalid_inline_comments", lambda c: [])
+
+    provider.publish_inline_comments(comments, review_body="## Summary\n\n**Verdict:** blocking.",
+                                     review_event="COMMENT")
+
+    # The verdict review must still have been posted, on its own, in the fallback.
+    fallback_call = provider.pr.create_review.call_args_list[-1]
+    assert fallback_call.kwargs.get("body") == "## Summary\n\n**Verdict:** blocking."
+    assert fallback_call.kwargs.get("event") == "COMMENT"
+    assert "comments" not in fallback_call.kwargs  # nothing anchorable, but the review still lands
+
+
+def test_verified_findings_ride_with_the_summary_in_one_review(monkeypatch):
+    """When some findings do anchor, they publish together with the summary and verdict as a
+    single review, preserving the one-notification guarantee."""
+    comments = [{"body": "ok", "path": "a.py", "line": 1, "side": "RIGHT"}]
+    provider = _make_provider([_Status422Error("mixed"), None])
+    monkeypatch.setattr(provider, "_verify_code_comments", lambda c: (list(c), []))
+
+    provider.publish_inline_comments(comments, review_body="SUMMARY", review_event="REQUEST_CHANGES")
+
+    fallback_call = provider.pr.create_review.call_args_list[-1]
+    assert fallback_call.kwargs.get("body") == "SUMMARY"
+    assert fallback_call.kwargs.get("event") == "REQUEST_CHANGES"
+    assert fallback_call.kwargs.get("comments") == comments

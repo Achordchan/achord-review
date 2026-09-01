@@ -32,9 +32,10 @@ class _FakePR:
         self._raise_on_first = raise_on_first
         self._calls = 0
 
-    def create_review(self, commit=None, comments=None):
+    def create_review(self, commit=None, comments=None, body=None, event=None):
         self._calls += 1
-        self.create_review_calls.append({"commit": commit, "comments": comments})
+        self.create_review_calls.append(
+            {"commit": commit, "comments": comments, "body": body, "event": event})
         if self._raise_on_first is not None and self._calls == 1:
             exc = self._raise_on_first
             self._raise_on_first = None
@@ -213,19 +214,25 @@ def test_publish_inline_comments_422_triggers_fallback(monkeypatch):
     fake_pr = _FakePR(raise_on_first=_FakeGithubException(status=422))
     provider = _make_provider(pr=fake_pr)
 
-    called = {"n": 0, "args": None}
+    called = {"n": 0, "args": None, "review_body": "unset", "review_event": "unset"}
 
-    def fake_fallback(comments):
+    def fake_fallback(comments, review_body=None, review_event=None):
         called["n"] += 1
         called["args"] = comments
+        called["review_body"] = review_body
+        called["review_event"] = review_event
 
     provider._publish_inline_comments_fallback_with_verification = fake_fallback
 
     comments = [{"body": "b", "path": "f.py", "position": 1}]
-    provider.publish_inline_comments(comments)
+    provider.publish_inline_comments(comments, review_body="SUMMARY", review_event="COMMENT")
 
     assert called["n"] == 1
     assert called["args"] == comments
+    # The summary and verdict must be forwarded to the fallback, or a 422 on one finding
+    # would drop the whole review (see #32).
+    assert called["review_body"] == "SUMMARY"
+    assert called["review_event"] == "COMMENT"
     # The initial create_review attempt is the only one made directly here;
     # the fallback is stubbed out and would normally do further work.
     assert len(fake_pr.create_review_calls) == 1
@@ -235,7 +242,7 @@ def test_publish_inline_comments_fallback_failure_propagates(monkeypatch):
     fake_pr = _FakePR(raise_on_first=_FakeGithubException(status=422))
     provider = _make_provider(pr=fake_pr)
 
-    def broken_fallback(comments):
+    def broken_fallback(comments, review_body=None, review_event=None):
         raise RuntimeError("fallback boom")
 
     provider._publish_inline_comments_fallback_with_verification = broken_fallback
