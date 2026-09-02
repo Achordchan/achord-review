@@ -94,6 +94,18 @@ def test_security_heading_starting_with_no_letters_is_not_a_negative_answer():
     assert recovered == {"review": data}
 
 
+def test_missing_authentication_heading_is_an_explicit_security_concern():
+    data = {
+        "key_issues_to_review": [],
+        "security_concerns": "No authentication: the endpoint is publicly accessible",
+    }
+
+    recovered, changed = recover_missing_review_wrapper(data, require_severity=True)
+
+    assert changed is True
+    assert recovered == {"review": data}
+
+
 @pytest.mark.parametrize("security_concerns", [
     "There are no security concerns",
     "N/A",
