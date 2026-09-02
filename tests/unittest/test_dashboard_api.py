@@ -88,6 +88,16 @@ class TestAuth:
         resp = client.post("/api/v1/dashboard/auth/login", json={"password": "x"})
         assert resp.status_code == 503
 
+    def test_logout_revokes_bearer_session(self, client):
+        token = _auth_header(client)["Authorization"][7:]
+        resp = client.post("/api/v1/dashboard/auth/logout",
+                           headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+        # the bearer session must be dead immediately, not after cookie expiry
+        assert not dashboard_api._session_valid(token)
+        assert client.get("/api/v1/dashboard/auth/me",
+                          headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
 
 class TestClientIp:
     def test_trusted_hops_read_rightmost_entries(self, client, monkeypatch):

@@ -145,6 +145,13 @@ async def handle_comments_on_pr(body: Dict[str, Any],
     with get_logger().contextualize(**log_context):
         if get_identity_provider().verify_eligibility("github", sender_id, api_url) is not Eligibility.NOT_ELIGIBLE:
             get_logger().info(f"Processing comment on PR {api_url=}, comment_body={comment_body}")
+            # request-scoped metadata for the dashboard audit trail; absent in
+            # CLI runs, hence the guard
+            try:
+                context["dashboard_sender"] = sender
+                context["dashboard_trigger_type"] = "mention"
+            except Exception:
+                pass
             await agent.handle_request(api_url, comment_body,
                         notify=lambda: provider.add_eyes_reaction(comment_id, disable_eyes=disable_eyes))
         else:
@@ -456,6 +463,14 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
         get_logger().info(f"New PR, but no auto commands configured")
         return
     get_settings().set("config.is_auto_command", True)
+    # request-scoped metadata for the dashboard audit trail (read back in
+    # PRReviewer._audit_started); the context object is request-local and
+    # absent in CLI runs, hence the guard
+    try:
+        context["dashboard_sender"] = body.get("sender", {}).get("login", "")
+        context["dashboard_trigger_type"] = "pr_open"
+    except Exception:
+        pass
     for command in commands:
         try:
             new_command = prepare_command(command)

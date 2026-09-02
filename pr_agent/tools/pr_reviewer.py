@@ -58,10 +58,32 @@ _VERDICT_SNAPSHOT_UNSET = object()
 
 
 def _audit_started(reviewer: "PRReviewer") -> str:
-    """Open a dashboard audit record for this run; best-effort, never raises."""
+    """Open a dashboard audit record for this run; best-effort, never raises.
+
+    Populates trigger metadata from the request-scoped starlette context
+    (dashboard_sender / dashboard_trigger_type, written by github_app.py on
+    the mention and auto-command paths) and the PR object, so webhook
+    reviews don't land in the dashboard as anonymous manual runs.
+    """
     try:
+        from starlette_context import context as request_context
+
         from pr_agent.dashboard.audit import review_started
-        return review_started(pr_url=reviewer.pr_url) or ""
+        sender, trigger_type = "", "manual"
+        try:
+            sender = request_context.get("dashboard_sender") or ""
+            trigger_type = request_context.get("dashboard_trigger_type") or "manual"
+        except Exception:
+            pass  # no request scope (CLI run) — keep the manual defaults
+        title, sha = "", ""
+        try:
+            title = reviewer.git_provider.pr.title or ""
+            sha = reviewer.git_provider.get_head_commit_sha() or ""
+        except Exception:
+            pass
+        return review_started(pr_url=reviewer.pr_url, sender=sender,
+                              trigger_type=trigger_type, commit_sha=sha,
+                              pr_title=title) or ""
     except Exception:
         return ""
 

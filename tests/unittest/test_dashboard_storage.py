@@ -77,6 +77,21 @@ class TestReviewsCrud:
         assert len(detail["issues"]) == 1
         assert detail["verdict"] == "REQUEST_CHANGES"
 
+    def test_finish_review_accepts_usage_fields(self, storage):
+        """finish_review takes the run's live usage (audit.py passes **fields)."""
+        request_id = storage.create_review(repo_name="r", pr_number=4, pr_url="u4")
+        storage.finish_review(
+            request_id, [], verdict="APPROVE",
+            model="openai/gpt-x", reasoning_effort="high",
+            prompt_tokens=111, completion_tokens=22, total_tokens=133, duration_ms=4567)
+        row = storage.get_review_by_request_id(request_id)
+        assert row["status"] == "COMPLETED"
+        assert row["model"] == "openai/gpt-x"
+        assert row["reasoning_effort"] == "high"
+        assert row["prompt_tokens"] == 111
+        assert row["total_tokens"] == 133
+        assert row["duration_ms"] == 4567
+
     def test_list_reviews_filters(self, storage):
         _seed_review(storage, repo="a/b", pr=1, verdict="APPROVE")
         _seed_review(storage, repo="c/d", pr=2, verdict="REQUEST_CHANGES",

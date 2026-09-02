@@ -216,26 +216,36 @@ class DashboardStorage:
 
     def finish_review(self, request_id: str, issues: List[Dict[str, Any]], verdict: str = "",
                       verdict_reason: str = "", markdown_output: str = "",
-                      raw_prediction: str = "") -> None:
+                      raw_prediction: str = "", model: str = "", reasoning_effort: str = "",
+                      prompt_tokens: int = 0, completion_tokens: int = 0,
+                      total_tokens: int = 0, duration_ms: int = 0) -> None:
         """Atomically persist usage, findings and the terminal COMPLETED state.
 
         One transaction so a reader that sees status=COMPLETED also sees every
         finding — the detail page polls on status and would otherwise render a
         permanent empty/partial finding list for a review finished mid-write.
+        Usage columns accept the run's live values; a stored value wins when
+        the incoming one is empty/zero.
         """
-        row = self.get_review_by_request_id(request_id, summary_only=False)
-        details = row or {}
         with self._write_lock, self._connect() as conn:
             conn.execute(
                 "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
                 " markdown_output=?, raw_prediction=?,"
-                " prompt_tokens=?, completion_tokens=?, total_tokens=?, duration_ms=?,"
-                " model=COALESCE(NULLIF(?, ''), model), completed_at=? WHERE request_id=?",
+                " model=COALESCE(NULLIF(?, ''), model),"
+                " reasoning_effort=COALESCE(NULLIF(?, ''), reasoning_effort),"
+                " prompt_tokens=CASE WHEN ? > 0 THEN ? ELSE prompt_tokens END,"
+                " completion_tokens=CASE WHEN ? > 0 THEN ? ELSE completion_tokens END,"
+                " total_tokens=CASE WHEN ? > 0 THEN ? ELSE total_tokens END,"
+                " duration_ms=CASE WHEN ? > 0 THEN ? ELSE duration_ms END,"
+                " completed_at=? WHERE request_id=?",
                 (verdict, verdict_reason, markdown_output, raw_prediction,
-                 details.get("prompt_tokens", 0), details.get("completion_tokens", 0),
-                 details.get("total_tokens", 0), details.get("duration_ms", 0),
-                 details.get("model", ""), _utcnow(), request_id))
-            if row and issues:
+                 model, reasoning_effort,
+                 prompt_tokens, prompt_tokens, completion_tokens, completion_tokens,
+                 total_tokens, total_tokens, duration_ms, duration_ms,
+                 _utcnow(), request_id))
+            row = conn.execute("SELECT id FROM reviews WHERE request_id = ?",
+                               (request_id,)).fetchone()
+            if row is not None and issues:
                 now = _utcnow()
                 conn.executemany(
                     "INSERT INTO review_issues (review_id, severity, relevant_file,"

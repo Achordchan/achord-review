@@ -32,6 +32,18 @@ class TestRead:
         engine = ConfigEngine(config_path=str(tmp_path / "nope.toml"))
         assert engine.read()["available"] is False
 
+    def test_write_preserves_comments_and_ordering(self, engine):
+        comment_line = '# reasoning_effort = "high"  # GPT-5 family knob'
+        with open(engine.config_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{comment_line}\n")
+        ok, _ = engine.write({"model": "openai/changed"})
+        assert ok
+        text = open(engine.config_path, encoding="utf-8").read()
+        assert comment_line in text
+        assert 'model = "openai/changed"' in text
+        # section ordering preserved: [config] content still precedes [openai]
+        assert text.index("[config]") < text.index("[openai]")
+
 
 class TestWrite:
     def test_write_updates_fields(self, engine):
@@ -53,6 +65,22 @@ class TestWrite:
         ok, _ = engine.write({"key": ""})
         assert ok
         assert engine.read()["values"]["key"] == before
+
+    def test_empty_key_hot_reload_keeps_running_key(self, engine, monkeypatch):
+        """An empty secret must not clear the in-process key during hot reload."""
+        captured = {}
+
+        class FakeSettings:
+            def set(self, dotted, value):
+                captured[dotted] = value
+
+        import pr_agent.config_loader as cl
+        monkeypatch.setattr(cl, "global_settings", FakeSettings(), raising=False)
+
+        ok, _ = engine.write({"key": ""})
+        assert ok
+        # _hot_reload ran during write; openai.key must NOT have been set to ""
+        assert captured.get("openai.key", "unset") != ""
 
     def test_validation_rejects_bad_values(self, engine):
         ok, errors = engine.write({"ai_timeout": "not-a-number"})

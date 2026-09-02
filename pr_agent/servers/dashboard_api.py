@@ -193,8 +193,14 @@ async def auth_me(request: Request, dashboard_session: Optional[str] = Cookie(No
 @router.post("/auth/logout")
 async def auth_logout(request: Request, response: Response,
                       dashboard_session: Optional[str] = Cookie(None)):
+    # revoke whichever credential authenticated this request: the cookie token
+    # and the bearer token are both real sessions in _sessions, and a scripted
+    # client logging out via the bearer path must lose access immediately
     if dashboard_session:
         _sessions.pop(dashboard_session, None)
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        _sessions.pop(auth[7:].strip(), None)
     response.delete_cookie(SESSION_COOKIE, path="/")
     return _ok(message="已退出登录")
 

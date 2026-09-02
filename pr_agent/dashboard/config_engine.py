@@ -20,17 +20,9 @@ import time
 import tomllib
 from typing import Any, Dict, List, Optional, Tuple
 
+import tomlkit
+
 from pr_agent.log import get_logger
-
-try:
-    import tomli_w
-except ImportError:  # pragma: no cover - tomli_w is an optional accelerator
-    tomli_w = None
-
-try:
-    import tomlkit
-except ImportError:  # pragma: no cover
-    tomlkit = None
 
 MAX_BACKUPS = 5
 
@@ -148,23 +140,29 @@ class ConfigEngine:
     # ----------------------------------------------------------------- write
 
     def write(self, fields: Dict[str, Any]) -> Tuple[bool, List[str]]:
-        """Validate, back up, atomically replace and hot-apply the config."""
+        """Validate, back up, atomically replace and hot-apply the config.
+
+        Writes go through tomlkit (a comment-preserving TOML document) so the
+        operational documentation in the file — comments, ordering, formatting
+        — survives every dashboard edit. A plain-dict TOML dump would rewrite
+        the file bare, so it is never used.
+        """
         if not self.config_path or not os.path.isfile(self.config_path):
             return False, ["config file not found"]
-        if tomli_w is None and tomlkit is None:
-            return False, ["no TOML writer available (install tomli-w)"]
+        if tomlkit is None:
+            return False, ["no comment-preserving TOML writer available (install tomlkit)"]
         clean, errors = _validate(fields)
         if errors:
             return False, errors
         if not clean:
             return True, []  # nothing to change, e.g. the key field left blank
         try:
-            raw = self._load_raw()
-            if raw is None:
+            doc = self._load_document()
+            if doc is None:
                 return False, ["config file could not be parsed"]
-            self._apply_fields(raw, clean)
+            self._apply_fields(doc, clean)
             self._backup()
-            self._atomic_dump(raw)
+            self._atomic_dump(doc)
         except Exception as e:
             get_logger().warning(f"Dashboard config write failed, error: {e}")
             return False, [f"failed to write config: {e}"]
@@ -201,12 +199,9 @@ class ConfigEngine:
                 # losing the head of the log because removal raised is not
                 get_logger().debug(f"Dashboard config backup cleanup skipped a file, error: {e}")
 
-    def _atomic_dump(self, raw: Dict[str, Any]) -> None:
+    def _atomic_dump(self, doc) -> None:
         directory = os.path.dirname(self.config_path)
-        if tomli_w is not None:
-            payload = tomli_w.dumps(raw)
-        else:
-            payload = tomlkit.dumps(raw)
+        payload = tomlkit.dumps(doc)
         fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -234,6 +229,11 @@ class ConfigEngine:
             for name, value in clean.items():
                 if name in STRING_FIELDS or name in INT_FIELDS:
                     table, key = STRING_FIELDS.get(name, INT_FIELDS.get(name, ("", ""))[:2])
+                    # an empty secret means "keep the stored value" — same
+                    # contract as _apply_fields, or a save that leaves the file
+                    # untouched would still clear the running process's key
+                    if name == "key" and not value:
+                        continue
                     global_settings.set(f"{table}.{key}", value)
                 elif name == "verdict_blocking_severities":
                     global_settings.set("pr_reviewer.verdict_blocking_severities", value)
@@ -253,6 +253,21 @@ class ConfigEngine:
                 return tomllib.load(f)
         except Exception as e:
             get_logger().warning(f"Dashboard config read failed, error: {e}")
+            return None
+
+    def _load_document(self):
+        """Parse the config as a tomlkit document (comments preserved).
+
+        Returns None when the file is missing or unparseable — callers treat
+        that the same as _load_raw's failure.
+        """
+        if not self.config_path:
+            return None
+        try:
+            with open(self.config_path, "rb") as f:
+                return tomlkit.load(f)
+        except Exception as e:
+            get_logger().warning(f"Dashboard config document read failed, error: {e}")
             return None
 
     def validate_toml_text(self, text: str) -> List[str]:
