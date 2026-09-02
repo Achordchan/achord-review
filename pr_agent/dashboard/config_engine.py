@@ -289,7 +289,7 @@ class ConfigEngine:
         call reload_if_changed(), so the deployment can retain concurrency
         without reporting a process-local hot reload as globally complete.
         """
-        from pr_agent.config_loader import global_settings
+        from pr_agent.config_loader import global_settings, global_settings_lock
         environment_keys = {key.upper() for key in os.environ}
 
         def _apply(value: Any, path: str) -> None:
@@ -304,7 +304,8 @@ class ConfigEngine:
             global_settings.set(path, value)
 
         try:
-            _apply(raw, "")
+            with global_settings_lock:
+                _apply(raw, "")
             return True
         except Exception as e:
             # The file is already correct; a reload miss only delays effect until restart.

@@ -1,3 +1,4 @@
+import threading
 from os.path import abspath, dirname, join
 from pathlib import Path
 from typing import Optional
@@ -42,6 +43,7 @@ global_settings = Dynaconf(
     ]],
     **dynconf_kwargs
 )
+global_settings_lock = threading.RLock()
 
 
 def get_settings(use_context=False):

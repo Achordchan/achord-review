@@ -68,6 +68,22 @@ class TestAuth:
             "/api/v1/dashboard/auth/login", json={"password": "管理员-安全口令"})
         assert resp.status_code == 200
 
+    def test_login_rejects_password_rotated_during_request(self, client, storage, monkeypatch):
+        password = {"value": "old-password"}
+        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: password["value"])
+        original_verify = storage.verify_login_attempt
+
+        def rotate_after_verification(*args, **kwargs):
+            decision = original_verify(*args, **kwargs)
+            password["value"] = "new-password"
+            return decision
+
+        monkeypatch.setattr(storage, "verify_login_attempt", rotate_after_verification)
+        resp = client.post(
+            "/api/v1/dashboard/auth/login", json={"password": "old-password"})
+        assert resp.status_code == 401
+        assert "已变更" in resp.json()["detail"]
+
     def test_routes_require_auth(self, client):
         for path in ["/api/v1/dashboard/config", "/api/v1/dashboard/reviews",
                      "/api/v1/dashboard/stats/overview", "/api/v1/dashboard/audit-logs"]:

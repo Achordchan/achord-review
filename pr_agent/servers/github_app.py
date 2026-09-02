@@ -13,7 +13,7 @@ from starlette_context import context
 from starlette_context.middleware import RawContextMiddleware
 
 from pr_agent.agent.pr_agent import PRAgent, command2class, prepare_command
-from pr_agent.config_loader import get_settings, global_settings
+from pr_agent.config_loader import get_settings, global_settings, global_settings_lock
 from pr_agent.git_providers import (get_git_provider,
                                     get_git_provider_with_context)
 from pr_agent.git_providers.git_provider import IncrementalPR
@@ -47,7 +47,8 @@ async def handle_github_webhooks(background_tasks: BackgroundTasks, request: Req
 
     installation_id = body.get("installation", {}).get("id")
     context["installation_id"] = installation_id
-    context["settings"] = copy.deepcopy(global_settings)
+    with global_settings_lock:
+        context["settings"] = copy.deepcopy(global_settings)
     context["git_provider"] = {}
     background_tasks.add_task(handle_request, body, event=request.headers.get("X-GitHub-Event", None))
     return {}

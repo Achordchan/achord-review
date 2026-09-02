@@ -501,13 +501,13 @@ class DashboardStorage:
         overview: Dict[str, Any] = {}
         single = self._read(
             "SELECT COUNT(*) AS total,"
-            " SUM(CASE WHEN created_at LIKE ? THEN 1 ELSE 0 END) AS today,"
-            " SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,"
-            " SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) AS running,"
+            " COALESCE(SUM(CASE WHEN created_at LIKE ? THEN 1 ELSE 0 END), 0) AS today,"
+            " COALESCE(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failed,"
+            " COALESCE(SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END), 0) AS running,"
             " AVG(CASE WHEN status = 'COMPLETED' THEN duration_ms END) AS avg_duration_ms,"
-            " SUM(prompt_tokens) AS prompt_tokens,"
-            " SUM(completion_tokens) AS completion_tokens,"
-            " SUM(total_tokens) AS total_tokens FROM reviews",
+            " COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,"
+            " COALESCE(SUM(completion_tokens), 0) AS completion_tokens,"
+            " COALESCE(SUM(total_tokens), 0) AS total_tokens FROM reviews",
             (f"{_utcnow()[:10]}%",))
         overview.update(single[0] if single else {})
         blocking = self._read(

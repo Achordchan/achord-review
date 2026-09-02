@@ -179,6 +179,12 @@ class TestReviewsCrud:
 
 
 class TestStats:
+    def test_empty_database_uses_zero_for_numeric_aggregates(self, storage):
+        stats = storage.stats_overview()
+        for field in ("total", "today", "failed", "running", "prompt_tokens",
+                      "completion_tokens", "total_tokens", "p0_p1_blocked"):
+            assert stats[field] == 0
+
     def test_stats_overview_shape(self, storage):
         _seed_review(storage, repo="a/b", pr=1, severities=("P0", "P1"))
         _seed_review(storage, repo="a/b", pr=2, severities=())

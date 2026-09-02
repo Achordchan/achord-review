@@ -114,16 +114,22 @@ def _sync_admin_password(password: str) -> bool:
         return True
 
 
-async def _create_session() -> str:
+async def _create_session(verified_password: str) -> str:
     token = secrets.token_urlsafe(32)
-    password = _admin_password()
 
-    def _create() -> bool:
-        return bool(password and _sync_admin_password(password) and get_storage().create_session(
-            _session_hash(token, password), int(time.time()) + SESSION_TTL_SECONDS))
+    def _create() -> str:
+        current_password = _admin_password()
+        if not hmac.compare_digest(
+                verified_password.encode("utf-8"), current_password.encode("utf-8")):
+            return "password_changed"
+        created = bool(_sync_admin_password(verified_password) and get_storage().create_session(
+            _session_hash(token, verified_password), int(time.time()) + SESSION_TTL_SECONDS))
+        return "created" if created else "storage_error"
 
-    created = await asyncio.to_thread(_create)
-    if not created:
+    result = await asyncio.to_thread(_create)
+    if result == "password_changed":
+        raise HTTPException(status_code=401, detail="管理员密码已变更，请使用新密码重新登录")
+    if result != "created":
         raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试")
     return token
 
@@ -208,7 +214,7 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
         remaining = max(0, MAX_FAILED_ATTEMPTS - decision["failed_count"])
         get_logger().warning(f"Dashboard login failed from {key}")
         raise HTTPException(status_code=401, detail=f"密码错误，剩余尝试次数 {remaining}")
-    token = await _create_session()
+    token = await _create_session(expected)
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
                         max_age=SESSION_TTL_SECONDS, secure=True, path="/")
     await asyncio.to_thread(get_storage().add_audit_log, "LOGIN", {"ip": key}, ip_address=key)
