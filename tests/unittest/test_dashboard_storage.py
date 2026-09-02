@@ -57,6 +57,14 @@ class TestReviewsCrud:
         assert row2["status"] == "FAILED"
         assert "timeout" in row2["error_message"]
 
+    def test_skip_review_closes_running_record(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=3, pr_url="u3")
+        storage.skip_review(request_id, "PR has no files")
+        row = storage.get_review_by_request_id(request_id)
+        assert row["status"] == "SKIPPED"
+        assert "no files" in row["error_message"]
+        assert row["completed_at"] is not None
+
     def test_list_reviews_filters(self, storage):
         _seed_review(storage, repo="a/b", pr=1, verdict="APPROVE")
         _seed_review(storage, repo="c/d", pr=2, verdict="REQUEST_CHANGES",
@@ -103,6 +111,12 @@ class TestStats:
         _seed_review(storage, status_complete=False)
         stats = storage.stats_overview()
         assert stats["running"] == 1
+
+    def test_stats_skipped_not_running(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=9, pr_url="u9")
+        storage.skip_review(request_id, "no files")
+        stats = storage.stats_overview()
+        assert stats["running"] == 0
 
 
 class TestAuditLogs:

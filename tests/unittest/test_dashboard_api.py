@@ -1,7 +1,5 @@
 """Tests for the dashboard API routes (pr_agent/servers/dashboard_api.py)."""
 
-import os
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -22,19 +20,12 @@ def storage(tmp_path, monkeypatch):
 @pytest.fixture()
 def client(storage, monkeypatch):
     # avoid touching the real config engine during API tests
-    from pr_agent.dashboard.config_engine import ConfigEngine
-
     class StubEngine:
         def read(self):
             return {"available": False, "path": None, "values": {}}
 
         def write(self, fields):
             return True, []
-
-    from pr_agent.dashboard.config_engine import get_config_engine
-
-    def _stub_engine(config_path=None):
-        return StubEngine()
 
     monkeypatch.setattr(dashboard_api, "get_config_engine", lambda: StubEngine())
     # FastAPI app with only the dashboard router
@@ -96,6 +87,33 @@ class TestAuth:
         monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "")
         resp = client.post("/api/v1/dashboard/auth/login", json={"password": "x"})
         assert resp.status_code == 503
+
+
+class TestClientIp:
+    def test_trusted_hops_strip_client_spoofing(self, client, monkeypatch):
+        from fastapi import Request
+
+        def make_request(xff):
+            headers = {"x-forwarded-for": xff} if xff else {"host": "h"}
+            scope = {
+                "type": "http", "method": "GET", "path": "/", "headers": [],
+                "query_string": b"", "client": ("10.0.0.1", 1234), "server": ("h", 80),
+                "test_headers": headers,
+            }
+            req = Request(scope)
+            req._headers = __import__("starlette.datastructures", fromlist=["Headers"]).Headers(headers)
+            return req
+
+        # one trusted hop: last value is what our nginx saw, the one before it
+        # is the real client — anything the client prepended is ignored
+        assert dashboard_api._client_ip(make_request("1.2.3.4, 5.6.7.8")) == "1.2.3.4"
+        # attacker rotating the FIRST value cannot change the derived key
+        assert dashboard_api._client_ip(make_request("evil, 1.2.3.4, 5.6.7.8")) == "1.2.3.4"
+        # no header: fall back to the socket address
+        assert dashboard_api._client_ip(make_request(None)) == "10.0.0.1"
+        # zero trusted hops: the raw socket address wins
+        monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
+        assert dashboard_api._client_ip(make_request("1.2.3.4, 5.6.7.8")) == "10.0.0.1"
 
 
 class TestProtectedRoutes:

@@ -31,6 +31,10 @@ export default function ConfigPage() {
   })
 
   const [values, setValues] = useState<Partial<ConfigValues>>({})
+  // The API returns only a masked key ("sk-se****7890"). It is shown as
+  // placeholder text and never put back into the payload: an empty keySecret
+  // means "keep the stored secret", a typed value replaces it.
+  const [keySecret, setKeySecret] = useState('')
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
@@ -39,6 +43,7 @@ export default function ConfigPage() {
   useEffect(() => {
     if (data?.values) {
       setValues(data.values)
+      setKeySecret('')
       setDirty(false)
     }
   }, [data])
@@ -52,8 +57,9 @@ export default function ConfigPage() {
     setSaving(true)
     try {
       const payload = { ...values, restart }
-      // an empty key field means "keep the stored secret" on the server side
-      if (!payload.key) delete payload.key
+      delete payload.key
+      // a typed replacement is submitted; empty means "keep the stored secret"
+      if (keySecret) payload.key = keySecret
       const body = await api.put<{ restarted: boolean }>('/api/v1/dashboard/config', payload)
       toast.success('配置已保存', body.restarted ? '容器重启中，页面将在 30 秒后自动刷新' : '变更已热生效，无需重启')
       setDirty(false)
@@ -163,8 +169,8 @@ export default function ConfigPage() {
                   type="password"
                   className={`${inputClass} pl-9`}
                   placeholder="留空保持现有密钥不变"
-                  value={values.key ?? ''}
-                  onChange={(e) => set('key', e.target.value)}
+                  value={keySecret}
+                  onChange={(e) => { setKeySecret(e.target.value); setDirty(true) }}
                 />
               </div>
             </Field>

@@ -35,27 +35,40 @@ def _poll(key: str) -> Dict[str, Any]:
     proc = _RUNNING_PROC.get(key)
     if proc is None:
         return {"running": False, "exists": False, "output": _RUNNING_LOGS.get(key, [])}
-    # drain whatever the process has produced so far
+    # drain whatever the process has produced so far without blocking: the
+    # output pipe is nonblocking, so a silent or stalled command cannot hang
+    # the API request (and with it the shared webhook event loop)
     logs = _RUNNING_LOGS.setdefault(key, [])
     if proc.stdout:
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            logs.append(line.rstrip())
+        os.set_blocking(proc.stdout.fileno(), False)
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                logs.append(line.rstrip())
+        except (BlockingIOError, OSError):
+            pass  # nothing buffered right now; try again on the next poll
     running = proc.poll() is None
     return {"running": running, "exists": True, "exit_code": None if running else proc.returncode,
             "output": logs}
 
 
 def restart_container() -> Dict[str, Any]:
-    """Restart the achord-review container via the docker socket mount."""
+    """Restart the achord-review container via the docker socket mount.
+
+    Requires the host docker CLI + socket to be available inside this
+    container (mount /var/run/docker.sock read-only to enable); without it
+    the task output explains the missing prerequisite instead of the API
+    silently claiming a restart was issued.
+    """
     argv = ["docker", "restart", "--timeout", "30", CONTAINER_NAME]
     try:
         return _run_tracked("restart", argv)
     except FileNotFoundError:
         return {"task_id": "restart", "already_running": False,
-                "output": ["docker CLI not available inside this container"]}
+                "output": ["docker CLI not available inside this container - "
+                           "mount /var/run/docker.sock (read-only) to enable one-click restart"]}
 
 
 def git_pull() -> Dict[str, Any]:

@@ -192,8 +192,10 @@ class ConfigEngine:
         for stale in backups[:-MAX_BACKUPS]:
             try:
                 os.remove(stale)
-            except OSError:
-                pass
+            except OSError as e:
+                # best-effort retention: keeping one extra backup is harmless,
+                # losing the head of the log because removal raised is not
+                get_logger().debug(f"Dashboard config backup cleanup skipped a file, error: {e}")
 
     def _atomic_dump(self, raw: Dict[str, Any]) -> None:
         directory = os.path.dirname(self.config_path)
@@ -215,7 +217,14 @@ class ConfigEngine:
             raise
 
     def _hot_reload(self, clean: Dict[str, Any]) -> None:
-        """Apply saved values to the in-memory Dynaconf settings immediately."""
+        """Apply saved values to the in-memory Dynaconf settings immediately.
+
+        Scope note: this mutates only THIS worker process's global_settings.
+        The shipped deployment pins GUNICORN_WORKERS=1, so the worker that
+        saves is the worker that serves reviews. With more than one worker a
+        restart is required for every worker to pick the change up — that is
+        what the "save and restart" button is for.
+        """
         from pr_agent.config_loader import global_settings
         try:
             for name, value in clean.items():

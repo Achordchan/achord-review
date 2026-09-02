@@ -15,15 +15,24 @@ services:
     ports:
       - "127.0.0.1:33001:3000"
     volumes:
-      # All configuration and secrets live here. Never bake them into the image.
-      - ./config.toml:/app/pr_agent/settings_prod/.secrets.toml:ro
+      # Secrets live here, never baked into the image. The parent directory is
+      # mounted (not the file itself) so the dashboard config editor can back up
+      # and atomically replace config.toml — a single-file bind mount would be
+      # read-only for os.replace and every save would fail.
+      - ./config:/app/pr_agent/settings_prod
       # Dashboard SQLite database (review history, audit logs); survives restarts.
       - ./data:/app/data
+      # One-click restart from the panel shells out to the host docker daemon.
+      # Read-only socket: the panel can restart the (fixed) container, nothing else.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # docker CLI for the restart button (the slim base image ships none)
+      - /usr/bin/docker:/usr/bin/docker:ro
     environment:
-      # gunicorn binds 0.0.0.0:3000 (see servers/gunicorn_config.py) and would otherwise scale
-      # workers to the CPU count. This host has 2 GB of RAM shared with the relay stack, so pin
-      # the documented minimum of 2 - enough that a worker busy on a review still answers health checks.
-      GUNICORN_WORKERS: "2"
+      # In-memory dashboard sessions live per worker process, so this
+      # deployment must run exactly one worker — with several, a login served
+      # by one worker would 401 on a sibling. One uvicorn worker still answers
+      # health checks while a review runs (all I/O is async).
+      GUNICORN_WORKERS: "1"
     mem_limit: 900m
     logging:
       driver: json-file

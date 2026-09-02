@@ -71,8 +71,8 @@ def _audit_verdict(reviewer: "PRReviewer", review_data: Optional[dict]) -> tuple
     try:
         if review_data:
             return reviewer._determine_review_verdict(review_data)
-    except Exception:
-        pass
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit could not determine verdict, error: {e}")
     return "", ""
 
 
@@ -87,16 +87,25 @@ def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: str,
         verdict, reason = _audit_verdict(reviewer, review_data)
         review_finished(request_id, verdict=verdict, verdict_reason=reason,
                         markdown_output=pr_review, raw_prediction=prediction, issues=issues)
-    except Exception:
-        pass
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit (finished) skipped, error: {e}")
 
 
 def _audit_failed(request_id: str, error: Exception) -> None:
     try:
         from pr_agent.dashboard.audit import review_failed
         review_failed(request_id, str(error))
-    except Exception:
-        pass
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit (failed) skipped, error: {e}")
+
+
+def _audit_skipped(request_id: str, reason: str) -> None:
+    """Close out a RUNNING record for a run that exited before publishing."""
+    try:
+        from pr_agent.dashboard.audit import review_skipped
+        review_skipped(request_id, reason)
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit (skipped) skipped, error: {e}")
 
 
 def _verdict_is_newer(standing, snapshot) -> bool:
@@ -222,12 +231,14 @@ class PRReviewer:
         try:
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
+                _audit_skipped(audit_request_id, "PR has no files")
                 return None
 
             if self.incremental.is_incremental:
                 can_run = self._can_run_incremental_review()
                 # If the gate disabled incremental (e.g., commits_range is None), fall through to full review.
                 if not can_run and self.incremental.is_incremental:
+                    _audit_skipped(audit_request_id, "incremental review gate closed")
                     return None
 
             # if isinstance(self.args, list) and self.args and self.args[0] == 'auto_approve':
@@ -255,6 +266,7 @@ class PRReviewer:
                 if get_settings().config.publish_output:
                     self.git_provider.publish_comment(f"Incremental Review Skipped\n"
                                     f"No files were changed since the [previous PR Review]({previous_review_url})")
+                _audit_skipped(audit_request_id, "incremental review: no new files")
                 return None
 
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
@@ -269,6 +281,7 @@ class PRReviewer:
 
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
+                _audit_skipped(audit_request_id, "model returned no prediction")
                 return None
 
             pr_review = self._prepare_pr_review()

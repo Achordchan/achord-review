@@ -488,7 +488,7 @@ try:
 
     get_storage()  # initialize the SQLite file early so the first webhook write is cheap
     app.include_router(dashboard_router)
-    _dashboard_engine = get_config_engine()
+    get_config_engine()  # fail fast here rather than on the first config request
 
     from fastapi.staticfiles import StaticFiles
     from fastapi.responses import FileResponse
@@ -502,8 +502,12 @@ try:
         @app.get("/dashboard")
         @app.get("/dashboard/{rest:path}")
         async def dashboard_spa(rest: str = ""):
-            target = os.path.join(_dashboard_dist, rest)
-            if rest and os.path.isfile(target):
+            # Confine every served file to the static root: resolve the joined
+            # path and reject anything that escapes it (encoded traversal like
+            # /dashboard/..%2F..%2F lands here after percent-decoding).
+            target = os.path.realpath(os.path.join(_dashboard_dist, rest)) if rest else ""
+            if target and target.startswith(os.path.realpath(_dashboard_dist) + os.sep) \
+                    and os.path.isfile(target):
                 return FileResponse(target)
             return FileResponse(os.path.join(_dashboard_dist, "index.html"))
 except Exception as _dashboard_error:  # pragma: no cover - defensive by design

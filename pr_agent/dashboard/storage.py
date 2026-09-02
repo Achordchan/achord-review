@@ -174,6 +174,20 @@ class DashboardStorage:
              details.get("total_tokens", 0), details.get("duration_ms", 0),
              details.get("model", ""), _utcnow(), request_id))
 
+    def skip_review(self, request_id: str, reason: str) -> None:
+        """Close a RUNNING record that exited before publishing (no files,
+        incremental gate, empty model output). Distinct from FAILED so a
+        genuine model/transport error stays distinguishable in the history."""
+        row = self.get_review_by_request_id(request_id, summary_only=False)
+        details = row or {}
+        self._write(
+            "UPDATE reviews SET status='SKIPPED', error_message=?,"
+            " prompt_tokens=?, completion_tokens=?, total_tokens=?, duration_ms=?,"
+            " model=COALESCE(NULLIF(?, ''), model), completed_at=? WHERE request_id=?",
+            (reason, details.get("prompt_tokens", 0), details.get("completion_tokens", 0),
+             details.get("total_tokens", 0), details.get("duration_ms", 0),
+             details.get("model", ""), _utcnow(), request_id))
+
     def set_review_usage(self, request_id: str, model: str = "", reasoning_effort: str = "",
                          prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0,
                          duration_ms: int = 0) -> None:

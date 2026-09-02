@@ -120,7 +120,7 @@ Scope:
 # ---------------------------------------------------------------------------
 # Control panel (https://review.achord.cn/dashboard). The password gates every
 # dashboard API route; login attempts are rate-limited to 5 failures / 15 min.
-# Leave it empty to disable the panel entirely — the API then rejects every
-# login with 503 and the SPA shows a dead end.
+# Left empty the panel stays DISABLED — every login is rejected with 503.
+# Set a real secret here (an explicit act) to enable the panel.
 [dashboard]
-admin_password = "REPLACE_WITH_DASHBOARD_PASSWORD"
+admin_password = ""

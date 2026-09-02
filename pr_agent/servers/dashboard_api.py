@@ -8,6 +8,7 @@ Routes reserved for future phases return 501 with code COMING_SOON so the
 front end can wire them up before the backing features ship.
 """
 
+import asyncio
 import hmac
 import os
 import secrets
@@ -30,13 +31,17 @@ SESSION_COOKIE = "dashboard_session"
 SESSION_TTL_SECONDS = 7 * 24 * 3600
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 15 * 60
+# Number of trusted proxy hops in front of this service. The deployment sits
+# behind exactly one nginx; only headers appended by those hops are consumed,
+# so clients cannot rotate their X-Forwarded-For to evade the login lockout.
+TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "1"))
 
-# in-process session / lockout state; a restart simply logs everyone back in
+# in-process session / lockout state; a restart simply logs everyone back in.
+# Sessions live per worker process, so this deployment must run exactly one
+# gunicorn worker (the shipped compose file sets GUNICORN_WORKERS=1): with
+# several workers, a login against one would 401 on a sibling.
 _sessions: Dict[str, float] = {}
 _failed_attempts: Dict[str, list] = {}
-
-_PENDING_STATUSES = ("RUNNING",)
-_VERDICTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
 
 
 def _admin_password() -> str:
@@ -47,8 +52,25 @@ def _admin_password() -> str:
 
 
 def _client_ip(request: Request) -> str:
+    """Client address, consuming only the trusted proxy hops' XFF entries.
+
+    gunicorn is run with --forwarded-allow-ips '*' behind our nginx, so each
+    hop appends the address it saw to X-Forwarded-For. With H hops, the real
+    client is the (H+1)-th value from the end; anything an attacker prepends
+    is ignored. With zero trusted hops the header is ignored entirely.
+    """
+    hops = max(0, TRUSTED_PROXY_HOPS)
+    if hops == 0:
+        return request.client.host if request.client else ""
     forwarded = request.headers.get("x-forwarded-for", "")
-    return forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "")
+    if forwarded:
+        chain = [part.strip() for part in forwarded.split(",") if part.strip()]
+        # chain[-1] is the address the last trusted hop saw; walk back H+1
+        # entries to reach the original client
+        index = len(chain) - 1 - hops
+        if index >= 0:
+            return chain[index]
+    return request.client.host if request.client else ""
 
 
 def _lockout_key(request: Request) -> str:
@@ -218,7 +240,8 @@ async def ops_task(task_id: str, request: Request, dashboard_session: Optional[s
 @router.post("/ops/diagnose")
 async def ops_diagnose(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
-    return _ok(ops.diagnose())
+    # probes make network calls; keep them off the shared webhook event loop
+    return _ok(await asyncio.to_thread(ops.diagnose))
 
 
 @router.get("/ops/logs")

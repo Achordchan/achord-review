@@ -29,8 +29,8 @@ def _parse_pr_url(pr_url: str) -> tuple:
         parts = pr_url.split("://", 1)[-1].split("/", 1)[1].rstrip("/").split("/")
         if len(parts) >= 2:
             repo = f"{parts[0]}/{parts[1]}"
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 — any odd URL shape falls back to ("", 0)
+        get_logger().debug(f"Dashboard audit could not parse PR URL, error: {e}")
     return repo, number or 0
 
 
@@ -128,6 +128,32 @@ def review_failed(request_id: str, error_message: str) -> None:
             storage.fail_review(request_id, error_message[:2000])
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_failed) failed, error: {e}")
+
+    try:
+        asyncio.get_running_loop().create_task(asyncio.to_thread(_work))
+    except RuntimeError:
+        _work()
+
+
+def review_skipped(request_id: str, reason: str) -> None:
+    """Close a RUNNING record for a run that exited before publishing.
+
+    Without this the record would stay RUNNING forever and inflate the
+    dashboard's active-review count.
+    """
+    if not request_id:
+        return
+
+    def _work():
+        try:
+            storage = _run_audit()
+            if storage is None:
+                return
+            fields = _run_payload_fields()
+            storage.set_review_usage(request_id, **fields)
+            storage.skip_review(request_id, reason[:2000])
+        except Exception as e:
+            get_logger().warning(f"Dashboard audit (review_skipped) failed, error: {e}")
 
     try:
         asyncio.get_running_loop().create_task(asyncio.to_thread(_work))
