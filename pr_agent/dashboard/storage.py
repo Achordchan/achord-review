@@ -295,13 +295,13 @@ class DashboardStorage:
                       commit_sha: str = "", model: str = "", reasoning_effort: str = "") -> str:
         """Insert a RUNNING record and return its request_id, or "" on failure."""
         request_id = uuid.uuid4().hex
-        self._write(
+        inserted = self._write(
             "INSERT INTO reviews (request_id, repo_name, pr_number, pr_title, pr_url, commit_sha,"
             " sender, trigger_type, command, status, model, reasoning_effort, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?)",
             (request_id, repo_name, pr_number, pr_title, pr_url, commit_sha, sender,
              trigger_type, command, model, reasoning_effort, _utcnow()))
-        return request_id
+        return request_id if inserted is not None else ""
 
     def complete_review(self, request_id: str, verdict: str = "", verdict_reason: str = "",
                         markdown_output: str = "", raw_prediction: str = "") -> None:

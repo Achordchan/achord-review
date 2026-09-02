@@ -103,10 +103,13 @@ class TestWrite:
 
         import pr_agent.config_loader as cl
         monkeypatch.setattr(cl, "global_settings", FakeSettings(), raising=False)
+        with open(engine.config_path, "a", encoding="utf-8") as f:
+            f.write('\n[dashboard]\nadmin_password = "rotated-password"\n')
         engine._loaded_signature = (0, 0)
 
         assert engine.reload_if_changed() is True
         assert captured["config.model"] == "openai/gpt-old"
+        assert captured["dashboard.admin_password"] == "rotated-password"
         assert engine.reload_if_changed() is False
 
     def test_hot_reload_failure_is_reported_after_persisting_file(self, engine, monkeypatch):

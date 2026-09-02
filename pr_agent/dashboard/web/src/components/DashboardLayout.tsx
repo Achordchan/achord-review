@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../lib/auth'
 import { ComingSoonBadge } from './badges'
+import { useToast } from './Toast'
 
 type NavItem = {
   to: string
@@ -85,7 +86,9 @@ function ComingSoonCard({ item, onClose }: { item: NavItem; onClose: () => void 
 export default function DashboardLayout() {
   const { model, version, logout } = useAuth()
   const navigate = useNavigate()
+  const toast = useToast()
   const [pendingItem, setPendingItem] = useState<NavItem | null>(null)
+  const [logoutPending, setLogoutPending] = useState(false)
 
   const handleNavClick = (item: NavItem) => {
     if (item.phase) {
@@ -93,6 +96,18 @@ export default function DashboardLayout() {
       return
     }
     navigate(item.to)
+  }
+
+  const handleLogout = async () => {
+    if (logoutPending) return
+    setLogoutPending(true)
+    try {
+      await logout()
+    } catch (error) {
+      toast.error('退出失败', error instanceof Error ? error.message : '会话仍然有效，请重试')
+    } finally {
+      setLogoutPending(false)
+    }
   }
 
   return (
@@ -143,11 +158,12 @@ export default function DashboardLayout() {
         </nav>
         <div className="border-t border-line p-3">
           <button
-            onClick={() => void logout()}
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-text"
+            onClick={() => void handleLogout()}
+            disabled={logoutPending}
+            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50"
           >
             <LogOut size={16} />
-            退出登录
+            {logoutPending ? '退出中…' : '退出登录'}
           </button>
         </div>
       </aside>

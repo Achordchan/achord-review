@@ -44,6 +44,10 @@ class TestReviewsCrud:
         id2 = storage.create_review(repo_name="r", pr_number=1, pr_url="u")
         assert id1 and id2 and id1 != id2
 
+    def test_create_returns_empty_id_when_insert_fails(self, storage, monkeypatch):
+        monkeypatch.setattr(storage, "_write", lambda *args, **kwargs: None)
+        assert storage.create_review(repo_name="r", pr_number=1, pr_url="u") == ""
+
     def test_complete_and_fail_transitions(self, storage):
         request_id = _seed_review(storage, status_complete=False)
         row = storage.get_review_by_request_id(request_id)

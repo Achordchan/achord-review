@@ -182,7 +182,8 @@ class ConfigEngine:
                 # same interprocess critical section as the file replacement.
                 # Otherwise another worker can replace the file between these
                 # steps and this worker can mark older values as current.
-                if not self._hot_reload(clean):
+                raw = self._load_raw()
+                if raw is None or not self._hot_reload(raw):
                     return False, ["configuration saved but hot reload failed; restart required"]
                 self._loaded_signature = self._file_signature()
         except Exception as e:
@@ -246,8 +247,8 @@ class ConfigEngine:
                 os.remove(tmp_path)
             raise
 
-    def _hot_reload(self, clean: Dict[str, Any]) -> bool:
-        """Apply saved values to the in-memory Dynaconf settings immediately.
+    def _hot_reload(self, raw: Dict[str, Any]) -> bool:
+        """Apply the complete saved document to in-memory Dynaconf settings.
 
         This updates the worker performing the save immediately. Other workers
         compare the file signature at the start of their next HTTP request and
@@ -255,20 +256,16 @@ class ConfigEngine:
         without reporting a process-local hot reload as globally complete.
         """
         from pr_agent.config_loader import global_settings
+
+        def _apply(value: Any, path: str) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    _apply(child, f"{path}.{key}" if path else str(key))
+                return
+            global_settings.set(path, value)
+
         try:
-            for name, value in clean.items():
-                if name in STRING_FIELDS or name in INT_FIELDS:
-                    table, key = STRING_FIELDS.get(name, INT_FIELDS.get(name, ("", ""))[:2])
-                    # an empty secret means "keep the stored value" — same
-                    # contract as _apply_fields, or a save that leaves the file
-                    # untouched would still clear the running process's key
-                    if name == "key" and not value:
-                        continue
-                    global_settings.set(f"{table}.{key}", value)
-                elif name == "verdict_blocking_severities":
-                    global_settings.set("pr_reviewer.verdict_blocking_severities", value)
-                elif name == "ignore_glob":
-                    global_settings.set("ignore.glob", value)
+            _apply(raw, "")
             return True
         except Exception as e:
             # The file is already correct; a reload miss only delays effect until restart.
@@ -288,18 +285,7 @@ class ConfigEngine:
         raw = self._load_raw()
         if raw is None:
             return False
-        fields: Dict[str, Any] = {}
-        for name, (table, key) in STRING_FIELDS.items():
-            if key in raw.get(table, {}):
-                fields[name] = raw[table][key]
-        for name, (table, key, _, _) in INT_FIELDS.items():
-            if key in raw.get(table, {}):
-                fields[name] = raw[table][key]
-        if "verdict_blocking_severities" in raw.get("pr_reviewer", {}):
-            fields["verdict_blocking_severities"] = raw["pr_reviewer"]["verdict_blocking_severities"]
-        if "glob" in raw.get("ignore", {}):
-            fields["ignore_glob"] = raw["ignore"]["glob"]
-        if not self._hot_reload(fields):
+        if not self._hot_reload(raw):
             return False
         self._loaded_signature = signature
         return True

@@ -47,12 +47,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh])
 
   const logout = useCallback(async () => {
-    try {
-      await api.post('/api/v1/dashboard/auth/logout')
-    } finally {
-      storeToken(null)
-      setState((prev) => ({ ...prev, authenticated: false }))
-    }
+    await api.post('/api/v1/dashboard/auth/logout')
+    storeToken(null)
+    setState((prev) => ({ ...prev, authenticated: false }))
   }, [])
 
   return <AuthContext.Provider value={{ ...state, login, logout }}>{children}</AuthContext.Provider>

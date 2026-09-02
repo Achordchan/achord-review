@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { KeyRound, RotateCcw, Save } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
@@ -35,8 +35,9 @@ export default function ConfigPage() {
   // placeholder text and never put back into the payload: an empty keySecret
   // means "keep the stored secret", a typed value replaces it.
   const [keySecret, setKeySecret] = useState('')
-  const [dirty, setDirty] = useState(false)
+  const [dirtyFields, setDirtyFields] = useState<Set<keyof ConfigValues>>(new Set())
   const [saving, setSaving] = useState(false)
+  const saveInFlight = useRef(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
   const [newGlob, setNewGlob] = useState('')
 
@@ -44,20 +45,24 @@ export default function ConfigPage() {
     if (data?.values) {
       setValues(data.values)
       setKeySecret('')
-      setDirty(false)
+      setDirtyFields(new Set())
     }
   }, [data])
 
   const set = <K extends keyof ConfigValues>(key: K, value: ConfigValues[K]) => {
     setValues((prev) => ({ ...prev, [key]: value }))
-    setDirty(true)
+    setDirtyFields((prev) => new Set(prev).add(key))
   }
 
   const save = async (restart: boolean) => {
+    if (saveInFlight.current) return
+    saveInFlight.current = true
     setSaving(true)
     try {
-      const payload = { ...values, restart }
-      delete payload.key
+      const payload: Record<string, unknown> = { restart }
+      dirtyFields.forEach((key) => {
+        if (key !== 'key') payload[key] = values[key]
+      })
       // a typed replacement is submitted; empty means "keep the stored secret"
       if (keySecret) payload.key = keySecret
       const body = await api.put<{
@@ -70,9 +75,10 @@ export default function ConfigPage() {
       } else {
         toast.success('配置已保存', body.restarted ? '容器重启中，页面将在 30 秒后自动刷新' : '变更已热生效，无需重启')
       }
-      setDirty(false)
+      setDirtyFields(new Set())
+      setKeySecret('')
+      setConfirmRestart(false)
       if (body.restarted) {
-        setConfirmRestart(false)
         window.setTimeout(() => window.location.reload(), 30_000)
       } else {
         await queryClient.invalidateQueries({ queryKey: ['config'] })
@@ -80,6 +86,7 @@ export default function ConfigPage() {
     } catch (err) {
       toast.error('保存失败', err instanceof ApiError ? err.message : '未知错误')
     } finally {
+      saveInFlight.current = false
       setSaving(false)
     }
   }
@@ -110,6 +117,7 @@ export default function ConfigPage() {
   }
 
   const sevSelected = values.verdict_blocking_severities ?? []
+  const dirty = dirtyFields.size > 0
 
   return (
     <div className="space-y-4">
@@ -178,7 +186,16 @@ export default function ConfigPage() {
                   className={`${inputClass} pl-9`}
                   placeholder="留空保持现有密钥不变"
                   value={keySecret}
-                  onChange={(e) => { setKeySecret(e.target.value); setDirty(true) }}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    setKeySecret(value)
+                    setDirtyFields((prev) => {
+                      const next = new Set(prev)
+                      if (value) next.add('key')
+                      else next.delete('key')
+                      return next
+                    })
+                  }}
                 />
               </div>
             </Field>
