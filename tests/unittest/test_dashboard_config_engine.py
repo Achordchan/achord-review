@@ -176,6 +176,16 @@ class TestWrite:
         assert "openai.key" not in captured
         assert captured["config.model"] == "openai/gpt-old"
 
+    def test_write_rejects_environment_overridden_field(self, engine, monkeypatch):
+        monkeypatch.setenv("OPENAI__KEY", "environment-secret")
+        before = engine._load_raw()["openai"]["key"]
+
+        ok, errors = engine.write({"key": "new-file-secret"})
+
+        assert ok is False
+        assert errors == ["fields controlled by environment cannot be changed here: openai.key"]
+        assert engine._load_raw()["openai"]["key"] == before
+
     def test_hot_reload_unsets_values_removed_from_custom_file(self, engine, monkeypatch):
         captured = {"set": {}, "unset": []}
 

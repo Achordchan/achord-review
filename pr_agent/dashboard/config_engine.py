@@ -197,6 +197,14 @@ class ConfigEngine:
                         clean.pop("key")  # masked GET value round-tripped unchanged
                 if not clean:
                     return True, []
+                overridden_paths = sorted(
+                    path for name in clean
+                    if (path := self._field_path(name)) and self._has_environment_override(path))
+                if overridden_paths:
+                    return False, [
+                        "fields controlled by environment cannot be changed here: "
+                        + ", ".join(overridden_paths)
+                    ]
                 self._apply_fields(doc, clean)
                 self._backup()
                 self._atomic_dump(doc)
@@ -306,20 +314,14 @@ class ConfigEngine:
         without reporting a process-local hot reload as globally complete.
         """
         from pr_agent.config_loader import global_settings, global_settings_lock
-        environment_keys = {key.upper() for key in os.environ}
         current_paths = self._flatten_paths(raw)
-
-        def _has_environment_override(path: str) -> bool:
-            nested_env_key = path.replace(".", "__").upper()
-            legacy_env_key = path.replace(".", "_").upper()
-            return nested_env_key in environment_keys or legacy_env_key in environment_keys
 
         def _apply(value: Any, path: str) -> None:
             if isinstance(value, dict):
                 for key, child in value.items():
                     _apply(child, f"{path}.{key}" if path else str(key))
                 return
-            if _has_environment_override(path):
+            if self._has_environment_override(path):
                 return  # Dynaconf environment sources retain higher precedence.
             global_settings.set(path, value)
 
@@ -331,7 +333,7 @@ class ConfigEngine:
                     global_settings.reload()
                 else:
                     for removed_path in self._loaded_paths - current_paths:
-                        if not _has_environment_override(removed_path):
+                        if not self._has_environment_override(removed_path):
                             global_settings.unset(removed_path)
                     _apply(raw, "")
                 self._loaded_paths = current_paths
@@ -340,6 +342,27 @@ class ConfigEngine:
             # The file is already correct; a reload miss only delays effect until restart.
             get_logger().warning(f"Dashboard config hot reload failed, error: {e}")
             return False
+
+    @staticmethod
+    def _has_environment_override(path: str) -> bool:
+        environment_keys = {key.upper() for key in os.environ}
+        nested_env_key = path.replace(".", "__").upper()
+        legacy_env_key = path.replace(".", "_").upper()
+        return nested_env_key in environment_keys or legacy_env_key in environment_keys
+
+    @staticmethod
+    def _field_path(name: str) -> str:
+        if name in STRING_FIELDS:
+            table, key = STRING_FIELDS[name]
+            return f"{table}.{key}"
+        if name in INT_FIELDS:
+            table, key = INT_FIELDS[name][0], INT_FIELDS[name][1]
+            return f"{table}.{key}"
+        if name == "verdict_blocking_severities":
+            return "pr_reviewer.verdict_blocking_severities"
+        if name == "ignore_glob":
+            return "ignore.glob"
+        return ""
 
     @staticmethod
     def _flatten_paths(raw: Dict[str, Any], prefix: str = "") -> set:

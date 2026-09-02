@@ -79,3 +79,36 @@ def test_initial_audit_write_runs_off_event_loop(monkeypatch):
     assert called["storage_thread"] != main_thread
     assert called["kwargs"]["repo_name"] == "group/subgroup/repo"
     assert called["kwargs"]["pr_number"] == 42
+
+
+def test_metadata_fields_are_extracted_independently(monkeypatch):
+    captured = {}
+
+    class BrokenPR:
+        @property
+        def title(self):
+            raise RuntimeError("provider title unavailable")
+
+    class GitProvider:
+        pr = BrokenPR()
+        id_project = "group/subgroup/repo"
+        id_mr = 77
+
+        def get_head_commit_sha(self):
+            return "sha-after-title-error"
+
+    class Reviewer:
+        pr_url = "https://gitlab.example/group/subgroup/repo/-/merge_requests/77"
+        git_provider = GitProvider()
+
+    def fake_started(**kwargs):
+        captured.update(kwargs)
+        return "request-id"
+
+    monkeypatch.setattr(audit, "review_started", fake_started)
+
+    assert asyncio.run(pr_reviewer._audit_started(Reviewer())) == "request-id"
+    assert captured["pr_title"] == ""
+    assert captured["commit_sha"] == "sha-after-title-error"
+    assert captured["repo_name"] == "group/subgroup/repo"
+    assert captured["pr_number"] == 77

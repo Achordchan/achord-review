@@ -78,10 +78,20 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
         except Exception:
             pass  # no request scope (CLI run) — keep the manual defaults
         title, sha, repo_name, pr_number = "", "", "", 0
+        provider = reviewer.git_provider
         try:
-            title = reviewer.git_provider.pr.title or ""
-            sha = reviewer.git_provider.get_head_commit_sha() or ""
-            provider = reviewer.git_provider
+            pr = getattr(provider, "pr", None)
+            title = (
+                pr.get("title", "") if isinstance(pr, dict)
+                else getattr(pr, "title", "")
+            ) or ""
+        except Exception as e:
+            get_logger().debug(f"Dashboard audit could not read PR title, error: {e}")
+        try:
+            sha = provider.get_head_commit_sha() or ""
+        except Exception as e:
+            get_logger().debug(f"Dashboard audit could not read head SHA, error: {e}")
+        try:
             repo = getattr(provider, "repo", "")
             if isinstance(repo, str):
                 repo_name = repo
@@ -94,12 +104,15 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
                 repo_slug = getattr(provider, "repo_slug", "")
                 if workspace and repo_slug:
                     repo_name = f"{workspace}/{repo_slug}"
+        except Exception as e:
+            get_logger().debug(f"Dashboard audit could not read repository metadata, error: {e}")
+        try:
             pr_number = int(
                 getattr(provider, "pr_num", 0)
                 or getattr(provider, "id_mr", 0)
                 or 0)
         except Exception as e:
-            get_logger().debug(f"Dashboard audit could not read PR metadata, error: {e}")
+            get_logger().debug(f"Dashboard audit could not read PR number, error: {e}")
         return review_started(
             pr_url=reviewer.pr_url, sender=sender, trigger_type=trigger_type,
             commit_sha=sha, pr_title=title, repo_name=repo_name,
