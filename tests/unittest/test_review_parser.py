@@ -68,6 +68,34 @@ def test_recovers_explicit_security_concern_without_findings():
     assert recovered == {"review": data}
 
 
+def test_security_heading_starting_with_no_letters_is_not_a_negative_answer():
+    data = {
+        "key_issues_to_review": [],
+        "security_concerns": "Nonce validation bypass: attacker-controlled nonce is accepted",
+    }
+
+    recovered, changed = recover_missing_review_wrapper(data, require_severity=True)
+
+    assert changed is True
+    assert recovered == {"review": data}
+
+
+@pytest.mark.parametrize("security_concerns", [
+    "There are no security concerns",
+    "N/A",
+    "None",
+    "Possible concern without details",
+])
+def test_rejects_unwrapped_security_only_response_without_positive_concern(
+        security_concerns):
+    data = {"key_issues_to_review": [], "security_concerns": security_concerns}
+
+    recovered, changed = recover_missing_review_wrapper(data, require_severity=True)
+
+    assert changed is False
+    assert recovered is data
+
+
 def test_preserves_already_wrapped_review_response():
     data = {"review": {"key_issues_to_review": [_finding()]}}
 

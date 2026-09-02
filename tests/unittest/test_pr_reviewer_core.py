@@ -641,6 +641,57 @@ async def test_run_removes_its_progress_comment_when_review_generation_fails(
 
 
 @pytest.mark.asyncio
+async def test_run_records_an_empty_review_report_as_failed(monkeypatch):
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    progress_comment = MagicMock()
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = ["app.py"]
+    git_provider.publish_comment.return_value = progress_comment
+    reviewer = _make_reviewer(git_provider)
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    reviewer.prediction = None
+    reviewer._prepare_pr_review = lambda: ""
+
+    async def fake_retry(prepare_fn, model_type=None):
+        reviewer.prediction = "malformed prediction"
+
+    audit_failed = AsyncMock()
+    audit_finished = AsyncMock()
+    monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "retry_with_fallback_models", fake_retry)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
+    monkeypatch.setattr(pr_reviewer_module, "_audit_failed", audit_failed)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_finished", audit_finished)
+
+    settings = get_settings()
+    original = {
+        "publish_output": settings.config.publish_output,
+        "is_auto_command": settings.config.get("is_auto_command", False),
+    }
+    try:
+        settings.config.publish_output = True
+        settings.config.is_auto_command = False
+
+        await reviewer.run()
+    finally:
+        settings.config.publish_output = original["publish_output"]
+        settings.config.is_auto_command = original["is_auto_command"]
+
+    error = audit_failed.await_args.args[1]
+    assert isinstance(error, ValueError)
+    assert str(error) == "No usable review report was generated"
+    audit_finished.assert_not_awaited()
+    assert git_provider.publish_comment.call_args_list == [
+        (("Preparing review...",), {"is_temporary": True}),
+        (("Failed to review PR",), {}),
+    ]
+    git_provider.remove_comment.assert_called_once_with(progress_comment)
+    git_provider.remove_initial_comment.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_publishes_failure_result_when_progress_comment_has_no_handle(monkeypatch):
     from pr_agent.tools import pr_reviewer as pr_reviewer_module
 
