@@ -117,7 +117,7 @@ class TestWrite:
 
         ok, errors = engine.write({"model": "openai/persisted"})
 
-        assert ok is False
+        assert ok is True
         assert "saved but hot reload failed" in errors[0]
         assert engine.read()["values"]["model"] == "openai/persisted"
 

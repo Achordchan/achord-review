@@ -69,8 +69,12 @@ export default function ConfigPage() {
         restarted: boolean
         restart_started: boolean
         restart_output: string[]
+        hot_reload_pending: boolean
+        reload_warning: string
       }>('/api/v1/dashboard/config', payload)
-      if (restart && !body.restarted) {
+      if (body.hot_reload_pending && !body.restarted) {
+        toast.error('配置已保存，但尚未热生效', body.reload_warning || '请重启服务后生效')
+      } else if (restart && !body.restarted) {
         toast.error('配置已保存，但重启未发起', body.restart_output[0] ?? '请在宿主机重启服务')
       } else {
         toast.success('配置已保存', body.restarted ? '容器重启中，页面将在 30 秒后自动刷新' : '变更已热生效，无需重启')

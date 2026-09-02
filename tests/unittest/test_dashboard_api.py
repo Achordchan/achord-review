@@ -133,6 +133,7 @@ class TestClientIp:
             req._headers = Headers(headers)
             return req
 
+        monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 1)
         # one trusted hop: nginx APPENDS the address it saw, so the rightmost
         # entry is the real client; the leftmost is client-supplied noise
         assert dashboard_api._client_ip(make_request("1.2.3.4, 5.6.7.8")) == "5.6.7.8"
@@ -294,6 +295,21 @@ class TestProtectedRoutes:
             json={"modle": "openai/typo"})
         assert resp.status_code == 400
         assert "unknown field" in resp.json()["detail"]
+
+    def test_config_reports_persisted_but_pending_hot_reload(self, client, monkeypatch):
+        class PartialEngine:
+            def write(self, fields):
+                return True, ["configuration saved but hot reload failed; restart required"]
+
+        monkeypatch.setattr(dashboard_api, "get_config_engine", lambda: PartialEngine())
+        auth = _auth_header(client)
+        resp = client.put(
+            "/api/v1/dashboard/config",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"},
+            json={"model": "openai/persisted"})
+        assert resp.status_code == 200
+        assert resp.json()["data"]["hot_reload_pending"] is True
+        assert "需要重启" in resp.json()["message"]
 
     def test_ops_reports_command_not_started(self, client, monkeypatch):
         auth = _auth_header(client)

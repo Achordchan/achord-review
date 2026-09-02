@@ -36,7 +36,7 @@ LOCKOUT_SECONDS = 15 * 60
 # Number of trusted proxy hops in front of this service. The deployment sits
 # behind exactly one nginx; only headers appended by those hops are consumed,
 # so clients cannot rotate their X-Forwarded-For to evade the login lockout.
-TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "1"))
+TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 
 # Session and lockout state is persisted in the dashboard SQLite database so
 # login remains stable across gunicorn workers. Only SHA-256 digests are stored;
@@ -240,6 +240,7 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     success, errors = engine.write(fields)
     if not success:
         raise HTTPException(status_code=400, detail="; ".join(errors))
+    hot_reload_pending = bool(errors)
     get_storage().add_audit_log("UPDATE_CONFIG", {"fields": sorted(fields.keys())},
                                 ip_address=_client_ip(request))
     # report what actually happened: without docker inside the container the
@@ -247,14 +248,16 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     result = await asyncio.to_thread(ops.restart_container) if restart else None
     restart_started = bool(restart and result and result.get("started"))
     restarted = restart_started
-    message = "配置已保存并热生效"
+    message = "配置已保存，但热重载失败，需要重启" if hot_reload_pending else "配置已保存并热生效"
     if restart_started:
         message += "，容器重启中"
     elif restart:
         message += "，但重启未发起，请检查受控 Docker 端点或在宿主机重启"
     return _ok({"restarted": restarted,
                 "restart_started": restart_started,
-                "restart_output": (result or {}).get("output", []) if restart else []},
+                "restart_output": (result or {}).get("output", []) if restart else [],
+                "hot_reload_pending": hot_reload_pending,
+                "reload_warning": errors[0] if errors else ""},
                message=message)
 
 

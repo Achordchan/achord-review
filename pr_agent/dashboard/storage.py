@@ -114,8 +114,8 @@ def _utc_at(timestamp: float) -> str:
 class DashboardStorage:
     """Thread-safe SQLite access with single-writer serialization and WAL reads."""
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = db_path or DEFAULT_DB_PATH
         self._write_lock = threading.Lock()
         self._stale_cleanup_lock = threading.Lock()
         self._last_stale_cleanup = 0.0
@@ -556,9 +556,11 @@ def get_storage() -> DashboardStorage:
     global _storage
     with _storage_lock:
         if _storage is None:
-            _storage = DashboardStorage()
+            candidate = DashboardStorage()
             try:
-                _storage.initialize()
+                candidate.initialize()
+                _storage = candidate
             except Exception as e:
                 get_logger().warning(f"Dashboard storage initialization failed, error: {e}")
+                return candidate  # leave singleton unset so the next call retries
         return _storage

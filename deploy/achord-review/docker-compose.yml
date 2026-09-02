@@ -31,6 +31,9 @@ services:
       # and login lockouts are shared through SQLite; config changes are picked
       # up by each worker on its next request.
       GUNICORN_WORKERS: "2"
+      # The published port is loopback-only behind the single documented nginx.
+      # Direct/custom deployments default to zero trusted hops and must opt in.
+      DASHBOARD_TRUSTED_PROXY_HOPS: "1"
     mem_limit: 900m
     logging:
       driver: json-file

@@ -184,7 +184,7 @@ class ConfigEngine:
                 # steps and this worker can mark older values as current.
                 raw = self._load_raw()
                 if raw is None or not self._hot_reload(raw):
-                    return False, ["configuration saved but hot reload failed; restart required"]
+                    return True, ["configuration saved but hot reload failed; restart required"]
                 self._loaded_signature = self._file_signature()
         except Exception as e:
             get_logger().warning(f"Dashboard config write failed, error: {e}")
