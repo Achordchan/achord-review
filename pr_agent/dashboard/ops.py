@@ -2,8 +2,9 @@
 
 Ops commands are restricted to a fixed whitelist - there is no generic shell
 endpoint. Restart and git-pull shell out to the container runtime / git binary
-and stream their output back to the caller; probes (LLM relay, GitHub App
-credential, storage) run in-process and never raise.
+from an API worker thread. Git pull returns its bounded final output directly;
+restart returns once the controlled runtime accepts the command. Probes (LLM
+relay, GitHub App credential, storage) run in-process and never raise.
 """
 
 import os
@@ -16,43 +17,17 @@ from pr_agent.log import get_logger
 # Fixed commands only; nothing constructed from user input reaches the shell.
 CONTAINER_NAME = os.environ.get("ACHORD_REVIEW_CONTAINER", "achord-review")
 REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "/app")
-_RUNNING_PROC: Dict[str, subprocess.Popen] = {}
-_RUNNING_LOGS: Dict[str, List[str]] = {}
+GIT_PULL_TIMEOUT_SECONDS = 120
+DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 5
 
 
-def _run_tracked(key: str, argv: List[str], cwd: str = "/") -> Dict[str, Any]:
-    """Start a whitelisted command, keep its handle, return a task id."""
-    if _RUNNING_PROC.get(key) and _RUNNING_PROC[key].poll() is None:
-        return {"started": False, "task_id": key, "already_running": True,
-                "output": _RUNNING_LOGS.get(key, [])}
-    _RUNNING_LOGS[key] = []
-    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, bufsize=1)
-    _RUNNING_PROC[key] = proc
-    return {"started": True, "task_id": key, "already_running": False, "output": []}
+def _not_started(message: str) -> Dict[str, Any]:
+    return {"started": False, "completed": True, "exit_code": None, "output": [message]}
 
 
-def _poll(key: str) -> Dict[str, Any]:
-    proc = _RUNNING_PROC.get(key)
-    if proc is None:
-        return {"running": False, "exists": False, "output": _RUNNING_LOGS.get(key, [])}
-    # drain whatever the process has produced so far without blocking: the
-    # output pipe is nonblocking, so a silent or stalled command cannot hang
-    # the API request (and with it the shared webhook event loop)
-    logs = _RUNNING_LOGS.setdefault(key, [])
-    if proc.stdout:
-        os.set_blocking(proc.stdout.fileno(), False)
-        try:
-            while True:
-                line = proc.stdout.readline()
-                if not line:
-                    break
-                logs.append(line.rstrip())
-        except (BlockingIOError, OSError):
-            pass  # nothing buffered right now; try again on the next poll
-    running = proc.poll() is None
-    return {"running": running, "exists": True, "exit_code": None if running else proc.returncode,
-            "output": logs}
+def _completed_process_result(result: subprocess.CompletedProcess) -> Dict[str, Any]:
+    output = (result.stdout or "").splitlines()
+    return {"started": True, "completed": True, "exit_code": result.returncode, "output": output}
 
 
 def restart_container() -> Dict[str, Any]:
@@ -61,29 +36,40 @@ def restart_container() -> Dict[str, Any]:
     The default deployment intentionally exposes no raw Docker socket. An
     operator may supply a narrowly authorized Docker endpoint; otherwise the
     explicit not-started result lets the API and UI report the unavailable
-    operation without creating a task that can never be polled.
+    operation without creating process-local task state.
     """
-    argv = ["docker", "restart", "--timeout", "30", CONTAINER_NAME]
     try:
-        return _run_tracked("restart", argv)
+        preflight = subprocess.run(
+            ["docker", "inspect", CONTAINER_NAME], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=DOCKER_PREFLIGHT_TIMEOUT_SECONDS,
+            check=False)
+        if preflight.returncode != 0:
+            return _not_started((preflight.stdout or "Docker 端点不可用").strip()[:1000])
+        subprocess.Popen(
+            ["docker", "restart", "--timeout", "30", CONTAINER_NAME],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return {"started": True, "completed": False, "exit_code": None, "output": []}
+    except subprocess.TimeoutExpired:
+        return _not_started("Docker 端点预检超时，容器重启未发起")
     except OSError:
-        return {"started": False, "task_id": None, "already_running": False,
-                "output": ["docker CLI 或受控 Docker 端点不可用，容器重启未发起"]}
+        return _not_started("docker CLI 或受控 Docker 端点不可用，容器重启未发起")
 
 
 def git_pull() -> Dict[str, Any]:
-    argv = ["git", "-C", REPO_DIR, "pull", "--ff-only"]
     try:
-        return _run_tracked("git-pull", argv, cwd=REPO_DIR)
+        result = subprocess.run(
+            ["git", "-C", REPO_DIR, "pull", "--ff-only"], cwd=REPO_DIR,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            timeout=GIT_PULL_TIMEOUT_SECONDS, check=False)
+        return _completed_process_result(result)
+    except subprocess.TimeoutExpired as e:
+        output = e.stdout if isinstance(e.stdout, str) else ""
+        lines = output.splitlines() if output else []
+        lines.append(f"git pull 超过 {GIT_PULL_TIMEOUT_SECONDS} 秒，已终止")
+        return {"started": True, "completed": True, "exit_code": None,
+                "timed_out": True, "output": lines}
     except OSError:
-        return {"started": False, "task_id": None, "already_running": False,
-                "output": ["git 或代码目录不可用，git pull 未发起"]}
-
-
-def poll_task(task_id: str) -> Dict[str, Any]:
-    if task_id not in ("restart", "git-pull"):
-        return {"running": False, "exists": False, "output": []}
-    return _poll(task_id)
+        return _not_started("git 或代码目录不可用，git pull 未发起")
 
 
 # ------------------------------------------------------------------ probes

@@ -57,7 +57,7 @@ VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
 _VERDICT_SNAPSHOT_UNSET = object()
 
 
-def _audit_started(reviewer: "PRReviewer") -> str:
+async def _audit_started(reviewer: "PRReviewer") -> str:
     """Open a dashboard audit record for this run; best-effort, never raises.
 
     Populates trigger metadata from the request-scoped starlette context
@@ -65,10 +65,11 @@ def _audit_started(reviewer: "PRReviewer") -> str:
     the mention and auto-command paths) and the PR object, so webhook
     reviews don't land in the dashboard as anonymous manual runs.
     """
-    try:
-        from starlette_context import context as request_context
+    from starlette_context import context as request_context
 
-        from pr_agent.dashboard.audit import review_started
+    from pr_agent.dashboard.audit import review_started
+
+    def _work() -> str:
         sender, trigger_type = "", "manual"
         try:
             sender = request_context.get("dashboard_sender") or ""
@@ -81,9 +82,12 @@ def _audit_started(reviewer: "PRReviewer") -> str:
             sha = reviewer.git_provider.get_head_commit_sha() or ""
         except Exception:
             pass
-        return review_started(pr_url=reviewer.pr_url, sender=sender,
-                              trigger_type=trigger_type, commit_sha=sha,
-                              pr_title=title) or ""
+        return review_started(
+            pr_url=reviewer.pr_url, sender=sender, trigger_type=trigger_type,
+            commit_sha=sha, pr_title=title) or ""
+
+    try:
+        return await asyncio.to_thread(_work)
     except Exception:
         return ""
 
@@ -249,7 +253,7 @@ class PRReviewer:
         init_run_details()
         progress_response = None
         review_failed = False
-        audit_request_id = _audit_started(self)
+        audit_request_id = await _audit_started(self)
         try:
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")

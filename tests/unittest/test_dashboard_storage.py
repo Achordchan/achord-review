@@ -92,6 +92,26 @@ class TestReviewsCrud:
         assert row["total_tokens"] == 133
         assert row["duration_ms"] == 4567
 
+    def test_finish_review_retries_database_lock(self, storage, monkeypatch):
+        import sqlite3
+
+        request_id = storage.create_review(repo_name="r", pr_number=5, pr_url="u5")
+        original_connect = storage._connect
+        calls = {"count": 0}
+
+        def flaky_connect():
+            calls["count"] += 1
+            if calls["count"] <= 2:
+                raise sqlite3.OperationalError("database is locked")
+            return original_connect()
+
+        monkeypatch.setattr(storage, "_connect", flaky_connect)
+        monkeypatch.setattr("pr_agent.dashboard.storage.time.sleep", lambda _: None)
+        storage.finish_review(request_id, [], verdict="APPROVE")
+
+        assert calls["count"] == 3
+        assert storage.get_review_by_request_id(request_id)["status"] == "COMPLETED"
+
     def test_list_reviews_filters(self, storage):
         _seed_review(storage, repo="a/b", pr=1, verdict="APPROVE")
         _seed_review(storage, repo="c/d", pr=2, verdict="REQUEST_CHANGES",

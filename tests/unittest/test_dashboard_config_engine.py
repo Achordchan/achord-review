@@ -143,6 +143,46 @@ class TestWrite:
             raw = tomllib.load(f)
         assert raw["github"]["app_id"] == "123"
 
+    def test_concurrent_writes_preserve_both_workers_changes(self, engine):
+        import threading
+        import time
+
+        other = ConfigEngine(config_path=engine.config_path)
+        first_loaded = threading.Event()
+        release_first = threading.Event()
+        second_loaded = threading.Event()
+        original_first_load = engine._load_document
+        original_second_load = other._load_document
+
+        def slow_first_load():
+            doc = original_first_load()
+            first_loaded.set()
+            assert release_first.wait(timeout=2)
+            return doc
+
+        def observed_second_load():
+            second_loaded.set()
+            return original_second_load()
+
+        engine._load_document = slow_first_load
+        other._load_document = observed_second_load
+        results = []
+        first = threading.Thread(target=lambda: results.append(engine.write({"model": "openai/first"})))
+        second = threading.Thread(target=lambda: results.append(other.write({"ai_timeout": 777})))
+        first.start()
+        assert first_loaded.wait(timeout=2)
+        second.start()
+        time.sleep(0.05)
+        assert not second_loaded.is_set()  # blocked before reading the old document
+        release_first.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+        assert all(ok for ok, _ in results)
+        values = engine.read()["values"]
+        assert values["model"] == "openai/first"
+        assert values["ai_timeout"] == 777
+
     def test_missing_file_fails_gracefully(self, tmp_path):
         engine = ConfigEngine(config_path=str(tmp_path / "nope.toml"))
         ok, errors = engine.write({"model": "x"})

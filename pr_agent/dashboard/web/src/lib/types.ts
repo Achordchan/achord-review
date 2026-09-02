@@ -79,11 +79,10 @@ export type AuditLogRow = {
 export type ReviewListData = { total: number; items: ReviewRow[] }
 export type AuditLogListData = { items: AuditLogRow[] }
 export type RepoRow = { repo_name: string; review_count: number; last_review_at: string | null }
-export type OpsTask = { running: boolean; exists: boolean; exit_code: number | null; output: string[] }
-export type OpsLaunch = {
+export type OpsResult = {
   started: boolean
-  task_id: string | null
-  already_running: boolean
+  completed: boolean
+  exit_code: number | null
   output: string[]
 }
 export type DiagnoseResult = {

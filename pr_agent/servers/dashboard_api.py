@@ -168,7 +168,7 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
     expected = _admin_password()
     if not expected:
         raise HTTPException(status_code=503, detail="管理员密码未配置（config.toml [dashboard] admin_password）")
-    if not hmac.compare_digest(body.password, expected):
+    if not hmac.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8")):
         failed_count = _record_failed_attempt(key)
         remaining = max(0, MAX_FAILED_ATTEMPTS - failed_count)
         get_logger().warning(f"Dashboard login failed from {key}")
@@ -236,12 +236,11 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
                                 ip_address=_client_ip(request))
     # report what actually happened: without docker inside the container the
     # restart never starts, and the UI must not wait for one
-    result = ops.restart_container() if restart else None
+    result = await asyncio.to_thread(ops.restart_container) if restart else None
     restart_started = bool(restart and result and result.get("started"))
-    already_running = bool(restart and result and result.get("already_running"))
-    restarted = restart_started or already_running
+    restarted = restart_started
     message = "配置已保存并热生效"
-    if restart_started or already_running:
+    if restart_started:
         message += "，容器重启中"
     elif restart:
         message += "，但重启未发起，请检查受控 Docker 端点或在宿主机重启"
@@ -257,8 +256,8 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
 async def ops_restart(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
     require_same_origin(request)
-    result = ops.restart_container()
-    started = bool(result.get("started") or result.get("already_running"))
+    result = await asyncio.to_thread(ops.restart_container)
+    started = bool(result.get("started"))
     get_storage().add_audit_log("RESTART_CONTAINER", {"started": started},
                                 ip_address=_client_ip(request))
     if not started:
@@ -273,21 +272,20 @@ async def ops_restart(request: Request, dashboard_session: Optional[str] = Cooki
 async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
     require_same_origin(request)
-    result = ops.git_pull()
-    started = bool(result.get("started") or result.get("already_running"))
+    result = await asyncio.to_thread(ops.git_pull)
+    started = bool(result.get("started"))
     get_storage().add_audit_log("GIT_PULL", {"started": started}, ip_address=_client_ip(request))
     if not started:
         return JSONResponse(
             status_code=503,
             content={"success": False, "code": "OPERATION_NOT_STARTED",
                      "message": (result.get("output") or ["git pull 未发起"])[0], "data": result})
-    return _ok(result, message="git pull 已执行")
-
-
-@router.get("/ops/task/{task_id}")
-async def ops_task(task_id: str, request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
-    return _ok(ops.poll_task(task_id))
+    if result.get("exit_code") != 0:
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "code": "OPERATION_FAILED",
+                     "message": (result.get("output") or ["git pull 执行失败"])[-1], "data": result})
+    return _ok(result, message="git pull 已完成")
 
 
 @router.post("/ops/diagnose")

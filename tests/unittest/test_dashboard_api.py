@@ -60,6 +60,12 @@ class TestAuth:
         resp = client.post("/api/v1/dashboard/auth/login", json={"password": "wrong"})
         assert resp.status_code == 401
 
+    def test_login_accepts_unicode_password(self, client, monkeypatch):
+        monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "管理员-安全口令")
+        resp = client.post(
+            "/api/v1/dashboard/auth/login", json={"password": "管理员-安全口令"})
+        assert resp.status_code == 200
+
     def test_routes_require_auth(self, client):
         for path in ["/api/v1/dashboard/config", "/api/v1/dashboard/reviews",
                      "/api/v1/dashboard/stats/overview", "/api/v1/dashboard/audit-logs"]:
@@ -239,14 +245,14 @@ class TestProtectedRoutes:
         auth = _auth_header(client)
         monkeypatch.setattr(
             dashboard_api.ops, "restart_container",
-            lambda: {"started": False, "task_id": None, "already_running": False,
+            lambda: {"started": False, "completed": True, "exit_code": None,
                      "output": ["docker unavailable"]})
         resp = client.post(
             "/api/v1/dashboard/ops/restart",
             headers={**auth, "Sec-Fetch-Site": "same-origin"})
         assert resp.status_code == 503
         assert resp.json()["code"] == "OPERATION_NOT_STARTED"
-        assert resp.json()["data"]["task_id"] is None
+        assert resp.json()["data"]["started"] is False
 
     def test_audit_log_limit_is_clamped_at_lower_bound(self, client, storage, monkeypatch):
         captured = {}

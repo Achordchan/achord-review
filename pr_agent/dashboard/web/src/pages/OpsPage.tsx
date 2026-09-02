@@ -1,8 +1,8 @@
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, GitPullRequestArrow, HeartPulse, RefreshCcw, Terminal } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
-import type { AuditLogListData, DiagnoseResult, OpsLaunch, OpsTask } from '../lib/types'
+import type { AuditLogListData, DiagnoseResult, OpsResult } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/Dialogs'
 import { useToast } from '../components/Toast'
@@ -34,10 +34,9 @@ export default function OpsPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const [confirmAction, setConfirmAction] = useState<'restart' | 'pull' | null>(null)
-  const [task, setTask] = useState<OpsTask | null>(null)
+  const [task, setTask] = useState<OpsResult | null>(null)
   const [diagnose, setDiagnose] = useState<DiagnoseResult | null>(null)
   const [diagnosing, setDiagnosing] = useState(false)
-  const pollTimer = useRef<number | null>(null)
 
   const logsQuery = useQuery({
     queryKey: ['ops-logs'],
@@ -51,38 +50,19 @@ export default function OpsPage() {
     refetchInterval: 30_000,
   })
 
-  const pollTaskResult = async (taskId: string) => {
-    if (pollTimer.current) window.clearInterval(pollTimer.current)
-    pollTimer.current = window.setInterval(async () => {
-      try {
-        const result = await api.get<OpsTask>(`/api/v1/dashboard/ops/task/${taskId}`)
-        setTask(result)
-        if (!result.running) {
-          if (pollTimer.current) window.clearInterval(pollTimer.current)
-          if (result.exit_code === 0) {
-            toast.success(taskId === 'restart' ? '容器已重启' : '代码已更新')
-            await queryClient.invalidateQueries({ queryKey: ['ops-logs'] })
-          } else if (result.exists) {
-            toast.error('命令执行失败', `exit code ${result.exit_code}`)
-          }
-        }
-      } catch {
-        // restarting the container kills this process mid-poll; the next login shows the result
-        if (pollTimer.current) window.clearInterval(pollTimer.current)
-      }
-    }, 2_000)
-  }
-
   const runAction = async (action: 'restart' | 'pull') => {
     setConfirmAction(null)
     try {
       const body = action === 'restart'
-        ? await api.post<OpsLaunch>('/api/v1/dashboard/ops/restart')
-        : await api.post<OpsLaunch>('/api/v1/dashboard/ops/git-pull')
-      if (!body.task_id) throw new Error('操作未创建任务')
-      toast.info(action === 'restart' ? '重启指令已下发' : 'git pull 已开始')
-      setTask({ running: true, exists: true, exit_code: null, output: [] })
-      await pollTaskResult(body.task_id)
+        ? await api.post<OpsResult>('/api/v1/dashboard/ops/restart')
+        : await api.post<OpsResult>('/api/v1/dashboard/ops/git-pull')
+      setTask(body)
+      if (action === 'restart') {
+        toast.info('重启指令已下发', '连接可能短暂中断')
+      } else {
+        toast.success('代码已更新')
+        await queryClient.invalidateQueries({ queryKey: ['ops-logs'] })
+      }
     } catch (error) {
       toast.error('指令未下发', error instanceof ApiError ? error.message : '请检查运行环境与服务状态')
     }
@@ -150,7 +130,10 @@ export default function OpsPage() {
         <div className="grid gap-4 lg:grid-cols-2">
           {task && (
             <Card>
-              <CardHeader title="任务输出" description={task.running ? '执行中…' : `已结束（exit code ${task.exit_code ?? '?'}）`} />
+              <CardHeader
+                title="任务输出"
+                description={task.completed ? `已结束（exit code ${task.exit_code ?? '?'}）` : '指令已下发'}
+              />
               <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-all px-5 py-4 font-mono text-xs leading-relaxed text-muted">
                 {task.output.join('\n') || '（暂无输出）'}
               </pre>

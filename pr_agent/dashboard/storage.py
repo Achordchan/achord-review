@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pr_agent.log import get_logger
 
@@ -150,6 +150,23 @@ class DashboardStorage:
         except Exception as e:
             get_logger().warning(f"Dashboard storage read failed, error: {e}")
             return []
+
+    def _transaction(self, operation: Callable[[sqlite3.Connection], None], label: str) -> bool:
+        """Run a multi-statement write with the same bounded lock retry as _write."""
+        for attempt in range(_MAX_RETRY):
+            try:
+                with self._write_lock, self._connect() as conn:
+                    operation(conn)
+                return True
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e) or attempt == _MAX_RETRY - 1:
+                    get_logger().warning(f"Dashboard storage {label} failed, error: {e}")
+                    return False
+                time.sleep(0.2 * (attempt + 1))
+            except Exception as e:
+                get_logger().warning(f"Dashboard storage {label} failed, error: {e}")
+                return False
+        return False
 
     # ---------------------------------------------------------- auth state
 
@@ -294,7 +311,7 @@ class DashboardStorage:
         Usage columns accept the run's live values; a stored value wins when
         the incoming one is empty/zero.
         """
-        with self._write_lock, self._connect() as conn:
+        def _finish(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
                 " markdown_output=?, raw_prediction=?,"
@@ -322,6 +339,8 @@ class DashboardStorage:
                       issue.get("relevant_lines_start"), issue.get("relevant_lines_end"),
                       issue.get("issue_summary"), issue.get("suggestion"), now)
                      for issue in issues])
+
+        self._transaction(_finish, "finish-review transaction")
 
     def get_review_by_request_id(self, request_id: str, summary_only: bool = False) -> Optional[Dict[str, Any]]:
         columns = "id, repo_name, pr_number" if summary_only else "*"

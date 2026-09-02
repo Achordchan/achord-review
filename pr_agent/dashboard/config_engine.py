@@ -11,12 +11,14 @@ Every write uses a comment-preserving TOML document and changes only the
 targeted fields, never regenerating the file from a template.
 """
 
+import fcntl
 import glob
 import os
 import shutil
 import tempfile
 import time
 import tomllib
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import tomlkit
@@ -159,18 +161,33 @@ class ConfigEngine:
         if not clean:
             return True, []  # nothing to change, e.g. the key field left blank
         try:
-            doc = self._load_document()
-            if doc is None:
-                return False, ["config file could not be parsed"]
-            self._apply_fields(doc, clean)
-            self._backup()
-            self._atomic_dump(doc)
+            with self._config_write_lock():
+                # The lock spans the complete read-modify-backup-replace cycle.
+                # A second gunicorn worker must read the first worker's result,
+                # not an old document that later overwrites the first save.
+                doc = self._load_document()
+                if doc is None:
+                    return False, ["config file could not be parsed"]
+                self._apply_fields(doc, clean)
+                self._backup()
+                self._atomic_dump(doc)
         except Exception as e:
             get_logger().warning(f"Dashboard config write failed, error: {e}")
             return False, [f"failed to write config: {e}"]
         if self._hot_reload(clean):
             self._loaded_signature = self._file_signature()
         return True, []
+
+    @contextmanager
+    def _config_write_lock(self):
+        lock_path = f"{self.config_path}.lock"
+        with open(lock_path, "a+", encoding="utf-8") as lock_file:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _apply_fields(self, raw: Dict[str, Any], clean: Dict[str, Any]) -> None:
         for name, value in clean.items():

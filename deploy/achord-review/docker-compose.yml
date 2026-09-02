@@ -30,7 +30,7 @@ services:
       # cannot stall health checks and unrelated webhooks. Dashboard sessions
       # and login lockouts are shared through SQLite; config changes are picked
       # up by each worker on its next request.
-      GUNICORN_MAX_WORKERS: "2"
+      GUNICORN_WORKERS: "2"
     mem_limit: 900m
     logging:
       driver: json-file
