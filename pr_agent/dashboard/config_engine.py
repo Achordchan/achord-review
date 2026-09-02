@@ -420,6 +420,17 @@ class ConfigEngine:
         except OSError:
             return None
 
+    def admin_password_snapshot(self) -> tuple[str, Optional[tuple]]:
+        """Read the password and file signature from the authoritative config file."""
+        for _ in range(2):
+            before = self._file_signature()
+            raw = self._load_raw()
+            after = self._file_signature()
+            if before is not None and before == after and raw is not None:
+                password = str(raw.get("dashboard", {}).get("admin_password", "") or "")
+                return password, after
+        return "", None
+
     # ------------------------------------------------------------------ misc
 
     def _load_raw(self) -> Optional[Dict[str, Any]]:

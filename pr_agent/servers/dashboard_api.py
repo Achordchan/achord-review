@@ -43,7 +43,9 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 # login remains stable across gunicorn workers. Only SHA-256 digests are stored;
 # bearer tokens and source addresses never enter the database as credentials.
 MAX_LOCKOUT_KEYS = 10_000
-_password_sync_state = {"db_path": "", "password": None, "generation": None}
+_password_sync_state = {
+    "db_path": "", "password": None, "generation": None, "signature": None,
+}
 _password_sync_lock = threading.Lock()
 
 
@@ -62,10 +64,18 @@ async def _dashboard_storage_read(method_name: str, *args, **kwargs):
 
 
 def _admin_password() -> str:
-    password = os.environ.get("DASHBOARD_ADMIN_PASSWORD", "")
+    return _admin_password_snapshot()[0]
+
+
+def _admin_password_snapshot() -> tuple[str, tuple | None]:
+    password = (
+        os.environ.get("DASHBOARD_ADMIN_PASSWORD", "")
+        or os.environ.get("DASHBOARD__ADMIN_PASSWORD", "")
+    )
     if password:
-        return password
-    return str(get_settings().get("dashboard.admin_password", "") or "")
+        signature = ("environment", hashlib.sha256(password.encode("utf-8")).hexdigest())
+        return password, signature
+    return get_config_engine().admin_password_snapshot()
 
 
 def _client_ip(request: Request) -> str:
@@ -105,7 +115,9 @@ def _session_hash(token: str, password: Optional[str] = None) -> str:
     return hmac.new(password.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _sync_admin_password(password: str) -> bool:
+def _sync_admin_password(password: str, signature=None) -> bool:
+    if signature is None:
+        return False
     storage = get_storage()
     with _password_sync_lock:
         cached_password = _password_sync_state["password"]
@@ -113,6 +125,7 @@ def _sync_admin_password(password: str) -> bool:
         if (shared_generation is not None
                 and storage.db_path == _password_sync_state["db_path"]
                 and shared_generation == _password_sync_state["generation"]
+                and signature == _password_sync_state["signature"]
                 and isinstance(cached_password, str)
                 and hmac.compare_digest(password.encode("utf-8"), cached_password.encode("utf-8"))):
             return True
@@ -125,22 +138,35 @@ def _sync_admin_password(password: str) -> bool:
             "db_path": storage.db_path,
             "password": password,
             "generation": shared_generation,
+            "signature": signature,
         })
         return True
+
+
+def _sync_current_admin_password() -> bool:
+    password, signature = _admin_password_snapshot()
+    return _sync_admin_password(password, signature)
 
 
 async def _create_session(verified_password: str) -> str:
     token = secrets.token_urlsafe(32)
 
     def _create() -> str:
-        current_password = _admin_password()
+        current_password, current_signature = _admin_password_snapshot()
         if not hmac.compare_digest(
                 verified_password.encode("utf-8"), current_password.encode("utf-8")):
             return "password_changed"
+        token_hash = _session_hash(token, verified_password)
         created = get_storage().create_session_for_password(
-            _session_hash(token, verified_password),
+            token_hash,
             int(time.time()) + SESSION_TTL_SECONDS,
-            verified_password)
+            current_password)
+        after_password, after_signature = _admin_password_snapshot()
+        if (current_signature != after_signature
+                or not hmac.compare_digest(
+                    current_password.encode("utf-8"), after_password.encode("utf-8"))):
+            get_storage().revoke_session(token_hash)
+            return "password_changed"
         return "created" if created else "storage_error"
 
     result = await asyncio.to_thread(_create)
@@ -152,13 +178,19 @@ async def _create_session(verified_password: str) -> str:
 
 
 def _session_valid(token: Optional[str]) -> bool:
-    password = _admin_password()
-    if not _sync_admin_password(password):
+    password, signature = _admin_password_snapshot()
+    if not _sync_admin_password(password, signature):
         return False
     if not token or not password:
         return False
     token_hash = _session_hash(token, password)
-    return bool(token_hash and get_storage().session_is_valid(token_hash))
+    valid = bool(token_hash and get_storage().session_is_valid(token_hash))
+    after_password, after_signature = _admin_password_snapshot()
+    if (signature != after_signature
+            or not hmac.compare_digest(password.encode("utf-8"), after_password.encode("utf-8"))):
+        _sync_admin_password(after_password, after_signature)
+        return False
+    return valid
 
 
 async def require_auth(request: Request, dashboard_session: Optional[str] = Cookie(None)) -> None:
@@ -215,9 +247,9 @@ class LoginRequest(BaseModel):
 @router.post("/auth/login")
 async def auth_login(body: LoginRequest, request: Request, response: Response):
     key = _lockout_key(request)
-    expected = _admin_password()
+    expected, _ = await asyncio.to_thread(_admin_password_snapshot)
     if not expected:
-        await asyncio.to_thread(_sync_admin_password, "")
+        await asyncio.to_thread(_sync_current_admin_password)
         raise HTTPException(status_code=503, detail="管理员密码未配置（config.toml [dashboard] admin_password）")
     password_matches = hmac.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8"))
     decision = await asyncio.to_thread(
@@ -255,11 +287,12 @@ async def auth_logout(request: Request, response: Response,
     # revoke whichever credential authenticated this request: the cookie token
     # and the bearer token are both real sessions in shared storage, and a scripted
     # client logging out via the bearer path must lose access immediately
+    password = await asyncio.to_thread(_admin_password)
     token_hashes = set()
-    if dashboard_session and (token_hash := _session_hash(dashboard_session)):
+    if dashboard_session and (token_hash := _session_hash(dashboard_session, password)):
         token_hashes.add(token_hash)
     auth = request.headers.get("authorization", "")
-    if auth.startswith("Bearer ") and (token_hash := _session_hash(auth[7:].strip())):
+    if auth.startswith("Bearer ") and (token_hash := _session_hash(auth[7:].strip(), password)):
         token_hashes.add(token_hash)
 
     def _revoke_sessions() -> bool:

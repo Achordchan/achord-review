@@ -70,7 +70,9 @@ class TestAuth:
 
     def test_login_rejects_password_rotated_during_request(self, client, storage, monkeypatch):
         password = {"value": "old-password"}
-        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: password["value"])
+        monkeypatch.setattr(
+            dashboard_api, "_admin_password_snapshot",
+            lambda: (password["value"], (password["value"],)))
         original_verify = storage.verify_login_attempt
 
         def rotate_after_verification(*args, **kwargs):
@@ -97,7 +99,7 @@ class TestAuth:
 
     def test_no_password_configured(self, client, monkeypatch):
         monkeypatch.delenv("DASHBOARD_ADMIN_PASSWORD", raising=False)
-        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "")
+        monkeypatch.setattr(dashboard_api, "_admin_password_snapshot", lambda: ("", ("disabled",)))
         resp = client.post("/api/v1/dashboard/auth/login", json={"password": "x"})
         assert resp.status_code == 503
 
@@ -128,19 +130,25 @@ class TestAuth:
 
     def test_password_disable_or_rotation_invalidates_existing_session(self, client, monkeypatch):
         auth = _auth_header(client)
-        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "")
+        monkeypatch.setattr(dashboard_api, "_admin_password_snapshot", lambda: ("", ("disabled",)))
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
-        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "rotated-password")
+        monkeypatch.setattr(
+            dashboard_api, "_admin_password_snapshot",
+            lambda: ("rotated-password", ("rotated",)))
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
-        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "test-pass-123")
+        monkeypatch.setattr(
+            dashboard_api, "_admin_password_snapshot",
+            lambda: ("test-pass-123", ("restored",)))
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
 
     def test_disabled_login_purges_sessions_before_password_is_restored(self, client, monkeypatch):
         auth = _auth_header(client)
-        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "")
+        monkeypatch.setattr(dashboard_api, "_admin_password_snapshot", lambda: ("", ("disabled",)))
         assert client.post(
             "/api/v1/dashboard/auth/login", json={"password": "anything"}).status_code == 503
-        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "test-pass-123")
+        monkeypatch.setattr(
+            dashboard_api, "_admin_password_snapshot",
+            lambda: ("test-pass-123", ("restored",)))
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
 
     def test_cached_password_revalidates_shared_generation(self, client, storage):
@@ -154,10 +162,24 @@ class TestAuth:
         assert storage.sync_admin_password("password-b")
         second_generation = storage.admin_password_generation()
 
-        assert dashboard_api._sync_admin_password("password-a") is True
+        assert dashboard_api._sync_admin_password("password-a", ("restored",)) is True
 
         assert storage.admin_password_generation() == second_generation + 1
         assert dashboard_api._password_sync_state["generation"] == second_generation + 1
+
+    def test_session_validation_uses_authoritative_file_password(self, client, monkeypatch):
+        password = {"value": "password-a"}
+        signature = {"value": (1,)}
+        monkeypatch.setattr(
+            dashboard_api, "_admin_password_snapshot",
+            lambda: (password["value"], signature["value"]))
+        token = __import__("asyncio").run(dashboard_api._create_session("password-a"))
+        assert dashboard_api._session_valid(token) is True
+
+        password["value"] = "password-b"
+        signature["value"] = (2,)
+
+        assert dashboard_api._session_valid(token) is False
 
 
 class TestClientIp:

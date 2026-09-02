@@ -25,6 +25,7 @@ REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "/app")
 GIT_PULL_TIMEOUT_SECONDS = 120
 DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 5
 RESTART_ACCEPTANCE_GRACE_SECONDS = 0.2
+RESTART_COMMAND_TIMEOUT_SECONDS = 45
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 OPS_LOCK_PATH = os.environ.get("DASHBOARD_OPS_LOCK_PATH", "/app/data/dashboard-ops.lock")
@@ -156,11 +157,33 @@ def restart_container() -> Dict[str, Any]:
                 return _not_started(f"docker restart 立即失败（退出码 {return_code}）")
             if return_code == 0:
                 return {"started": True, "completed": True, "exit_code": 0, "output": []}
+            _monitor_restart_process(restart_process)
             return {"started": True, "completed": False, "exit_code": None, "output": []}
         except subprocess.TimeoutExpired:
             return _not_started("Docker 端点预检超时，容器重启未发起")
         except OSError:
             return _not_started("docker CLI 或受控 Docker 端点不可用，容器重启未发起")
+
+
+def _monitor_restart_process(proc: subprocess.Popen) -> threading.Thread:
+    """Terminate a restart CLI that exceeds Docker's own restart deadline."""
+    def _monitor() -> None:
+        try:
+            proc.wait(timeout=RESTART_COMMAND_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                get_logger().warning("docker restart process survived the monitor SIGKILL")
+
+    monitor = threading.Thread(
+        target=_monitor, name="dashboard-restart-monitor", daemon=True)
+    monitor.start()
+    return monitor
 
 
 def git_pull() -> Dict[str, Any]:

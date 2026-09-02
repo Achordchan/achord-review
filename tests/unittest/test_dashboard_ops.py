@@ -85,6 +85,54 @@ def test_restart_reports_immediate_command_rejection(monkeypatch):
     assert "退出码 13" in result["output"][0]
 
 
+def test_restart_monitor_kills_hung_cli(monkeypatch):
+    killed = []
+
+    class HungRestart:
+        pid = 9001
+
+        def __init__(self):
+            self.waits = 0
+
+        def wait(self, timeout):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired(cmd="docker restart", timeout=timeout)
+            return -signal.SIGKILL
+
+    process = HungRestart()
+    monkeypatch.setattr(ops.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    monitor = ops._monitor_restart_process(process)
+    monitor.join(timeout=2)
+
+    assert monitor.is_alive() is False
+    assert killed == [(process.pid, signal.SIGKILL)]
+
+
+def test_restart_starts_bounded_monitor_after_acceptance(monkeypatch):
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="container found"))
+
+    class AcceptedProcess:
+        def poll(self):
+            return None
+
+    process = AcceptedProcess()
+    monitored = []
+    monkeypatch.setattr(ops.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(ops.time, "sleep", lambda _: None)
+    monkeypatch.setattr(ops, "_monitor_restart_process", lambda proc: monitored.append(proc))
+
+    result = ops.restart_container()
+
+    assert result["started"] is True
+    assert result["completed"] is False
+    assert monitored == [process]
+
+
 def test_tail_logs_caps_a_single_huge_line(monkeypatch, tmp_path):
     log_path = tmp_path / "service.log"
     log_path.write_bytes(b"x" * (ops.MAX_LOG_TAIL_BYTES + 1024))

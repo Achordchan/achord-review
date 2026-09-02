@@ -51,6 +51,15 @@ class TestRead:
         engine = ConfigEngine(config_path=str(tmp_path / "nope.toml"))
         assert engine.read()["available"] is False
 
+    def test_admin_password_snapshot_reads_authoritative_file(self, engine):
+        with open(engine.config_path, "a", encoding="utf-8") as config_file:
+            config_file.write('\n[dashboard]\nadmin_password = "file-password"\n')
+
+        password, signature = engine.admin_password_snapshot()
+
+        assert password == "file-password"
+        assert signature == engine._file_signature()
+
     def test_write_preserves_comments_and_ordering(self, engine):
         comment_line = '# reasoning_effort = "high"  # GPT-5 family knob'
         with open(engine.config_path, "a", encoding="utf-8") as f:
