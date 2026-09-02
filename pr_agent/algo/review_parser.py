@@ -15,7 +15,16 @@ _REVIEW_FIELDS = frozenset({
     "can_be_split",
 })
 _REVIEW_SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
-_NO_SECURITY_PREFIXES = ("no", "none", "n/a", "there are no", "there is no")
+_NO_SECURITY_PREFIXES = (
+    "none",
+    "n/a",
+    "no security concern",
+    "no security concerns",
+    "no concerns",
+    "no issues",
+    "there are no",
+    "there is no",
+)
 
 
 def _is_positive_line_number(value: Any) -> bool:
@@ -59,7 +68,7 @@ def _is_explicit_security_concern(value: Any) -> bool:
     if not isinstance(value, str):
         return False
     normalized = " ".join(value.strip().lower().split())
-    is_negative = any(
+    is_negative = normalized == "no" or normalized.startswith("no:") or any(
         normalized == prefix
         or normalized.startswith(f"{prefix} ")
         or normalized.startswith(f"{prefix}:")
