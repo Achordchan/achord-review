@@ -249,7 +249,7 @@ class ConfigUpdateRequest(BaseModel):
 @router.get("/config")
 async def get_config(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    return _ok(get_config_engine().read())
+    return _ok(await asyncio.to_thread(get_config_engine().read))
 
 
 @router.put("/config")
@@ -261,12 +261,13 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     restart = payload.pop("restart")
     fields = payload
     engine = get_config_engine()
-    success, errors = engine.write(fields)
+    success, errors = await asyncio.to_thread(engine.write, fields)
     if not success:
         raise HTTPException(status_code=400, detail="; ".join(errors))
     hot_reload_pending = bool(errors)
-    get_storage().add_audit_log("UPDATE_CONFIG", {"fields": sorted(fields.keys())},
-                                ip_address=_client_ip(request))
+    await asyncio.to_thread(
+        get_storage().add_audit_log, "UPDATE_CONFIG", {"fields": sorted(fields.keys())},
+        ip_address=_client_ip(request))
     # report what actually happened: without docker inside the container the
     # restart never starts, and the UI must not wait for one
     result = await asyncio.to_thread(ops.restart_container) if restart else None
@@ -293,8 +294,9 @@ async def ops_restart(request: Request, dashboard_session: Optional[str] = Cooki
     require_same_origin(request)
     result = await asyncio.to_thread(ops.restart_container)
     started = bool(result.get("started"))
-    get_storage().add_audit_log("RESTART_CONTAINER", {"started": started},
-                                ip_address=_client_ip(request))
+    await asyncio.to_thread(
+        get_storage().add_audit_log, "RESTART_CONTAINER", {"started": started},
+        ip_address=_client_ip(request))
     if not started:
         return JSONResponse(
             status_code=503,
@@ -309,7 +311,9 @@ async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cook
     require_same_origin(request)
     result = await asyncio.to_thread(ops.git_pull)
     started = bool(result.get("started"))
-    get_storage().add_audit_log("GIT_PULL", {"started": started}, ip_address=_client_ip(request))
+    await asyncio.to_thread(
+        get_storage().add_audit_log, "GIT_PULL", {"started": started},
+        ip_address=_client_ip(request))
     if not started:
         return JSONResponse(
             status_code=503,
@@ -346,15 +350,17 @@ async def list_reviews(request: Request, dashboard_session: Optional[str] = Cook
     await require_auth(request, dashboard_session)
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
-    return _ok(get_storage().list_reviews(repo=repo, status=status, verdict=verdict,
-                                          trigger_type=trigger_type, limit=limit, offset=offset))
+    data = await asyncio.to_thread(
+        get_storage().list_reviews, repo=repo, status=status, verdict=verdict,
+        trigger_type=trigger_type, limit=limit, offset=offset)
+    return _ok(data)
 
 
 @router.get("/reviews/{review_id}")
 async def review_detail(review_id: int, request: Request,
                         dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    detail = get_storage().get_review_detail(review_id)
+    detail = await asyncio.to_thread(get_storage().get_review_detail, review_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="审查记录不存在")
     return _ok(detail)
@@ -370,20 +376,22 @@ async def retry_review(review_id: int, request: Request,
 @router.get("/repos")
 async def list_repos(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    return _ok({"items": get_storage().list_repos()})
+    return _ok({"items": await asyncio.to_thread(get_storage().list_repos)})
 
 
 @router.get("/stats/overview")
 async def stats_overview(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    return _ok(get_storage().stats_overview())
+    return _ok(await asyncio.to_thread(get_storage().stats_overview))
 
 
 @router.get("/audit-logs")
 async def audit_logs(request: Request, dashboard_session: Optional[str] = Cookie(None),
                      limit: int = 100):
     await require_auth(request, dashboard_session)
-    return _ok({"items": get_storage().list_audit_logs(limit=max(1, min(limit, 500)))})
+    items = await asyncio.to_thread(
+        get_storage().list_audit_logs, limit=max(1, min(limit, 500)))
+    return _ok({"items": items})
 
 
 # --------------------------------------------------------------- playground
