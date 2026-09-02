@@ -126,10 +126,10 @@ async def _create_session(verified_password: str) -> str:
 
 
 def _session_valid(token: Optional[str]) -> bool:
-    if not token:
-        return False
     password = _admin_password()
-    if not password or not _sync_admin_password(password):
+    if not _sync_admin_password(password):
+        return False
+    if not token or not password:
         return False
     token_hash = _session_hash(token, password)
     return bool(token_hash and get_storage().session_is_valid(token_hash))
@@ -191,6 +191,7 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
     key = _lockout_key(request)
     expected = _admin_password()
     if not expected:
+        await asyncio.to_thread(_sync_admin_password, "")
         raise HTTPException(status_code=503, detail="管理员密码未配置（config.toml [dashboard] admin_password）")
     password_matches = hmac.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8"))
     decision = await asyncio.to_thread(

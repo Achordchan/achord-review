@@ -80,6 +80,9 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
             if not isinstance(value, str):
                 errors.append(f"{name} must be a string")
                 continue
+            if name == "model" and not value.strip():
+                errors.append("model must not be empty")
+                continue
             clean[name] = value
         elif name in INT_FIELDS:
             low, high = INT_FIELDS[name][2], INT_FIELDS[name][3]

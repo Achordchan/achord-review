@@ -182,6 +182,8 @@ class TestWrite:
         assert not ok
         ok, errors = engine.write({"unknown_field": 1})
         assert not ok
+        ok, errors = engine.write({"model": "   "})
+        assert not ok and errors == ["model must not be empty"]
 
     @pytest.mark.parametrize("value", [True, False, 60.9, float("inf"), float("-inf"), "60.0"])
     def test_integer_fields_reject_lossy_or_non_finite_values(self, engine, value):

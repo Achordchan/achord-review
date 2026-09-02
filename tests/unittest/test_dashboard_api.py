@@ -135,6 +135,14 @@ class TestAuth:
         monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "test-pass-123")
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
 
+    def test_disabled_login_purges_sessions_before_password_is_restored(self, client, monkeypatch):
+        auth = _auth_header(client)
+        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "")
+        assert client.post(
+            "/api/v1/dashboard/auth/login", json={"password": "anything"}).status_code == 503
+        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "test-pass-123")
+        assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
+
 
 class TestClientIp:
     def test_trusted_hops_read_rightmost_entries(self, client, monkeypatch):
