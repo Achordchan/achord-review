@@ -118,6 +118,10 @@ _DEFAULT_DB_TIMEOUT_SECONDS = 10
 _AUDIT_DB_TIMEOUT_SECONDS = 0.5
 
 
+class DashboardStorageReadError(RuntimeError):
+    """Raised when an authenticated dashboard data query cannot reach SQLite."""
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -229,7 +233,7 @@ class DashboardStorage:
                 return None
         return None
 
-    def _read(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    def _read(self, sql: str, params: tuple = (), *, strict: bool = False) -> List[Dict[str, Any]]:
         try:
             with self._connect() as conn:
                 rows = conn.execute(sql, params).fetchall()
@@ -237,6 +241,8 @@ class DashboardStorage:
             return [dict(row) for row in rows]
         except Exception as e:
             get_logger().warning(f"Dashboard storage read failed, error: {e}")
+            if strict:
+                raise DashboardStorageReadError("dashboard storage read failed") from e
             return []
 
     def _transaction(self, operation: Callable[[sqlite3.Connection], None], label: str,
@@ -393,18 +399,38 @@ class DashboardStorage:
             (verdict, verdict_reason, markdown_output, raw_prediction, _utcnow(), request_id),
             timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
-    def fail_review(self, request_id: str, error_message: str) -> None:
-        self._write(
-            "UPDATE reviews SET status='FAILED', error_message=?, completed_at=? WHERE request_id=?",
-            (error_message, _utcnow(), request_id), timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+    def _finish_without_issues(self, request_id: str, status: str, message: str,
+                               model: str = "", reasoning_effort: str = "",
+                               prompt_tokens: int = 0, completion_tokens: int = 0,
+                               total_tokens: int = 0, duration_ms: int = 0) -> None:
+        """Atomically persist usage and a FAILED/SKIPPED terminal state."""
+        def _finish(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE reviews SET status=?, error_message=?,"
+                " model=COALESCE(NULLIF(?, ''), model),"
+                " reasoning_effort=COALESCE(NULLIF(?, ''), reasoning_effort),"
+                " prompt_tokens=CASE WHEN ? > 0 THEN ? ELSE prompt_tokens END,"
+                " completion_tokens=CASE WHEN ? > 0 THEN ? ELSE completion_tokens END,"
+                " total_tokens=CASE WHEN ? > 0 THEN ? ELSE total_tokens END,"
+                " duration_ms=CASE WHEN ? > 0 THEN ? ELSE duration_ms END,"
+                " completed_at=? WHERE request_id=?",
+                (status, message, model, reasoning_effort,
+                 prompt_tokens, prompt_tokens, completion_tokens, completion_tokens,
+                 total_tokens, total_tokens, duration_ms, duration_ms,
+                 _utcnow(), request_id))
 
-    def skip_review(self, request_id: str, reason: str) -> None:
+        self._transaction(
+            _finish, f"{status.lower()}-review transaction",
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+
+    def fail_review(self, request_id: str, error_message: str, **usage) -> None:
+        self._finish_without_issues(request_id, "FAILED", error_message, **usage)
+
+    def skip_review(self, request_id: str, reason: str, **usage) -> None:
         """Close a RUNNING record that exited before publishing (no files,
         incremental gate, empty model output). Distinct from FAILED so a
         genuine model/transport error stays distinguishable in the history."""
-        self._write(
-            "UPDATE reviews SET status='SKIPPED', error_message=?, completed_at=? WHERE request_id=?",
-            (reason, _utcnow(), request_id), timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+        self._finish_without_issues(request_id, "SKIPPED", reason, **usage)
 
     def set_review_usage(self, request_id: str, model: str = "", reasoning_effort: str = "",
                          prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0,
@@ -509,8 +535,9 @@ class DashboardStorage:
             f" prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message,"
             f" created_at, completed_at FROM reviews {clause}"
             f" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-            tuple(params) + (limit, offset))
-        total_rows = self._read(f"SELECT COUNT(*) AS c FROM reviews {clause}", tuple(params))
+            tuple(params) + (limit, offset), strict=True)
+        total_rows = self._read(
+            f"SELECT COUNT(*) AS c FROM reviews {clause}", tuple(params), strict=True)
         # severity distribution for the listed reviews, in a single pass
         issues: Dict[int, Dict[str, int]] = {}
         if rows:
@@ -519,7 +546,7 @@ class DashboardStorage:
             for issue_row in self._read(
                     f"SELECT review_id, severity, COUNT(*) AS c FROM review_issues"
                     f" WHERE review_id IN ({placeholders}) GROUP BY review_id, severity",
-                    tuple(ids)):
+                    tuple(ids), strict=True):
                 bucket = issues.setdefault(issue_row["review_id"], {})
                 bucket[issue_row["severity"] or "?"] = issue_row["c"]
         for row in rows:
@@ -528,20 +555,20 @@ class DashboardStorage:
 
     def get_review_detail(self, review_id: int) -> Optional[Dict[str, Any]]:
         self.reconcile_stale_reviews()
-        rows = self._read("SELECT * FROM reviews WHERE id = ?", (review_id,))
+        rows = self._read("SELECT * FROM reviews WHERE id = ?", (review_id,), strict=True)
         if not rows:
             return None
         detail = rows[0]
         detail["issues"] = self._read(
             "SELECT id, severity, relevant_file, relevant_lines_start, relevant_lines_end,"
             " issue_summary, suggestion FROM review_issues WHERE review_id = ?"
-            " ORDER BY id", (review_id,))
+            " ORDER BY id", (review_id,), strict=True)
         return detail
 
     def list_repos(self) -> List[Dict[str, Any]]:
         return self._read(
             "SELECT repo_name, COUNT(*) AS review_count, MAX(created_at) AS last_review_at"
-            " FROM reviews GROUP BY repo_name ORDER BY review_count DESC")
+            " FROM reviews GROUP BY repo_name ORDER BY review_count DESC", strict=True)
 
     # ------------------------------------------------------------------- stats
 
@@ -558,17 +585,17 @@ class DashboardStorage:
             " COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,"
             " COALESCE(SUM(completion_tokens), 0) AS completion_tokens,"
             " COALESCE(SUM(total_tokens), 0) AS total_tokens FROM reviews",
-            (f"{_utcnow()[:10]}%",))
+            (f"{_utcnow()[:10]}%",), strict=True)
         overview.update(single[0] if single else {})
         blocking = self._read(
-            "SELECT COUNT(*) AS c FROM review_issues WHERE severity IN ('P0', 'P1')")
+            "SELECT COUNT(*) AS c FROM review_issues WHERE severity IN ('P0', 'P1')", strict=True)
         overview["p0_p1_blocked"] = blocking[0]["c"] if blocking else 0
         severity = self._read(
-            "SELECT severity, COUNT(*) AS c FROM review_issues GROUP BY severity ORDER BY severity")
+            "SELECT severity, COUNT(*) AS c FROM review_issues GROUP BY severity ORDER BY severity", strict=True)
         overview["severity_distribution"] = {row["severity"] or "?": row["c"] for row in severity}
         trend = self._read(
             "SELECT created_at FROM reviews WHERE created_at >= DATE('now', '-13 days')"
-            " ORDER BY created_at")
+            " ORDER BY created_at", strict=True)
         daily: Dict[str, Dict[str, int]] = {}
         for row in trend:
             day = row["created_at"][:10]
@@ -576,7 +603,7 @@ class DashboardStorage:
             bucket["count"] += 1
         token_rows = self._read(
             "SELECT substr(created_at, 1, 10) AS day, SUM(total_tokens) AS tokens FROM reviews"
-            " WHERE created_at >= DATE('now', '-13 days') GROUP BY day")
+            " WHERE created_at >= DATE('now', '-13 days') GROUP BY day", strict=True)
         for row in token_rows:
             daily.setdefault(row["day"], {"count": 0, "tokens": 0})["tokens"] = row["tokens"] or 0
         overview["daily_trend"] = daily
@@ -595,7 +622,7 @@ class DashboardStorage:
     def list_audit_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
         return self._read(
             "SELECT id, operator, action, details_json, ip_address, created_at FROM audit_logs"
-            " ORDER BY id DESC LIMIT ?", (limit,))
+            " ORDER BY id DESC LIMIT ?", (limit,), strict=True)
 
     # ----------------------------------------------------------------- health
 

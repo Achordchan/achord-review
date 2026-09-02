@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, StrictBool
 from pr_agent.config_loader import get_settings
 from pr_agent.dashboard import ops
 from pr_agent.dashboard.config_engine import get_config_engine
-from pr_agent.dashboard.storage import get_storage
+from pr_agent.dashboard.storage import DashboardStorageReadError, get_storage
 from pr_agent.log import get_logger
 
 router = APIRouter(prefix="/api/v1/dashboard")
@@ -45,6 +45,15 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 MAX_LOCKOUT_KEYS = 10_000
 _password_sync_state = {"db_path": "", "password": None}
 _password_sync_lock = threading.Lock()
+
+
+async def _dashboard_storage_read(operation, *args, **kwargs):
+    """Run an admin data query and expose storage outages as a truthful 503."""
+    try:
+        return await asyncio.to_thread(operation, *args, **kwargs)
+    except DashboardStorageReadError as e:
+        get_logger().warning(f"Dashboard data query unavailable, error: {e}")
+        raise HTTPException(status_code=503, detail="审查数据存储暂不可用，请稍后重试") from e
 
 
 def _admin_password() -> str:
@@ -357,7 +366,7 @@ async def list_reviews(request: Request, dashboard_session: Optional[str] = Cook
     await require_auth(request, dashboard_session)
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
-    data = await asyncio.to_thread(
+    data = await _dashboard_storage_read(
         get_storage().list_reviews, repo=repo, status=status, verdict=verdict,
         trigger_type=trigger_type, limit=limit, offset=offset)
     return _ok(data)
@@ -367,7 +376,7 @@ async def list_reviews(request: Request, dashboard_session: Optional[str] = Cook
 async def review_detail(review_id: int, request: Request,
                         dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    detail = await asyncio.to_thread(get_storage().get_review_detail, review_id)
+    detail = await _dashboard_storage_read(get_storage().get_review_detail, review_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="审查记录不存在")
     return _ok(detail)
@@ -383,20 +392,20 @@ async def retry_review(review_id: int, request: Request,
 @router.get("/repos")
 async def list_repos(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    return _ok({"items": await asyncio.to_thread(get_storage().list_repos)})
+    return _ok({"items": await _dashboard_storage_read(get_storage().list_repos)})
 
 
 @router.get("/stats/overview")
 async def stats_overview(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    return _ok(await asyncio.to_thread(get_storage().stats_overview))
+    return _ok(await _dashboard_storage_read(get_storage().stats_overview))
 
 
 @router.get("/audit-logs")
 async def audit_logs(request: Request, dashboard_session: Optional[str] = Cookie(None),
                      limit: int = 100):
     await require_auth(request, dashboard_session)
-    items = await asyncio.to_thread(
+    items = await _dashboard_storage_read(
         get_storage().list_audit_logs, limit=max(1, min(limit, 500)))
     return _ok({"items": items})
 

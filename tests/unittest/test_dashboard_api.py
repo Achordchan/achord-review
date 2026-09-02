@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import pr_agent.servers.dashboard_api as dashboard_api
-from pr_agent.dashboard.storage import DashboardStorage
+from pr_agent.dashboard.storage import DashboardStorage, DashboardStorageReadError
 
 
 @pytest.fixture()
@@ -388,6 +388,25 @@ class TestProtectedRoutes:
         resp = client.get("/api/v1/dashboard/stats/overview", headers=auth)
         assert resp.status_code == 200
         assert resp.json()["data"]["total"] == 1
+
+    @pytest.mark.parametrize(("method", "path"), [
+        ("list_reviews", "/api/v1/dashboard/reviews"),
+        ("get_review_detail", "/api/v1/dashboard/reviews/1"),
+        ("list_repos", "/api/v1/dashboard/repos"),
+        ("stats_overview", "/api/v1/dashboard/stats/overview"),
+        ("list_audit_logs", "/api/v1/dashboard/audit-logs"),
+    ])
+    def test_data_routes_report_storage_failure(self, client, storage, monkeypatch, method, path):
+        auth = _auth_header(client)
+
+        def unavailable(*args, **kwargs):
+            raise DashboardStorageReadError("volume unavailable")
+
+        monkeypatch.setattr(storage, method, unavailable)
+        resp = client.get(path, headers=auth)
+
+        assert resp.status_code == 503
+        assert "暂不可用" in resp.json()["detail"]
 
     def test_reserved_routes_come_soon(self, client):
         auth = _auth_header(client)

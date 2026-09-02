@@ -128,8 +128,7 @@ async def review_failed(request_id: str, error_message: str) -> None:
             if storage is None:
                 return
             fields = _run_payload_fields()
-            storage.set_review_usage(request_id, **fields)
-            storage.fail_review(request_id, error_message[:2000])
+            storage.fail_review(request_id, error_message[:2000], **fields)
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_failed) failed, error: {e}")
 
@@ -151,8 +150,7 @@ async def review_skipped(request_id: str, reason: str) -> None:
             if storage is None:
                 return
             fields = _run_payload_fields()
-            storage.set_review_usage(request_id, **fields)
-            storage.skip_review(request_id, reason[:2000])
+            storage.skip_review(request_id, reason[:2000], **fields)
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_skipped) failed, error: {e}")
 

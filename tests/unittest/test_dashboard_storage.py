@@ -9,6 +9,7 @@ import pytest
 import pr_agent.dashboard.storage as storage_module
 
 DashboardStorage = storage_module.DashboardStorage
+DashboardStorageReadError = storage_module.DashboardStorageReadError
 STALE_CLEANUP_INTERVAL_SECONDS = storage_module.STALE_CLEANUP_INTERVAL_SECONDS
 
 
@@ -76,17 +77,24 @@ class TestReviewsCrud:
 
     def test_fail_review_preserves_usage_without_a_prerequisite_read(self, storage, monkeypatch):
         request_id = storage.create_review(repo_name="r", pr_number=3, pr_url="u3")
-        storage.set_review_usage(
-            request_id, model="openai/gpt-x", prompt_tokens=10,
-            completion_tokens=5, total_tokens=15, duration_ms=250)
         monkeypatch.setattr(storage, "get_review_by_request_id", lambda *args, **kwargs: None)
 
-        storage.fail_review(request_id, "timeout")
+        storage.fail_review(
+            request_id, "timeout", model="openai/gpt-x", prompt_tokens=10,
+            completion_tokens=5, total_tokens=15, duration_ms=250)
 
         row = storage._read("SELECT * FROM reviews WHERE request_id = ?", (request_id,))[0]
         assert row["status"] == "FAILED"
         assert row["total_tokens"] == 15
         assert row["duration_ms"] == 250
+
+    def test_strict_read_propagates_storage_failure(self, storage, monkeypatch):
+        monkeypatch.setattr(storage, "_connect", lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("volume unavailable")))
+
+        assert storage._read("SELECT 1") == []
+        with pytest.raises(DashboardStorageReadError):
+            storage._read("SELECT 1", strict=True)
 
     def test_finish_review_atomic_writes_issues_and_status(self, storage):
         request_id = _seed_review(storage, status_complete=False)

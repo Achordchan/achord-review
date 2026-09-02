@@ -25,6 +25,29 @@ def test_terminal_audit_write_is_complete_before_await_returns(tmp_path, monkeyp
     assert row["total_tokens"] == 3
 
 
+def test_failed_audit_persists_usage_and_status_in_one_call(monkeypatch):
+    captured = {}
+
+    class RecordingStorage:
+        def fail_review(self, request_id, error_message, **fields):
+            captured.update({"request_id": request_id, "error_message": error_message, **fields})
+
+        def set_review_usage(self, *args, **kwargs):
+            raise AssertionError("failure audit must use one terminal transaction")
+
+    monkeypatch.setattr(audit, "_run_audit", lambda: RecordingStorage())
+    monkeypatch.setattr(
+        audit, "_run_payload_fields",
+        lambda: {"model": "m", "reasoning_effort": "high", "prompt_tokens": 1,
+                 "completion_tokens": 2, "total_tokens": 3, "duration_ms": 4})
+
+    asyncio.run(audit.review_failed("request-id", "model failed"))
+
+    assert captured["request_id"] == "request-id"
+    assert captured["error_message"] == "model failed"
+    assert captured["total_tokens"] == 3
+
+
 def test_initial_audit_write_runs_off_event_loop(monkeypatch):
     main_thread = threading.get_ident()
     called = {}
