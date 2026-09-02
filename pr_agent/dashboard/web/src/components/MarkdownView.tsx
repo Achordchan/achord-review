@@ -5,7 +5,19 @@ import remarkGfm from 'remark-gfm'
 export function MarkdownView({ content }: { content: string }) {
   return (
     <div className="md-view">
-      <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        components={{
+          img: ({ alt }) => (
+            <span className="inline-flex rounded border border-line bg-surface-2 px-2 py-1 text-xs text-muted">
+              远程图片已屏蔽{alt ? `：${alt}` : ''}
+            </span>
+          ),
+        }}
+      >
+        {content}
+      </Markdown>
     </div>
   )
 }

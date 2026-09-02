@@ -13,6 +13,7 @@ targeted fields, never regenerating the file from a template.
 
 import fcntl
 import glob
+import math
 import os
 import shutil
 import stat
@@ -84,9 +85,24 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
             low, high = INT_FIELDS[name][2], INT_FIELDS[name][3]
             if value is None or value == "":
                 continue  # unset optional field keeps its configured default
-            try:
+            if isinstance(value, bool):
+                errors.append(f"{name} must be an integer")
+                continue
+            if isinstance(value, int):
+                number = value
+            elif isinstance(value, float):
+                if not math.isfinite(value) or not value.is_integer():
+                    errors.append(f"{name} must be an integer")
+                    continue
                 number = int(value)
-            except (TypeError, ValueError):
+            elif isinstance(value, str):
+                candidate = value.strip()
+                digits = candidate[1:] if candidate.startswith(("+", "-")) else candidate
+                if not digits.isdigit():
+                    errors.append(f"{name} must be an integer")
+                    continue
+                number = int(candidate)
+            else:
                 errors.append(f"{name} must be an integer")
                 continue
             if not low <= number <= high:

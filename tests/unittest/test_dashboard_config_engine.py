@@ -144,6 +144,12 @@ class TestWrite:
         ok, errors = engine.write({"unknown_field": 1})
         assert not ok
 
+    @pytest.mark.parametrize("value", [True, False, 60.9, float("inf"), float("-inf"), "60.0"])
+    def test_integer_fields_reject_lossy_or_non_finite_values(self, engine, value):
+        ok, errors = engine.write({"ai_timeout": value})
+        assert not ok
+        assert errors == ["ai_timeout must be an integer"]
+
     def test_unset_optional_integers_are_skipped(self, engine):
         """read() returns None for ints absent from a sparse file; saving some
         other field must not turn those Nones into validation failures."""

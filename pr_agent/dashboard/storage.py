@@ -101,6 +101,8 @@ CREATE INDEX IF NOT EXISTS idx_dashboard_login_attempts_time ON dashboard_login_
 """
 
 _MAX_RETRY = 3
+_DEFAULT_DB_TIMEOUT_SECONDS = 10
+_AUDIT_DB_TIMEOUT_SECONDS = 0.5
 
 
 def _utcnow() -> str:
@@ -120,8 +122,8 @@ class DashboardStorage:
         self._stale_cleanup_lock = threading.Lock()
         self._last_stale_cleanup = 0.0
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10)
+    def _connect(self, timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=timeout_seconds)
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
@@ -156,17 +158,18 @@ class DashboardStorage:
             if os.path.exists(path):
                 os.chmod(path, 0o600)
 
-    def _write(self, sql: str, params: tuple = ()) -> Optional[int]:
-        for attempt in range(_MAX_RETRY):
+    def _write(self, sql: str, params: tuple = (), timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS,
+               max_retry: int = _MAX_RETRY) -> Optional[int]:
+        for attempt in range(max_retry):
             try:
-                with self._write_lock, self._connect() as conn:
+                with self._write_lock, self._connect(timeout_seconds) as conn:
                     cursor = conn.execute(sql, params)
                     lastrowid = cursor.lastrowid
                 self._protect_storage_permissions()
                 return lastrowid
             except sqlite3.OperationalError as e:
                 # "database is locked" under momentary contention; back off and retry
-                if "locked" not in str(e) or attempt == _MAX_RETRY - 1:
+                if "locked" not in str(e) or attempt == max_retry - 1:
                     get_logger().warning(f"Dashboard storage write failed, error: {e}")
                     return None
                 time.sleep(0.2 * (attempt + 1))
@@ -185,16 +188,18 @@ class DashboardStorage:
             get_logger().warning(f"Dashboard storage read failed, error: {e}")
             return []
 
-    def _transaction(self, operation: Callable[[sqlite3.Connection], None], label: str) -> bool:
+    def _transaction(self, operation: Callable[[sqlite3.Connection], None], label: str,
+                     timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS,
+                     max_retry: int = _MAX_RETRY) -> bool:
         """Run a multi-statement write with the same bounded lock retry as _write."""
-        for attempt in range(_MAX_RETRY):
+        for attempt in range(max_retry):
             try:
-                with self._write_lock, self._connect() as conn:
+                with self._write_lock, self._connect(timeout_seconds) as conn:
                     operation(conn)
                 self._protect_storage_permissions()
                 return True
             except sqlite3.OperationalError as e:
-                if "locked" not in str(e) or attempt == _MAX_RETRY - 1:
+                if "locked" not in str(e) or attempt == max_retry - 1:
                     get_logger().warning(f"Dashboard storage {label} failed, error: {e}")
                     return False
                 time.sleep(0.2 * (attempt + 1))
@@ -300,7 +305,8 @@ class DashboardStorage:
             " sender, trigger_type, command, status, model, reasoning_effort, created_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?)",
             (request_id, repo_name, pr_number, pr_title, pr_url, commit_sha, sender,
-             trigger_type, command, model, reasoning_effort, _utcnow()))
+             trigger_type, command, model, reasoning_effort, _utcnow()),
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
         return request_id if inserted is not None else ""
 
     def complete_review(self, request_id: str, verdict: str = "", verdict_reason: str = "",
@@ -308,12 +314,13 @@ class DashboardStorage:
         self._write(
             "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
             " markdown_output=?, raw_prediction=?, completed_at=? WHERE request_id=?",
-            (verdict, verdict_reason, markdown_output, raw_prediction, _utcnow(), request_id))
+            (verdict, verdict_reason, markdown_output, raw_prediction, _utcnow(), request_id),
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
     def fail_review(self, request_id: str, error_message: str) -> None:
         self._write(
             "UPDATE reviews SET status='FAILED', error_message=?, completed_at=? WHERE request_id=?",
-            (error_message, _utcnow(), request_id))
+            (error_message, _utcnow(), request_id), timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
     def skip_review(self, request_id: str, reason: str) -> None:
         """Close a RUNNING record that exited before publishing (no files,
@@ -321,7 +328,7 @@ class DashboardStorage:
         genuine model/transport error stays distinguishable in the history."""
         self._write(
             "UPDATE reviews SET status='SKIPPED', error_message=?, completed_at=? WHERE request_id=?",
-            (reason, _utcnow(), request_id))
+            (reason, _utcnow(), request_id), timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
     def set_review_usage(self, request_id: str, model: str = "", reasoning_effort: str = "",
                          prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0,
@@ -332,7 +339,7 @@ class DashboardStorage:
             " prompt_tokens=?, completion_tokens=?, total_tokens=?, duration_ms=?"
             " WHERE request_id=?",
             (model, reasoning_effort, prompt_tokens, completion_tokens, total_tokens,
-             duration_ms, request_id))
+             duration_ms, request_id), timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
     def add_review_issues(self, request_id: str, issues: List[Dict[str, Any]]) -> None:
         row = self.get_review_by_request_id(request_id)
@@ -347,7 +354,8 @@ class DashboardStorage:
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (review_id, issue.get("severity"), issue.get("relevant_file"),
                  issue.get("relevant_lines_start"), issue.get("relevant_lines_end"),
-                 issue.get("issue_summary"), issue.get("suggestion"), now))
+                 issue.get("issue_summary"), issue.get("suggestion"), now),
+                timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
     def finish_review(self, request_id: str, issues: List[Dict[str, Any]], verdict: str = "",
                       verdict_reason: str = "", markdown_output: str = "",
@@ -391,7 +399,8 @@ class DashboardStorage:
                       issue.get("issue_summary"), issue.get("suggestion"), now)
                      for issue in issues])
 
-        self._transaction(_finish, "finish-review transaction")
+        self._transaction(
+            _finish, "finish-review transaction", timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
     def get_review_by_request_id(self, request_id: str, summary_only: bool = False) -> Optional[Dict[str, Any]]:
         columns = "id, repo_name, pr_number" if summary_only else "*"

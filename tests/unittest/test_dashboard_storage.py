@@ -119,11 +119,11 @@ class TestReviewsCrud:
         original_connect = storage._connect
         calls = {"count": 0}
 
-        def flaky_connect():
+        def flaky_connect(timeout_seconds=10):
             calls["count"] += 1
             if calls["count"] <= 2:
                 raise sqlite3.OperationalError("database is locked")
-            return original_connect()
+            return original_connect(timeout_seconds)
 
         monkeypatch.setattr(storage, "_connect", flaky_connect)
         monkeypatch.setattr("pr_agent.dashboard.storage.time.sleep", lambda _: None)
@@ -131,6 +131,19 @@ class TestReviewsCrud:
 
         assert calls["count"] == 3
         assert storage.get_review_by_request_id(request_id)["status"] == "COMPLETED"
+
+    def test_audit_writes_use_short_database_timeout(self, storage, monkeypatch):
+        timeouts = []
+        original_connect = storage._connect
+
+        def capture_timeout(timeout_seconds=10):
+            timeouts.append(timeout_seconds)
+            return original_connect(timeout_seconds)
+
+        monkeypatch.setattr(storage, "_connect", capture_timeout)
+        assert storage.create_review(repo_name="r", pr_number=6, pr_url="u6")
+        assert timeouts
+        assert max(timeouts) <= 0.5
 
     def test_list_reviews_filters(self, storage):
         _seed_review(storage, repo="a/b", pr=1, verdict="APPROVE")
