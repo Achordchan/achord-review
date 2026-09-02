@@ -72,12 +72,14 @@ export default function ConfigPage() {
         hot_reload_pending: boolean
         reload_warning: string
       }>('/api/v1/dashboard/config', payload)
-      if (body.hot_reload_pending && !body.restarted) {
+      if (body.hot_reload_pending && !body.restart_started) {
         toast.error('配置已保存，但尚未热生效', body.reload_warning || '请重启服务后生效')
-      } else if (restart && !body.restarted) {
+      } else if (restart && !body.restart_started) {
         toast.error('配置已保存，但重启未发起', body.restart_output[0] ?? '请在宿主机重启服务')
+      } else if (body.restart_started && !body.restarted) {
+        toast.success('配置已保存，重启指令已下发', '完成状态尚未确认，请稍后手动刷新页面')
       } else {
-        toast.success('配置已保存', body.restarted ? '容器重启中，页面将在 30 秒后自动刷新' : '变更已热生效，无需重启')
+        toast.success('配置已保存', body.restarted ? '容器已完成重启，页面将在 30 秒后自动刷新' : '变更已热生效，无需重启')
       }
       setDirtyFields(new Set())
       setKeySecret('')

@@ -65,6 +65,26 @@ def test_restart_stops_after_failed_preflight(monkeypatch):
     assert popen_called is False
 
 
+def test_restart_reports_immediate_command_rejection(monkeypatch):
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="container found"))
+
+    class RejectedProcess:
+        def poll(self):
+            return 13
+
+    monkeypatch.setattr(ops.subprocess, "Popen", lambda *args, **kwargs: RejectedProcess())
+    monkeypatch.setattr(ops.time, "sleep", lambda _: None)
+
+    result = ops.restart_container()
+
+    assert result["started"] is False
+    assert result["completed"] is True
+    assert "退出码 13" in result["output"][0]
+
+
 def test_tail_logs_caps_a_single_huge_line(monkeypatch, tmp_path):
     log_path = tmp_path / "service.log"
     log_path.write_bytes(b"x" * (ops.MAX_LOG_TAIL_BYTES + 1024))
@@ -191,9 +211,10 @@ def test_github_probe_mints_and_validates_installation_token(monkeypatch):
             return self.values.get(key, default)
 
     class Response:
-        def __init__(self, status_code, payload):
+        def __init__(self, status_code, payload, headers=None):
             self.status_code = status_code
             self.payload = payload
+            self.headers = headers or {}
 
         def json(self):
             return self.payload
@@ -208,7 +229,13 @@ def test_github_probe_mints_and_validates_installation_token(monkeypatch):
         if url.endswith("/app"):
             return Response(200, {"name": "achord-review"})
         if "/app/installations" in url:
-            return Response(200, [{"id": 42, "suspended_at": None}])
+            if "page=2" in url:
+                return Response(200, [{"id": 42, "suspended_at": None}])
+            return Response(
+                200,
+                [{"id": index, "suspended_at": "2026-01-01"} for index in range(100)],
+                {"Link": '<https://api.github.com/app/installations?per_page=100&page=2>; rel="next"'},
+            )
         return Response(200, {"total_count": 7})
 
     monkeypatch.setattr(requests, "get", fake_get)
@@ -230,5 +257,6 @@ def test_github_probe_mints_and_validates_installation_token(monkeypatch):
     }
     assert ("GET", "https://api.github.com/installation/repositories?per_page=1",
             "Bearer installation-token") in requested
+    assert any("/app/installations?per_page=100&page=2" in url for method, url, _ in requested)
     assert ("DELETE", "https://api.github.com/installation/token",
             "Bearer installation-token") in requested

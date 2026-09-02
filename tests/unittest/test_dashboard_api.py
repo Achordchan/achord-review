@@ -341,6 +341,22 @@ class TestProtectedRoutes:
         assert resp.json()["data"]["restarted"] is False
         assert resp.json()["data"]["restart_started"] is False
 
+    def test_config_restart_acceptance_is_not_reported_as_completion(self, client, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_api.ops, "restart_container",
+            lambda: {"started": True, "completed": False, "exit_code": None, "output": []})
+        auth = _auth_header(client)
+
+        resp = client.put(
+            "/api/v1/dashboard/config",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"},
+            json={"model": "openai/gpt-test", "restart": True})
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["restart_started"] is True
+        assert resp.json()["data"]["restarted"] is False
+        assert "待确认" in resp.json()["message"]
+
     def test_config_rejects_string_restart_flag(self, client):
         auth = _auth_header(client)
         resp = client.put(

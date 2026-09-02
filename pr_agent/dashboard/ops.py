@@ -24,6 +24,7 @@ CONTAINER_NAME = os.environ.get("ACHORD_REVIEW_CONTAINER", "achord-review")
 REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "/app")
 GIT_PULL_TIMEOUT_SECONDS = 120
 DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 5
+RESTART_ACCEPTANCE_GRACE_SECONDS = 0.2
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 OPS_LOCK_PATH = os.environ.get("DASHBOARD_OPS_LOCK_PATH", "/app/data/dashboard-ops.lock")
@@ -118,10 +119,16 @@ def restart_container() -> Dict[str, Any]:
                 check=False)
             if preflight.returncode != 0:
                 return _not_started((preflight.stdout or "Docker 端点不可用").strip()[:1000])
-            subprocess.Popen(
+            restart_process = subprocess.Popen(
                 ["docker", "restart", "--timeout", "30", CONTAINER_NAME],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
                 pass_fds=(lock_file.fileno(),))
+            time.sleep(RESTART_ACCEPTANCE_GRACE_SECONDS)
+            return_code = restart_process.poll()
+            if return_code not in (None, 0):
+                return _not_started(f"docker restart 立即失败（退出码 {return_code}）")
+            if return_code == 0:
+                return {"started": True, "completed": True, "exit_code": 0, "output": []}
             return {"started": True, "completed": False, "exit_code": None, "output": []}
         except subprocess.TimeoutExpired:
             return _not_started("Docker 端点预检超时，容器重启未发起")
@@ -193,15 +200,21 @@ def probe_github_app() -> Dict[str, Any]:
         if app_response.status_code != 200:
             return {"ok": False, "app_id": app_id,
                     "error": f"GitHub App API returned {app_response.status_code}"}
-        installations_response = requests.get(
-            "https://api.github.com/app/installations?per_page=100",
-            timeout=15, headers=app_headers)
-        if installations_response.status_code != 200:
-            return {"ok": False, "app_id": app_id,
-                    "error": f"GitHub installations API returned {installations_response.status_code}"}
-        installations = installations_response.json()
-        installation = next(
-            (item for item in installations if not item.get("suspended_at")), None)
+        installation = None
+        installations_url = "https://api.github.com/app/installations?per_page=100"
+        while installations_url:
+            installations_response = requests.get(
+                installations_url, timeout=15, headers=app_headers)
+            if installations_response.status_code != 200:
+                return {"ok": False, "app_id": app_id,
+                        "error": f"GitHub installations API returned {installations_response.status_code}"}
+            installations = installations_response.json()
+            installation = next(
+                (item for item in installations if not item.get("suspended_at")), None)
+            if installation is not None:
+                break
+            installations_url = _next_link(
+                getattr(installations_response, "headers", {}).get("Link", ""))
         if installation is None:
             return {"ok": False, "app_id": app_id, "error": "no active GitHub App installation"}
 
@@ -243,6 +256,14 @@ def probe_github_app() -> Dict[str, Any]:
                 get_logger().debug(f"GitHub probe token revocation skipped, error: {e}")
     except Exception as e:
         return {"ok": False, "app_id": app_id, "error": str(e)[:300]}
+
+
+def _next_link(link_header: str) -> str:
+    for part in (link_header or "").split(","):
+        target, separator, relation = part.strip().partition(";")
+        if separator and 'rel="next"' in relation and target.startswith("<") and target.endswith(">"):
+            return target[1:-1]
+    return ""
 
 
 def probe_storage() -> Dict[str, Any]:

@@ -305,10 +305,12 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     # restart never starts, and the UI must not wait for one
     result = await asyncio.to_thread(ops.restart_container) if restart else None
     restart_started = bool(restart and result and result.get("started"))
-    restarted = restart_started
+    restarted = bool(restart_started and result.get("completed") and result.get("exit_code") == 0)
     message = "配置已保存，但热重载失败，需要重启" if hot_reload_pending else "配置已保存并热生效"
-    if restart_started:
-        message += "，容器重启中"
+    if restarted:
+        message += "，容器已完成重启"
+    elif restart_started:
+        message += "，重启指令已下发，完成状态待确认"
     elif restart:
         message += "，但重启未发起，请检查受控 Docker 端点或在宿主机重启"
     return _ok({"restarted": restarted,
