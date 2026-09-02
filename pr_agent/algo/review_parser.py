@@ -26,20 +26,28 @@ def _is_positive_line_number(value: Any) -> bool:
         return False
 
 
-def _is_complete_finding(issue: Any, require_severity: bool) -> bool:
+def _normalize_finding(issue: Any, require_severity: bool) -> dict | None:
     if not isinstance(issue, dict):
-        return False
+        return None
     for field in ("relevant_file", "issue_header", "issue_content"):
         if not isinstance(issue.get(field), str) or not issue[field].strip():
-            return False
+            return None
     if not _is_positive_line_number(issue.get("start_line")):
-        return False
-    if not _is_positive_line_number(issue.get("end_line")):
-        return False
-    if int(str(issue["end_line"]).strip()) < int(str(issue["start_line"]).strip()):
-        return False
+        return None
+    end_line = issue["start_line"] if "end_line" not in issue else issue["end_line"]
+    if not _is_positive_line_number(end_line):
+        return None
+    start_line_number = int(str(issue["start_line"]).strip())
+    end_line_number = int(str(end_line).strip())
+    if end_line_number < start_line_number:
+        return None
     severity = str(issue.get("severity") or "").strip().upper()
-    return not require_severity or severity in _REVIEW_SEVERITIES
+    if require_severity and severity not in _REVIEW_SEVERITIES:
+        return None
+    normalized = dict(issue)
+    normalized["start_line"] = start_line_number
+    normalized["end_line"] = end_line_number
+    return normalized
 
 
 def recover_missing_review_wrapper(data: Any, *, require_severity: bool = False) -> tuple[Any, bool]:
@@ -55,9 +63,16 @@ def recover_missing_review_wrapper(data: Any, *, require_severity: bool = False)
         return data, False
 
     issues = data.get("key_issues_to_review")
-    if issues is not None and (not isinstance(issues, list)
-                               or not all(_is_complete_finding(issue, require_severity) for issue in issues)):
-        return data, False
+    normalized_issues = None
+    if issues is not None:
+        if not isinstance(issues, list):
+            return data, False
+        normalized_issues = []
+        for issue in issues:
+            normalized_issue = _normalize_finding(issue, require_severity)
+            if normalized_issue is None:
+                return data, False
+            normalized_issues.append(normalized_issue)
 
     has_complete_finding = isinstance(issues, list) and bool(issues)
     security_concerns = data.get("security_concerns")
@@ -69,4 +84,7 @@ def recover_missing_review_wrapper(data: Any, *, require_severity: bool = False)
     if not has_complete_finding and not has_explicit_security_concern:
         return data, False
 
-    return {"review": data}, True
+    normalized_data = dict(data)
+    if normalized_issues is not None:
+        normalized_data["key_issues_to_review"] = normalized_issues
+    return {"review": normalized_data}, True

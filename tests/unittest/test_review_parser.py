@@ -28,11 +28,24 @@ def test_recovers_complete_findings_when_only_review_wrapper_is_missing():
     assert recovered == {"review": data}
 
 
+def test_normalizes_start_line_only_finding_as_a_single_line_issue():
+    finding = _finding()
+    finding.pop("end_line")
+
+    recovered, changed = recover_missing_review_wrapper(
+        {"key_issues_to_review": [finding]}, require_severity=True)
+
+    assert changed is True
+    assert recovered["review"]["key_issues_to_review"][0]["start_line"] == 143
+    assert recovered["review"]["key_issues_to_review"][0]["end_line"] == 143
+
+
 @pytest.mark.parametrize("data", [
     {"key_issues_to_review": []},
     {"security_concerns": "No"},
     {"key_issues_to_review": [_finding(severity="")]},
     {"key_issues_to_review": [_finding(start_line=0)]},
+    {"key_issues_to_review": [_finding(start_line=144, end_line=143)]},
     {"key_issues_to_review": [_finding()], "unexpected": "value"},
 ])
 def test_rejects_incomplete_or_ambiguous_unwrapped_responses(data):
