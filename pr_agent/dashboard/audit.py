@@ -61,7 +61,8 @@ def _run_audit() -> Optional:
 
 
 def review_started(pr_url: str, sender: str = "", trigger_type: str = "manual",
-                   command: str = "/review", commit_sha: str = "", pr_title: str = "") -> str:
+                   command: str = "/review", commit_sha: str = "", pr_title: str = "",
+                   repo_name: str = "", pr_number: int = 0) -> str:
     """Insert a RUNNING record; returns the request_id ("" when disabled or failed)."""
     try:
         if not get_settings().get("config.dashboard_audit_enabled", True):
@@ -69,7 +70,9 @@ def review_started(pr_url: str, sender: str = "", trigger_type: str = "manual",
         storage = _run_audit()
         if storage is None:
             return ""
-        repo, number = _parse_pr_url(pr_url)
+        parsed_repo, parsed_number = _parse_pr_url(pr_url)
+        repo = repo_name or parsed_repo
+        number = pr_number or parsed_number
         request_id = storage.create_review(
             repo_name=repo, pr_number=number, pr_url=pr_url, command=command,
             pr_title=pr_title, sender=sender, trigger_type=trigger_type, commit_sha=commit_sha)

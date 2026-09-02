@@ -86,12 +86,18 @@ class TestAuth:
     def test_logout_revokes_bearer_session(self, client):
         token = _auth_header(client)["Authorization"][7:]
         resp = client.post("/api/v1/dashboard/auth/logout",
-                           headers={"Authorization": f"Bearer {token}"})
+                           headers={"Authorization": f"Bearer {token}",
+                                    "Sec-Fetch-Site": "same-origin"})
         assert resp.status_code == 200
         # the bearer session must be dead immediately, not after cookie expiry
         assert not dashboard_api._session_valid(token)
         assert client.get("/api/v1/dashboard/auth/me",
                           headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+    def test_logout_requires_auth_and_same_origin(self, client):
+        assert client.post("/api/v1/dashboard/auth/logout").status_code == 401
+        auth = _auth_header(client)
+        assert client.post("/api/v1/dashboard/auth/logout", headers=auth).status_code == 403
 
 
 class TestClientIp:
@@ -212,6 +218,11 @@ class TestSameOrigin:
     def test_origin_match_passes(self, client):
         dashboard_api.require_same_origin(self._request({
             "origin": "https://review.achord.cn", "host": "review.achord.cn"}))
+
+    def test_referer_path_match_passes(self, client):
+        dashboard_api.require_same_origin(self._request({
+            "referer": "https://review.achord.cn/dashboard/config?tab=model",
+            "host": "review.achord.cn"}))
 
     def test_origin_mismatch_rejected(self, client):
         import pytest as _pytest

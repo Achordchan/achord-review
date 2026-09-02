@@ -15,6 +15,7 @@ import os
 import secrets
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -125,8 +126,8 @@ def require_same_origin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Missing origin evidence")
     host = request.headers.get("host", "")
     # accept only an origin whose host is exactly this deployment's host
-    parsed = origin.split("://", 1)[-1].rstrip("/")
-    if parsed != host:
+    parsed = urlsplit(origin)
+    if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != host.lower():
         raise HTTPException(status_code=403, detail="Cross-site request rejected")
 
 
@@ -183,6 +184,8 @@ async def auth_me(request: Request, dashboard_session: Optional[str] = Cookie(No
 @router.post("/auth/logout")
 async def auth_logout(request: Request, response: Response,
                       dashboard_session: Optional[str] = Cookie(None)):
+    require_auth(request, dashboard_session)
+    require_same_origin(request)
     # revoke whichever credential authenticated this request: the cookie token
     # and the bearer token are both real sessions in shared storage, and a scripted
     # client logging out via the bearer path must lose access immediately

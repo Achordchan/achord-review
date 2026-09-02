@@ -31,6 +31,9 @@ def test_initial_audit_write_runs_off_event_loop(monkeypatch):
 
     class GitProvider:
         pr = type("PR", (), {"title": "Title"})()
+        repo = None
+        id_project = "group/subgroup/repo"
+        id_mr = 42
 
         def get_head_commit_sha(self):
             called["metadata_thread"] = threading.get_ident()
@@ -51,3 +54,5 @@ def test_initial_audit_write_runs_off_event_loop(monkeypatch):
     assert request_id == "request-id"
     assert called["metadata_thread"] != main_thread
     assert called["storage_thread"] != main_thread
+    assert called["kwargs"]["repo_name"] == "group/subgroup/repo"
+    assert called["kwargs"]["pr_number"] == 42

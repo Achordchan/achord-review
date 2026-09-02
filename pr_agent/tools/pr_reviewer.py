@@ -76,15 +76,33 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
             trigger_type = request_context.get("dashboard_trigger_type") or "manual"
         except Exception:
             pass  # no request scope (CLI run) — keep the manual defaults
-        title, sha = "", ""
+        title, sha, repo_name, pr_number = "", "", "", 0
         try:
             title = reviewer.git_provider.pr.title or ""
             sha = reviewer.git_provider.get_head_commit_sha() or ""
+            provider = reviewer.git_provider
+            repo = getattr(provider, "repo", "")
+            if isinstance(repo, str):
+                repo_name = repo
+            if not repo_name:
+                project = getattr(provider, "id_project", "")
+                if project:
+                    repo_name = str(project)
+            if not repo_name:
+                workspace = getattr(provider, "workspace_slug", "")
+                repo_slug = getattr(provider, "repo_slug", "")
+                if workspace and repo_slug:
+                    repo_name = f"{workspace}/{repo_slug}"
+            pr_number = int(
+                getattr(provider, "pr_num", 0)
+                or getattr(provider, "id_mr", 0)
+                or 0)
         except Exception as e:
             get_logger().debug(f"Dashboard audit could not read PR metadata, error: {e}")
         return review_started(
             pr_url=reviewer.pr_url, sender=sender, trigger_type=trigger_type,
-            commit_sha=sha, pr_title=title) or ""
+            commit_sha=sha, pr_title=title, repo_name=repo_name,
+            pr_number=pr_number) or ""
 
     try:
         return await asyncio.to_thread(_work)
