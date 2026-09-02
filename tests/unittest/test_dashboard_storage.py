@@ -2,10 +2,11 @@
 
 import os
 import stat
+import time
 
 import pytest
 
-from pr_agent.dashboard.storage import DashboardStorage
+from pr_agent.dashboard.storage import STALE_CLEANUP_INTERVAL_SECONDS, DashboardStorage
 
 
 @pytest.fixture()
@@ -183,7 +184,7 @@ class TestStats:
         request_id = storage.create_review(repo_name="r", pr_number=12, pr_url="u12")
         storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
                        ("2000-01-01 00:00:00", request_id))
-        storage._last_stale_cleanup = 0
+        storage._last_stale_cleanup = time.monotonic() - STALE_CLEANUP_INTERVAL_SECONDS - 1
 
         stats = storage.stats_overview()
 
@@ -255,7 +256,6 @@ class TestStoragePermissions:
             path = f"{storage.db_path}{suffix}"
             with open(path, "a", encoding="utf-8"):
                 pass
-            os.chmod(path, 0o644)
         storage._protect_storage_permissions()
         assert stat.S_IMODE(os.stat(f"{storage.db_path}-wal").st_mode) == 0o600
         assert stat.S_IMODE(os.stat(f"{storage.db_path}-shm").st_mode) == 0o600

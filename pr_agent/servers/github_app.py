@@ -150,8 +150,8 @@ async def handle_comments_on_pr(body: Dict[str, Any],
             try:
                 context["dashboard_sender"] = sender
                 context["dashboard_trigger_type"] = "mention"
-            except Exception:
-                pass
+            except Exception as e:
+                get_logger().debug(f"Dashboard mention metadata unavailable, error: {e}")
             await agent.handle_request(api_url, comment_body,
                         notify=lambda: provider.add_eyes_reaction(comment_id, disable_eyes=disable_eyes))
         else:
@@ -469,8 +469,8 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
     try:
         context["dashboard_sender"] = body.get("sender", {}).get("login", "")
         context["dashboard_trigger_type"] = "pr_open"
-    except Exception:
-        pass
+    except Exception as e:
+        get_logger().debug(f"Dashboard auto-command metadata unavailable, error: {e}")
     for command in commands:
         try:
             new_command = prepare_command(command)
