@@ -29,7 +29,7 @@ def test_recovers_complete_findings_when_only_review_wrapper_is_missing():
 
 
 def test_normalizes_start_line_only_finding_as_a_single_line_issue():
-    finding = _finding()
+    finding = _finding(severity="p2")
     finding.pop("end_line")
 
     recovered, changed = recover_missing_review_wrapper(
@@ -38,6 +38,7 @@ def test_normalizes_start_line_only_finding_as_a_single_line_issue():
     assert changed is True
     assert recovered["review"]["key_issues_to_review"][0]["start_line"] == 143
     assert recovered["review"]["key_issues_to_review"][0]["end_line"] == 143
+    assert recovered["review"]["key_issues_to_review"][0]["severity"] == "P2"
 
 
 @pytest.mark.parametrize("data", [

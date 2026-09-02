@@ -45,6 +45,8 @@ def _normalize_finding(issue: Any, require_severity: bool) -> dict | None:
     if require_severity and severity not in _REVIEW_SEVERITIES:
         return None
     normalized = dict(issue)
+    if severity in _REVIEW_SEVERITIES:
+        normalized["severity"] = severity
     normalized["start_line"] = start_line_number
     normalized["end_line"] = end_line_number
     return normalized
