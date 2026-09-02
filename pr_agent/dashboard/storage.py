@@ -680,7 +680,8 @@ class DashboardStorage:
         self._write(
             "INSERT INTO audit_logs (operator, action, details_json, ip_address, created_at)"
             " VALUES (?, ?, ?, ?, ?)",
-            (operator, action, json.dumps(details or {}, ensure_ascii=False), ip_address, _utcnow()))
+            (operator, action, json.dumps(details or {}, ensure_ascii=False), ip_address, _utcnow()),
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS, max_retry=1)
 
     def list_audit_logs(self, limit: int = 100) -> List[Dict[str, Any]]:
         return self._read(

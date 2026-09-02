@@ -118,6 +118,25 @@ def test_bounded_command_kills_process_group_on_timeout(tmp_path, monkeypatch):
     assert result["timed_out"] is True
 
 
+def test_bounded_command_reports_when_process_survives_kill_wait(tmp_path, monkeypatch):
+    class StuckProcess:
+        pid = 4243
+        stdout = io.BytesIO(b"")
+
+        def wait(self, timeout):
+            raise subprocess.TimeoutExpired(cmd="git pull", timeout=timeout)
+
+    monkeypatch.setattr(ops.subprocess, "Popen", lambda *args, **kwargs: StuckProcess())
+    monkeypatch.setattr(ops.os, "killpg", lambda *args: None)
+
+    result = ops._run_bounded_command(
+        ["git", "pull"], cwd=str(tmp_path), timeout_seconds=1)
+
+    assert result["timed_out"] is True
+    assert result["exit_code"] is None
+    assert result["output"][-1] == "进程组收到强制终止信号后仍未退出"
+
+
 def test_operations_reject_while_another_worker_holds_lock(monkeypatch):
     called = False
 

@@ -325,6 +325,19 @@ class TestAuditLogs:
             storage.add_audit_log(f"A{i}")
         assert len(storage.list_audit_logs(limit=3)) == 3
 
+    def test_write_uses_short_timeout_without_retries(self, storage, monkeypatch):
+        calls = []
+
+        def capture_write(*args, **kwargs):
+            calls.append(kwargs)
+            return 1
+
+        monkeypatch.setattr(storage, "_write", capture_write)
+
+        storage.add_audit_log("LOGIN")
+
+        assert calls == [{"timeout_seconds": 0.5, "max_retry": 1}]
+
 
 class TestSharedAuthState:
     def test_generation_migration_invalidates_legacy_sessions(self, tmp_path):

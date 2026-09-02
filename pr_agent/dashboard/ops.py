@@ -75,6 +75,7 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int) -> Dic
     reader = threading.Thread(target=_drain, name="dashboard-git-output", daemon=True)
     reader.start()
     timed_out = False
+    kill_wait_expired = False
     try:
         exit_code = proc.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
@@ -83,11 +84,17 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int) -> Dic
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        exit_code = proc.wait(timeout=5)
+        try:
+            exit_code = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            kill_wait_expired = True
+            exit_code = None
     reader.join(timeout=5)
     output = output_tail.decode("utf-8", errors="replace").splitlines()
     if timed_out:
         output.append(f"命令超过 {timeout_seconds} 秒，已终止")
+    if kill_wait_expired:
+        output.append("进程组收到强制终止信号后仍未退出")
     return {"started": True, "completed": True,
             "exit_code": None if timed_out else exit_code,
             "timed_out": timed_out, "output": output}

@@ -311,6 +311,26 @@ class TestSameOrigin:
 
 
 class TestProtectedRoutes:
+    def test_storage_singleton_is_resolved_in_worker_thread(self, client, storage, monkeypatch):
+        event_loop_threads = []
+        resolved_on = []
+
+        async def allow_request(*args, **kwargs):
+            event_loop_threads.append(__import__("threading").get_ident())
+
+        def threaded_storage():
+            resolved_on.append(__import__("threading").get_ident())
+            return storage
+
+        monkeypatch.setattr(dashboard_api, "require_auth", allow_request)
+        monkeypatch.setattr(dashboard_api, "get_storage", threaded_storage)
+
+        resp = client.get("/api/v1/dashboard/reviews")
+
+        assert resp.status_code == 200
+        assert event_loop_threads and resolved_on
+        assert all(thread_id != event_loop_threads[0] for thread_id in resolved_on)
+
     def test_config_save_without_restart_reports_not_restarted(self, client):
         auth = _auth_header(client)
         resp = client.put(

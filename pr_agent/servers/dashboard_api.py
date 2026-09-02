@@ -47,10 +47,15 @@ _password_sync_state = {"db_path": "", "password": None, "generation": None}
 _password_sync_lock = threading.Lock()
 
 
-async def _dashboard_storage_read(operation, *args, **kwargs):
+def _storage_call(method_name: str, *args, **kwargs):
+    """Resolve the storage singleton and method inside a worker thread."""
+    return getattr(get_storage(), method_name)(*args, **kwargs)
+
+
+async def _dashboard_storage_read(method_name: str, *args, **kwargs):
     """Run an admin data query and expose storage outages as a truthful 503."""
     try:
-        return await asyncio.to_thread(operation, *args, **kwargs)
+        return await asyncio.to_thread(_storage_call, method_name, *args, **kwargs)
     except DashboardStorageReadError as e:
         get_logger().warning(f"Dashboard data query unavailable, error: {e}")
         raise HTTPException(status_code=503, detail="审查数据存储暂不可用，请稍后重试") from e
@@ -216,7 +221,7 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
         raise HTTPException(status_code=503, detail="管理员密码未配置（config.toml [dashboard] admin_password）")
     password_matches = hmac.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8"))
     decision = await asyncio.to_thread(
-        get_storage().verify_login_attempt,
+        _storage_call, "verify_login_attempt",
         _credential_hash(key), password_matches, time.time(), LOCKOUT_SECONDS,
         MAX_FAILED_ATTEMPTS, MAX_LOCKOUT_KEYS * MAX_FAILED_ATTEMPTS)
     if decision["storage_error"]:
@@ -230,7 +235,7 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
     token = await _create_session(expected)
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
                         max_age=SESSION_TTL_SECONDS, secure=True, path="/")
-    await asyncio.to_thread(get_storage().add_audit_log, "LOGIN", {"ip": key}, ip_address=key)
+    await asyncio.to_thread(_storage_call, "add_audit_log", "LOGIN", {"ip": key}, ip_address=key)
     return _ok({"authenticated": True})
 
 
@@ -294,7 +299,7 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
         raise HTTPException(status_code=400, detail="; ".join(errors))
     hot_reload_pending = bool(errors)
     await asyncio.to_thread(
-        get_storage().add_audit_log, "UPDATE_CONFIG", {"fields": sorted(fields.keys())},
+        _storage_call, "add_audit_log", "UPDATE_CONFIG", {"fields": sorted(fields.keys())},
         ip_address=_client_ip(request))
     # report what actually happened: without docker inside the container the
     # restart never starts, and the UI must not wait for one
@@ -323,7 +328,7 @@ async def ops_restart(request: Request, dashboard_session: Optional[str] = Cooki
     result = await asyncio.to_thread(ops.restart_container)
     started = bool(result.get("started"))
     await asyncio.to_thread(
-        get_storage().add_audit_log, "RESTART_CONTAINER", {"started": started},
+        _storage_call, "add_audit_log", "RESTART_CONTAINER", {"started": started},
         ip_address=_client_ip(request))
     if not started:
         return JSONResponse(
@@ -340,7 +345,7 @@ async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cook
     result = await asyncio.to_thread(ops.git_pull)
     started = bool(result.get("started"))
     await asyncio.to_thread(
-        get_storage().add_audit_log, "GIT_PULL", {"started": started},
+        _storage_call, "add_audit_log", "GIT_PULL", {"started": started},
         ip_address=_client_ip(request))
     if not started:
         return JSONResponse(
@@ -379,7 +384,7 @@ async def list_reviews(request: Request, dashboard_session: Optional[str] = Cook
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     data = await _dashboard_storage_read(
-        get_storage().list_reviews, repo=repo, status=status, verdict=verdict,
+        "list_reviews", repo=repo, status=status, verdict=verdict,
         trigger_type=trigger_type, limit=limit, offset=offset)
     return _ok(data)
 
@@ -388,7 +393,7 @@ async def list_reviews(request: Request, dashboard_session: Optional[str] = Cook
 async def review_detail(review_id: int, request: Request,
                         dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    detail = await _dashboard_storage_read(get_storage().get_review_detail, review_id)
+    detail = await _dashboard_storage_read("get_review_detail", review_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="审查记录不存在")
     return _ok(detail)
@@ -404,13 +409,13 @@ async def retry_review(review_id: int, request: Request,
 @router.get("/repos")
 async def list_repos(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    return _ok({"items": await _dashboard_storage_read(get_storage().list_repos)})
+    return _ok({"items": await _dashboard_storage_read("list_repos")})
 
 
 @router.get("/stats/overview")
 async def stats_overview(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    return _ok(await _dashboard_storage_read(get_storage().stats_overview))
+    return _ok(await _dashboard_storage_read("stats_overview"))
 
 
 @router.get("/audit-logs")
@@ -418,7 +423,7 @@ async def audit_logs(request: Request, dashboard_session: Optional[str] = Cookie
                      limit: int = 100):
     await require_auth(request, dashboard_session)
     items = await _dashboard_storage_read(
-        get_storage().list_audit_logs, limit=max(1, min(limit, 500)))
+        "list_audit_logs", limit=max(1, min(limit, 500)))
     return _ok({"items": items})
 
 
