@@ -221,7 +221,19 @@ class ConfigEngine:
         # time_ns keeps backups sortable; UUID guarantees uniqueness even on
         # filesystems/clocks whose effective timestamp resolution is coarser.
         backup = f"{self.config_path}.bak.{time.time_ns()}.{uuid.uuid4().hex}"
-        shutil.copy2(self.config_path, backup)
+        directory = os.path.dirname(self.config_path)
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".dashboard-backup-")
+        try:
+            with open(self.config_path, "rb") as source, os.fdopen(fd, "wb") as target:
+                shutil.copyfileobj(source, target)
+                target.flush()
+                os.fsync(target.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, backup)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
         backups = sorted(glob.glob(f"{self.config_path}.bak.*"))
         for stale in backups[:-MAX_BACKUPS]:
             try:

@@ -165,6 +165,8 @@ class TestWrite:
                    if f.startswith("config.toml.bak.")]
         assert len(backups) == len(set(backups))  # all distinct names
         assert len(backups) <= 5
+        assert all((os.stat(os.path.join(os.path.dirname(engine.config_path), name)).st_mode & 0o777) == 0o600
+                   for name in backups)
 
     def test_unrelated_sections_preserved(self, engine):
         engine.write({"model": "openai/changed"})
