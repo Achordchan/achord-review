@@ -508,7 +508,7 @@ class DashboardStorage:
             f" trigger_type, command, status, verdict, model, reasoning_effort,"
             f" prompt_tokens, completion_tokens, total_tokens, duration_ms, error_message,"
             f" created_at, completed_at FROM reviews {clause}"
-            f" ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f" ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
             tuple(params) + (limit, offset))
         total_rows = self._read(f"SELECT COUNT(*) AS c FROM reviews {clause}", tuple(params))
         # severity distribution for the listed reviews, in a single pass

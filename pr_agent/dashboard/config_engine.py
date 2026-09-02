@@ -266,7 +266,7 @@ class ConfigEngine:
                 get_logger().debug(f"Dashboard config backup cleanup skipped a file, error: {e}")
 
     def _atomic_dump(self, doc) -> None:
-        directory = os.path.dirname(self.config_path)
+        directory = os.path.dirname(self.config_path) or "."
         payload = tomlkit.dumps(doc)
         source_stat = os.stat(self.config_path, follow_symlinks=False)
         fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
@@ -281,10 +281,21 @@ class ConfigEngine:
                 # Preserve owner access while enforcing the secrets-file policy.
                 os.fchmod(f.fileno(), stat.S_IRUSR | stat.S_IWUSR)
             os.replace(tmp_path, self.config_path)
+            self._fsync_directory(directory)
         except Exception:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             raise
+
+    @staticmethod
+    def _fsync_directory(directory: str) -> None:
+        """Make a completed atomic rename durable before reporting success."""
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(directory, flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def _hot_reload(self, raw: Dict[str, Any]) -> bool:
         """Apply the complete saved document to in-memory Dynaconf settings.

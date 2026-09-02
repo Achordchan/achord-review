@@ -171,6 +171,19 @@ class TestReviewsCrud:
         items = storage.list_reviews(repo="a/b")["items"]
         assert items[0]["severity_counts"] == {"P0": 1, "P1": 2}
 
+    def test_list_reviews_uses_id_to_break_timestamp_ties(self, storage):
+        request_ids = [_seed_review(storage, pr=number) for number in range(1, 4)]
+        for request_id in request_ids:
+            storage._write(
+                "UPDATE reviews SET created_at = ? WHERE request_id = ?",
+                ("2026-01-01 00:00:00", request_id))
+
+        first_page = storage.list_reviews(limit=2, offset=0)["items"]
+        second_page = storage.list_reviews(limit=2, offset=2)["items"]
+
+        assert [row["request_id"] for row in first_page] == list(reversed(request_ids[1:]))
+        assert [row["request_id"] for row in second_page] == [request_ids[0]]
+
     def test_get_review_detail_contains_issues(self, storage):
         request_id = _seed_review(storage)
         detail = storage.get_review_detail(storage.get_review_by_request_id(request_id)["id"])

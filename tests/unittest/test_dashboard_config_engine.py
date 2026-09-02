@@ -64,6 +64,15 @@ class TestWrite:
         assert len(after) == 4
         assert after[:2] != before[:2]
 
+    def test_atomic_replace_fsyncs_parent_directory(self, engine, monkeypatch):
+        directories = []
+        monkeypatch.setattr(engine, "_fsync_directory", directories.append)
+
+        ok, errors = engine.write({"model": "openai/durable"})
+
+        assert ok, errors
+        assert directories == [os.path.dirname(engine.config_path)]
+
     def test_write_updates_fields(self, engine):
         before = os.stat(engine.config_path)
         ok, errors = engine.write({
