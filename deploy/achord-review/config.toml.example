@@ -16,13 +16,12 @@ custom_model_max_tokens = 1000000
 # so leaving the 32000 default here would silently cap the 1M context.
 max_model_tokens = 200000
 # gpt-5.6-sol is a GPT-5 family model, so litellm forwards reasoning_effort to it.
-# The stock default is "medium"; code review is worth the extra thinking.
-reasoning_effort = "xhigh"
-# xhigh reasoning over a large diff takes minutes, not seconds: an 11-file, 17356-token
-# PR measured 208s. The stock 120s cut every attempt off mid-generation, so large PRs
-# failed every time while small ones passed. Keep this below the relay vhost's
+# "high" balances deep analysis of complex logic and security concerns with fast turnaround
+# (~1-3m), avoiding the multi-minute stalls of "xhigh" on 5000+ line diffs.
+reasoning_effort = "high"
+# Give large diff reviews plenty of breathing room. Keep this below the relay vhost's
 # proxy_read_timeout (3600s) with room to spare.
-ai_timeout = 600
+ai_timeout = 1200
 # The "Preparing review..." placeholder is posted, then deleted once the review lands -
 # but GitHub has already emailed it by then, so it costs a notification and delivers
 # nothing. The eyes reaction on the triggering comment already says "working on it".
@@ -117,3 +116,11 @@ Scope:
 - The findings limit is a ceiling, not a target. Report every real issue up to it and then
   stop; never extend a short list to approach the limit.
 """
+
+# ---------------------------------------------------------------------------
+# Control panel (https://review.achord.cn/dashboard). The password gates every
+# dashboard API route; login attempts are rate-limited to 5 failures / 15 min.
+# Leave it empty to disable the panel entirely — the API then rejects every
+# login with 503 and the SPA shows a dead end.
+[dashboard]
+admin_password = "REPLACE_WITH_DASHBOARD_PASSWORD"

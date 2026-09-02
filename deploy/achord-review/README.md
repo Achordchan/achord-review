@@ -71,6 +71,9 @@ docker compose up -d --build
 docker compose logs -f achord-review
 ```
 
+The SQLite database for the control panel lives in `./data/review.db` on the host
+(created on first start); back it up like any other state.
+
 ## 5. Verify
 
 1. GitHub App → Advanced → **Recent Deliveries**: the webhook should return 200.
@@ -79,6 +82,25 @@ docker compose logs -f achord-review
 3. Comment `@achord-review review` on that PR → the comment gets a 👀 reaction, then a re-review.
 4. Push a new commit → nothing happens on its own; mentioning the bot is what asks for the
    re-review. Turn `github_app.handle_push_trigger` back on to review every push instead.
+
+## 6. Control panel
+
+The web panel is served by the same process at `https://review.achord.cn/dashboard`
+(no extra container, port, or nginx server — the SPA is a static build inside the
+image and the API routes share the webhook process).
+
+- Set the login password in `config.toml` under `[dashboard] admin_password`
+  (copy the section from `config.toml.example`). Leaving it empty disables the
+  panel: every login attempt is rejected with 503.
+- Login is rate-limited to 5 failures per IP per 15 minutes.
+- Every review run is recorded to `./data/review.db`, which feeds the overview
+  stats, the review history, and the per-run detail pages. Config saves and ops
+  actions (restart, git pull) are written to the audit log.
+- The config page edits the mounted `config.toml` live: each save is validated,
+  backed up (5 copies kept), applied to the running process, and — when a
+  restart-requiring field changed — can trigger a one-click container restart.
+- Some navigation entries are greyed out with a "Phase N" badge: those features
+  are planned but not shipped yet; their API routes answer 501 COMING_SOON.
 
 ## Behaviour summary
 

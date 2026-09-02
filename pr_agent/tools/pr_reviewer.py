@@ -57,6 +57,48 @@ VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
 _VERDICT_SNAPSHOT_UNSET = object()
 
 
+def _audit_started(reviewer: "PRReviewer") -> str:
+    """Open a dashboard audit record for this run; best-effort, never raises."""
+    try:
+        from pr_agent.dashboard.audit import review_started
+        return review_started(pr_url=reviewer.pr_url) or ""
+    except Exception:
+        return ""
+
+
+def _audit_verdict(reviewer: "PRReviewer", review_data: Optional[dict]) -> tuple:
+    """Best-effort (verdict, reason) for the audit record; "" when unavailable."""
+    try:
+        if review_data:
+            return reviewer._determine_review_verdict(review_data)
+    except Exception:
+        pass
+    return "", ""
+
+
+def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: str,
+                    prediction: Optional[str]) -> None:
+    try:
+        from pr_agent.dashboard.audit import review_finished
+        review_data = reviewer.review_data
+        issues = []
+        if review_data:
+            issues = (review_data.get("review") or {}).get("key_issues_to_review") or []
+        verdict, reason = _audit_verdict(reviewer, review_data)
+        review_finished(request_id, verdict=verdict, verdict_reason=reason,
+                        markdown_output=pr_review, raw_prediction=prediction, issues=issues)
+    except Exception:
+        pass
+
+
+def _audit_failed(request_id: str, error: Exception) -> None:
+    try:
+        from pr_agent.dashboard.audit import review_failed
+        review_failed(request_id, str(error))
+    except Exception:
+        pass
+
+
 def _verdict_is_newer(standing, snapshot) -> bool:
     """True when `standing` was published after `snapshot` was taken.
 
@@ -176,6 +218,7 @@ class PRReviewer:
         init_run_details()
         progress_response = None
         review_failed = False
+        audit_request_id = _audit_started(self)
         try:
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
@@ -236,6 +279,7 @@ class PRReviewer:
                 # worker that blocks there stops answering webhooks. In a thread the wait
                 # can be long enough to be worth having.
                 await asyncio.to_thread(self._publish_single_review, pr_review, verdict_at_start)
+                _audit_finished(self, audit_request_id, pr_review, self.prediction)
                 return
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -246,6 +290,7 @@ class PRReviewer:
                 get_logger().info(reason)
                 get_settings().data = {"artifact": pr_review}
                 self._submit_review_verdict()
+                _audit_finished(self, audit_request_id, pr_review, self.prediction)
                 return
 
             # publish the review
@@ -274,9 +319,11 @@ class PRReviewer:
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
 
             self._submit_review_verdict()
+            _audit_finished(self, audit_request_id, pr_review, self.prediction)
         except Exception as e:
             review_failed = True
             get_logger().error(f"Failed to review PR: {e}")
+            _audit_failed(audit_request_id, e)
             if get_settings().config.get("propagate_tool_errors", False):
                 raise
         finally:

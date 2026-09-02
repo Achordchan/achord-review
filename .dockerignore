@@ -5,3 +5,4 @@ pics/
 pr_agent.egg-info/
 build/
 **/.env
+pr_agent/dashboard/web/node_modules/

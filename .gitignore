@@ -23,3 +23,8 @@ deploy/achord-review/config.toml
 
 # private project dossier (plaintext credentials, never commit)
 ACHORD-PRIVATE-*.md
+
+# dashboard frontend: build sources live in pr_agent/dashboard/web; the compiled
+# output (pr_agent/dashboard/static) IS committed so the Docker image ships the
+# panel without a Node toolchain
+pr_agent/dashboard/web/node_modules/

@@ -1,0 +1,282 @@
+import { useEffect, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { KeyRound, RotateCcw, Save } from 'lucide-react'
+import { api, ApiError } from '../lib/api'
+import type { ConfigData, ConfigValues } from '../lib/types'
+import { Card, CardHeader, Skeleton } from '../components/ui'
+import { ConfirmDialog } from '../components/Dialogs'
+import { useToast } from '../components/Toast'
+
+const SEVERITIES = ['P0', 'P1', 'P2', 'P3'] as const
+
+function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-xs font-medium uppercase tracking-wider text-muted">{label}</label>
+      {children}
+      {hint && <p className="mt-1 text-[11px] leading-relaxed text-muted">{hint}</p>}
+    </div>
+  )
+}
+
+const inputClass =
+  'mt-1.5 w-full rounded-lg border border-line bg-surface-2 px-3.5 py-2.5 text-sm text-text placeholder-muted/50 outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/20'
+
+export default function ConfigPage() {
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: ['config'],
+    queryFn: () => api.get<ConfigData>('/api/v1/dashboard/config'),
+  })
+
+  const [values, setValues] = useState<Partial<ConfigValues>>({})
+  const [dirty, setDirty] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [newGlob, setNewGlob] = useState('')
+
+  useEffect(() => {
+    if (data?.values) {
+      setValues(data.values)
+      setDirty(false)
+    }
+  }, [data])
+
+  const set = <K extends keyof ConfigValues>(key: K, value: ConfigValues[K]) => {
+    setValues((prev) => ({ ...prev, [key]: value }))
+    setDirty(true)
+  }
+
+  const save = async (restart: boolean) => {
+    setSaving(true)
+    try {
+      const payload = { ...values, restart }
+      // an empty key field means "keep the stored secret" on the server side
+      if (!payload.key) delete payload.key
+      const body = await api.put<{ restarted: boolean }>('/api/v1/dashboard/config', payload)
+      toast.success('配置已保存', body.restarted ? '容器重启中，页面将在 30 秒后自动刷新' : '变更已热生效，无需重启')
+      setDirty(false)
+      if (body.restarted) {
+        setConfirmRestart(false)
+        window.setTimeout(() => window.location.reload(), 30_000)
+      } else {
+        await queryClient.invalidateQueries({ queryKey: ['config'] })
+      }
+    } catch (err) {
+      toast.error('保存失败', err instanceof ApiError ? err.message : '未知错误')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-8 w-40" />
+        <Skeleton className="h-96" />
+      </div>
+    )
+  }
+  if (isError || !data) {
+    return (
+      <Card className="p-10 text-center">
+        <p className="text-sm text-muted">配置加载失败</p>
+        <button onClick={() => void refetch()} className="mt-3 rounded-lg border border-line px-4 py-2 text-sm text-text hover:bg-surface-2">重试</button>
+      </Card>
+    )
+  }
+  if (!data.available) {
+    return (
+      <Card className="p-10 text-center">
+        <p className="text-sm text-text">未找到配置文件</p>
+        <p className="mt-1 text-xs text-muted">路径：{data.path ?? '未探测到'}（容器内应为 /app/pr_agent/settings_prod/.secrets.toml）</p>
+      </Card>
+    )
+  }
+
+  const sevSelected = values.verdict_blocking_severities ?? []
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold text-text">配置中心</h1>
+          <p className="mt-0.5 text-xs text-muted">
+            编辑 <span className="font-mono">{data.path}</span> · 保存时自动备份并热生效
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {dirty && <span className="text-xs text-warn">有未保存的修改</span>}
+          <button
+            onClick={() => setConfirmRestart(true)}
+            disabled={!dirty || saving}
+            className="flex items-center gap-1.5 rounded-lg border border-warn/40 px-3.5 py-2 text-xs font-medium text-warn transition-colors hover:bg-warn/10 disabled:opacity-40"
+          >
+            <RotateCcw size={13} /> 保存并重启
+          </button>
+          <button
+            onClick={() => void save(false)}
+            disabled={!dirty || saving}
+            className="flex items-center gap-1.5 rounded-lg bg-accent-strong px-4 py-2 text-xs font-semibold text-white transition-all hover:bg-accent active:scale-[0.98] disabled:opacity-40"
+          >
+            {saving ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white" /> : <Save size={13} />}
+            {saving ? '保存中…' : '保存配置'}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader title="模型" description="审查引擎使用的 LLM 与推理参数" />
+          <div className="space-y-4 p-5">
+            <Field label="模型" hint="如 openai/gpt-5.6-sol">
+              <input className={inputClass} value={values.model ?? ''} onChange={(e) => set('model', e.target.value)} />
+            </Field>
+            <Field label="Reasoning Effort" hint="GPT-5 系列的思考强度档位：low / medium / high / xhigh">
+              <select className={inputClass} value={values.reasoning_effort ?? ''} onChange={(e) => set('reasoning_effort', e.target.value)}>
+                <option value="">默认</option>
+                {['low', 'medium', 'high', 'xhigh'].map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="AI 超时（秒）">
+                <input type="number" className={inputClass} value={values.ai_timeout ?? ''} onChange={(e) => set('ai_timeout', e.target.value === '' ? null : Number(e.target.value))} />
+              </Field>
+              <Field label="最大模型 Token">
+                <input type="number" className={inputClass} value={values.max_model_tokens ?? ''} onChange={(e) => set('max_model_tokens', e.target.value === '' ? null : Number(e.target.value))} />
+              </Field>
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <CardHeader title="中继与密钥" description="OpenAI 兼容中继端点；密钥留空表示保持不变" />
+          <div className="space-y-4 p-5">
+            <Field label="API Base">
+              <input className={inputClass} value={values.api_base ?? ''} onChange={(e) => set('api_base', e.target.value)} />
+            </Field>
+            <Field label="API Key" hint={values.key ? `当前：${values.key}` : '未设置'}>
+              <div className="relative">
+                <KeyRound size={13} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+                <input
+                  type="password"
+                  className={`${inputClass} pl-9`}
+                  placeholder="留空保持现有密钥不变"
+                  value={values.key ?? ''}
+                  onChange={(e) => set('key', e.target.value)}
+                />
+              </div>
+            </Field>
+          </div>
+        </Card>
+
+        <Card>
+          <CardHeader title="审查门禁" description="决定什么级别的发现会阻断合并" />
+          <div className="space-y-4 p-5">
+            <Field label="阻断严重度" hint="勾选的严重度将触发 REQUEST_CHANGES 裁决">
+              <div className="mt-2 flex gap-2">
+                {SEVERITIES.map((sev) => {
+                  const active = sevSelected.includes(sev)
+                  return (
+                    <button
+                      key={sev}
+                      type="button"
+                      onClick={() =>
+                        set('verdict_blocking_severities',
+                          active ? sevSelected.filter((s) => s !== sev) : [...sevSelected, sev].sort())
+                      }
+                      className={`rounded-lg border px-4 py-2 text-sm font-semibold transition-all ${
+                        active
+                          ? sev === 'P0' ? 'border-bad bg-bad/15 text-bad'
+                            : sev === 'P1' ? 'border-warn bg-warn/15 text-warn'
+                              : sev === 'P2' ? 'border-info bg-info/15 text-info'
+                                : 'border-muted bg-muted/15 text-muted'
+                          : 'border-line bg-surface-2 text-muted hover:text-text'
+                      }`}
+                    >
+                      {sev}
+                    </button>
+                  )
+                })}
+              </div>
+            </Field>
+            <Field label="最大发现数" hint="单次审查报告的问题上限（1-30），是天花板不是配额">
+              <input type="number" className={inputClass} value={values.num_max_findings ?? ''} onChange={(e) => set('num_max_findings', e.target.value === '' ? null : Number(e.target.value))} />
+            </Field>
+          </div>
+        </Card>
+
+        <Card>
+          <CardHeader title="忽略规则" description="ignore.glob：命中的文件不参与审查" />
+          <div className="space-y-3 p-5">
+            <div className="flex gap-2">
+              <input
+                className={inputClass}
+                placeholder="如 dist/**, *.min.js"
+                value={newGlob}
+                onChange={(e) => setNewGlob(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newGlob.trim()) {
+                    set('ignore_glob', [...(values.ignore_glob ?? []), newGlob.trim()])
+                    setNewGlob('')
+                  }
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (newGlob.trim()) {
+                    set('ignore_glob', [...(values.ignore_glob ?? []), newGlob.trim()])
+                    setNewGlob('')
+                  }
+                }}
+                className="mt-1.5 shrink-0 rounded-lg border border-line px-4 text-sm text-muted transition-colors hover:bg-surface-3 hover:text-text"
+              >
+                添加
+              </button>
+            </div>
+            {(values.ignore_glob ?? []).length === 0 ? (
+              <p className="py-3 text-center text-xs text-muted">暂无忽略规则</p>
+            ) : (
+              <ul className="space-y-1.5">
+                {(values.ignore_glob ?? []).map((glob, index) => (
+                  <li key={`${glob}-${index}`} className="flex items-center justify-between rounded-lg border border-line bg-surface-2 px-3 py-2">
+                    <code className="text-xs text-text">{glob}</code>
+                    <button
+                      onClick={() => set('ignore_glob', (values.ignore_glob ?? []).filter((_, i) => i !== index))}
+                      className="text-xs text-muted transition-colors hover:text-bad"
+                    >
+                      移除
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader title="Extra Instructions" description="注入审查提示词的附加指令（噪音规则、严重度政策等）" />
+        <div className="p-5">
+          <textarea
+            className={`${inputClass} min-h-44 font-mono text-xs leading-relaxed`}
+            value={values.extra_instructions ?? ''}
+            onChange={(e) => set('extra_instructions', e.target.value)}
+          />
+        </div>
+      </Card>
+
+      <ConfirmDialog
+        open={confirmRestart}
+        title="保存并重启容器？"
+        body="部分配置项仅在进程启动时读取。保存后容器将自动重启，服务中断约 10-30 秒，期间 webhook 不响应。"
+        danger
+        confirmLabel="保存并重启"
+        onConfirm={() => void save(true)}
+        onCancel={() => setConfirmRestart(false)}
+      />
+    </div>
+  )
+}

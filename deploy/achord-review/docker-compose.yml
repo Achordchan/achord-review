@@ -17,6 +17,8 @@ services:
     volumes:
       # All configuration and secrets live here. Never bake them into the image.
       - ./config.toml:/app/pr_agent/settings_prod/.secrets.toml:ro
+      # Dashboard SQLite database (review history, audit logs); survives restarts.
+      - ./data:/app/data
     environment:
       # gunicorn binds 0.0.0.0:3000 (see servers/gunicorn_config.py) and would otherwise scale
       # workers to the CPU count. This host has 2 GB of RAM shared with the relay stack, so pin

@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface-0: #0b0e14;
+  --color-surface-1: #11151f;
+  --color-surface-2: #161b28;
+  --color-surface-3: #1d2433;
+  --color-line: #263043;
+  --color-accent: #6d8dff;
+  --color-accent-strong: #4f74f0;
+  --color-good: #3ecf8e;
+  --color-warn: #f5a623;
+  --color-bad: #f0554f;
+  --color-info: #58a6ff;
+  --color-muted: #8b95a9;
+  --color-text: #e8ecf3;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-surface-0);
+  color: var(--color-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #2a3448; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in { animation: fadeIn 0.25s ease-out; }
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.animate-breathe { animation: breathe 1.6s ease-in-out infinite; }
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #1a2030 25%, #232b3e 50%, #1a2030 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+  border-radius: 8px;
+}
+
+/* Markdown report view — echoes the GitHub comment rendering */
+.md-view { font-size: 14px; line-height: 1.7; color: var(--color-text); }
+.md-view > :first-child { margin-top: 0; }
+.md-view h1, .md-view h2, .md-view h3, .md-view h4 {
+  margin: 1.2em 0 0.5em; font-weight: 600; line-height: 1.35;
+}
+.md-view h1 { font-size: 1.4em; border-bottom: 1px solid var(--color-line); padding-bottom: 0.3em; }
+.md-view h2 { font-size: 1.2em; }
+.md-view h3 { font-size: 1.05em; }
+.md-view p, .md-view ul, .md-view ol, .md-view blockquote, .md-view table, .md-view pre { margin: 0.7em 0; }
+.md-view ul, .md-view ol { padding-left: 1.5em; }
+.md-view ul { list-style: disc; }
+.md-view ol { list-style: decimal; }
+.md-view li + li { margin-top: 0.25em; }
+.md-view a { color: var(--color-info); text-decoration: none; }
+.md-view a:hover { text-decoration: underline; }
+.md-view code {
+  background: var(--color-surface-2); border: 1px solid var(--color-line);
+  border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.9em;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+.md-view pre {
+  background: var(--color-surface-2); border: 1px solid var(--color-line);
+  border-radius: 8px; padding: 0.9em 1.1em; overflow-x: auto;
+}
+.md-view pre code { background: none; border: none; padding: 0; font-size: 0.85em; }
+.md-view blockquote {
+  border-left: 3px solid var(--color-line); padding-left: 1em; color: var(--color-muted);
+}
+.md-view table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+.md-view th, .md-view td {
+  border: 1px solid var(--color-line); padding: 0.45em 0.8em; text-align: left;
+}
+.md-view th { background: var(--color-surface-2); font-weight: 600; }
+.md-view hr { border: none; border-top: 1px solid var(--color-line); margin: 1.4em 0; }

@@ -479,6 +479,37 @@ app = FastAPI(middleware=middleware)
 app.include_router(router)
 
 
+# Dashboard API + SPA. Both are best-effort: an import or mount failure keeps the
+# webhook service up, only the dashboard routes go missing.
+try:
+    from pr_agent.dashboard.config_engine import get_config_engine
+    from pr_agent.dashboard.storage import get_storage
+    from pr_agent.servers.dashboard_api import router as dashboard_router
+
+    get_storage()  # initialize the SQLite file early so the first webhook write is cheap
+    app.include_router(dashboard_router)
+    _dashboard_engine = get_config_engine()
+
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse
+
+    _dashboard_dist = os.path.join(base_path, "dashboard", "static")
+    if os.path.isdir(os.path.join(_dashboard_dist, "assets")) or \
+            os.path.isfile(os.path.join(_dashboard_dist, "index.html")):
+        app.mount("/dashboard/assets", StaticFiles(directory=os.path.join(_dashboard_dist, "assets")),
+                  name="dashboard_assets")
+
+        @app.get("/dashboard")
+        @app.get("/dashboard/{rest:path}")
+        async def dashboard_spa(rest: str = ""):
+            target = os.path.join(_dashboard_dist, rest)
+            if rest and os.path.isfile(target):
+                return FileResponse(target)
+            return FileResponse(os.path.join(_dashboard_dist, "index.html"))
+except Exception as _dashboard_error:  # pragma: no cover - defensive by design
+    get_logger().warning(f"Dashboard routes unavailable, error: {_dashboard_error}")
+
+
 def start():
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "3000")))
 
