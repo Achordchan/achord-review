@@ -108,6 +108,23 @@ class TestReviewsCrud:
         assert len(detail["issues"]) == 1
         assert detail["verdict"] == "REQUEST_CHANGES"
 
+    def test_terminal_transitions_are_idempotent(self, storage):
+        completed = storage.create_review(repo_name="r", pr_number=30, pr_url="completed")
+        storage.finish_review(completed, [{"severity": "P2", "issue_summary": "first"}])
+        storage.fail_review(completed, "late cancellation")
+        completed_row = storage.get_review_by_request_id(completed)
+        completed_detail = storage.get_review_detail(completed_row["id"])
+        assert completed_row["status"] == "COMPLETED"
+        assert len(completed_detail["issues"]) == 1
+
+        failed = storage.create_review(repo_name="r", pr_number=31, pr_url="failed")
+        storage.fail_review(failed, "cancelled first")
+        storage.finish_review(failed, [{"severity": "P2", "issue_summary": "late"}])
+        failed_row = storage.get_review_by_request_id(failed)
+        failed_detail = storage.get_review_detail(failed_row["id"])
+        assert failed_row["status"] == "FAILED"
+        assert failed_detail["issues"] == []
+
     def test_finish_review_accepts_usage_fields(self, storage):
         """finish_review takes the run's live usage (audit.py passes **fields)."""
         request_id = storage.create_review(repo_name="r", pr_number=4, pr_url="u4")

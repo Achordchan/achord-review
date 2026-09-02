@@ -2,6 +2,9 @@
 
 import asyncio
 import threading
+from unittest.mock import AsyncMock
+
+import pytest
 
 from pr_agent.dashboard import audit
 from pr_agent.dashboard.storage import DashboardStorage
@@ -112,3 +115,35 @@ def test_metadata_fields_are_extracted_independently(monkeypatch):
     assert captured["commit_sha"] == "sha-after-title-error"
     assert captured["repo_name"] == "group/subgroup/repo"
     assert captured["pr_number"] == 77
+
+
+def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    audit_failed = AsyncMock()
+
+    class Reviewer:
+        pr_url = "https://github.com/a/b/pull/1"
+        git_provider = type("Provider", (), {"pr": {"title": "Title"}})()
+
+    def delayed_started(**kwargs):
+        started.set()
+        assert release.wait(timeout=2)
+        return "late-request-id"
+
+    monkeypatch.setattr(audit, "review_started", delayed_started)
+    monkeypatch.setattr(pr_reviewer, "_audit_failed", audit_failed)
+
+    async def scenario():
+        task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
+        await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    error = audit_failed.await_args.args[1]
+    assert audit_failed.await_args.args[0] == "late-request-id"
+    assert str(error) == "review task cancelled during audit startup"

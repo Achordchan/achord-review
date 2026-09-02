@@ -118,11 +118,28 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
             commit_sha=sha, pr_title=title, repo_name=repo_name,
             pr_number=pr_number) or ""
 
+    work_task = asyncio.create_task(asyncio.to_thread(_work))
     try:
-        return await asyncio.to_thread(_work)
+        return await asyncio.shield(work_task)
+    except asyncio.CancelledError:
+        request_id = await asyncio.shield(work_task)
+        if request_id:
+            await asyncio.shield(
+                _audit_failed(request_id, RuntimeError("review task cancelled during audit startup")))
+        raise
     except Exception as e:
         get_logger().debug(f"Dashboard audit start skipped, error: {e}")
         return ""
+
+
+async def _await_terminal_audit(coro) -> None:
+    """Finish an in-flight terminal write before propagating cancellation."""
+    task = asyncio.create_task(coro)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.shield(task)
+        raise
 
 
 def _audit_verdict(reviewer: "PRReviewer", review_data: Optional[dict]) -> tuple:
@@ -286,18 +303,20 @@ class PRReviewer:
         init_run_details()
         progress_response = None
         review_failed = False
-        audit_request_id = await _audit_started(self)
+        audit_request_id = ""
         try:
+            audit_request_id = await _audit_started(self)
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
-                await _audit_skipped(audit_request_id, "PR has no files")
+                await _await_terminal_audit(_audit_skipped(audit_request_id, "PR has no files"))
                 return None
 
             if self.incremental.is_incremental:
                 can_run = self._can_run_incremental_review()
                 # If the gate disabled incremental (e.g., commits_range is None), fall through to full review.
                 if not can_run and self.incremental.is_incremental:
-                    await _audit_skipped(audit_request_id, "incremental review gate closed")
+                    await _await_terminal_audit(
+                        _audit_skipped(audit_request_id, "incremental review gate closed"))
                     return None
 
             # if isinstance(self.args, list) and self.args and self.args[0] == 'auto_approve':
@@ -325,7 +344,8 @@ class PRReviewer:
                 if get_settings().config.publish_output:
                     self.git_provider.publish_comment(f"Incremental Review Skipped\n"
                                     f"No files were changed since the [previous PR Review]({previous_review_url})")
-                await _audit_skipped(audit_request_id, "incremental review: no new files")
+                await _await_terminal_audit(
+                    _audit_skipped(audit_request_id, "incremental review: no new files"))
                 return None
 
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
@@ -340,7 +360,8 @@ class PRReviewer:
 
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
-                await _audit_skipped(audit_request_id, "model returned no prediction")
+                await _await_terminal_audit(
+                    _audit_skipped(audit_request_id, "model returned no prediction"))
                 return None
 
             pr_review = self._prepare_pr_review()
@@ -353,7 +374,8 @@ class PRReviewer:
                 # worker that blocks there stops answering webhooks. In a thread the wait
                 # can be long enough to be worth having.
                 await asyncio.to_thread(self._publish_single_review, pr_review, verdict_at_start)
-                await _audit_finished(self, audit_request_id, pr_review, self.prediction)
+                await _await_terminal_audit(
+                    _audit_finished(self, audit_request_id, pr_review, self.prediction))
                 return
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -364,7 +386,8 @@ class PRReviewer:
                 get_logger().info(reason)
                 get_settings().data = {"artifact": pr_review}
                 self._submit_review_verdict()
-                await _audit_finished(self, audit_request_id, pr_review, self.prediction)
+                await _await_terminal_audit(
+                    _audit_finished(self, audit_request_id, pr_review, self.prediction))
                 return
 
             # publish the review
@@ -393,7 +416,8 @@ class PRReviewer:
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
 
             self._submit_review_verdict()
-            await _audit_finished(self, audit_request_id, pr_review, self.prediction)
+            await _await_terminal_audit(
+                _audit_finished(self, audit_request_id, pr_review, self.prediction))
         except asyncio.CancelledError:
             await asyncio.shield(
                 _audit_failed(audit_request_id, RuntimeError("review task cancelled")))

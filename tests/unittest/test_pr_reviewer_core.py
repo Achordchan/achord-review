@@ -729,6 +729,29 @@ async def test_run_audits_cancellation_then_reraises(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_terminal_audit_finishes_before_cancellation_propagates():
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = []
+
+    async def terminal_write():
+        started.set()
+        await release.wait()
+        completed.append(True)
+
+    task = asyncio.create_task(pr_reviewer_module._await_terminal_audit(terminal_write()))
+    await started.wait()
+    task.cancel()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert completed == [True]
+
+
+@pytest.mark.asyncio
 async def test_run_publishes_failure_result_when_progress_comment_has_no_handle(monkeypatch):
     from pr_agent.tools import pr_reviewer as pr_reviewer_module
 

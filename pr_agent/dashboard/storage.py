@@ -490,7 +490,7 @@ class DashboardStorage:
                 " completion_tokens=CASE WHEN ? > 0 THEN ? ELSE completion_tokens END,"
                 " total_tokens=CASE WHEN ? > 0 THEN ? ELSE total_tokens END,"
                 " duration_ms=CASE WHEN ? > 0 THEN ? ELSE duration_ms END,"
-                " completed_at=? WHERE request_id=?",
+                " completed_at=? WHERE request_id=? AND status='RUNNING'",
                 (status, message, model, reasoning_effort,
                  prompt_tokens, prompt_tokens, completion_tokens, completion_tokens,
                  total_tokens, total_tokens, duration_ms, duration_ms,
@@ -553,7 +553,7 @@ class DashboardStorage:
         raw_prediction = _truncate_payload(raw_prediction)
 
         def _finish(conn: sqlite3.Connection) -> None:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
                 " markdown_output=?, raw_prediction=?,"
                 " model=COALESCE(NULLIF(?, ''), model),"
@@ -562,12 +562,14 @@ class DashboardStorage:
                 " completion_tokens=CASE WHEN ? > 0 THEN ? ELSE completion_tokens END,"
                 " total_tokens=CASE WHEN ? > 0 THEN ? ELSE total_tokens END,"
                 " duration_ms=CASE WHEN ? > 0 THEN ? ELSE duration_ms END,"
-                " completed_at=? WHERE request_id=?",
+                " completed_at=? WHERE request_id=? AND status='RUNNING'",
                 (verdict, verdict_reason, markdown_output, raw_prediction,
                  model, reasoning_effort,
                  prompt_tokens, prompt_tokens, completion_tokens, completion_tokens,
                  total_tokens, total_tokens, duration_ms, duration_ms,
                  _utcnow(), request_id))
+            if cursor.rowcount != 1:
+                return
             row = conn.execute("SELECT id FROM reviews WHERE request_id = ?",
                                (request_id,)).fetchone()
             if row is not None and issues:
