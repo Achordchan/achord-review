@@ -173,7 +173,7 @@ def _get_probe_ai_handler():
 
 
 def probe_github_app() -> Dict[str, Any]:
-    """Validate the GitHub App private key by minting an installation token."""
+    """Validate the App JWT, an active installation, and repository access."""
     from pr_agent.config_loader import get_settings
     settings = get_settings()
     app_id = str(settings.get("github.app_id", "")).strip()
@@ -184,15 +184,63 @@ def probe_github_app() -> Dict[str, Any]:
         import jwt
         now = int(time.time())
         payload = {"iat": now, "exp": now + 600, "iss": app_id}
-        token = jwt.encode(payload, private_key, algorithm="RS256")
+        app_token = jwt.encode(payload, private_key, algorithm="RS256")
         import requests
-        resp = requests.get("https://api.github.com/app", timeout=15,
-                            headers={"Authorization": f"Bearer {token}",
-                                     "Accept": "application/vnd.github+json"})
-        if resp.status_code != 200:
+        app_headers = {"Authorization": f"Bearer {app_token}",
+                       "Accept": "application/vnd.github+json"}
+        app_response = requests.get(
+            "https://api.github.com/app", timeout=15, headers=app_headers)
+        if app_response.status_code != 200:
             return {"ok": False, "app_id": app_id,
-                    "error": f"GitHub API returned {resp.status_code}"}
-        return {"ok": True, "app_id": app_id, "app_name": resp.json().get("name", "")}
+                    "error": f"GitHub App API returned {app_response.status_code}"}
+        installations_response = requests.get(
+            "https://api.github.com/app/installations?per_page=100",
+            timeout=15, headers=app_headers)
+        if installations_response.status_code != 200:
+            return {"ok": False, "app_id": app_id,
+                    "error": f"GitHub installations API returned {installations_response.status_code}"}
+        installations = installations_response.json()
+        installation = next(
+            (item for item in installations if not item.get("suspended_at")), None)
+        if installation is None:
+            return {"ok": False, "app_id": app_id, "error": "no active GitHub App installation"}
+
+        installation_id = int(installation["id"])
+        token_response = requests.post(
+            f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+            timeout=15, headers=app_headers)
+        if token_response.status_code != 201:
+            return {"ok": False, "app_id": app_id, "installation_id": installation_id,
+                    "error": f"GitHub installation token API returned {token_response.status_code}"}
+        installation_token = str(token_response.json().get("token", ""))
+        if not installation_token:
+            return {"ok": False, "app_id": app_id, "installation_id": installation_id,
+                    "error": "GitHub installation token response was empty"}
+        installation_headers = {
+            "Authorization": f"Bearer {installation_token}",
+            "Accept": "application/vnd.github+json",
+        }
+        try:
+            repositories_response = requests.get(
+                "https://api.github.com/installation/repositories?per_page=1",
+                timeout=15, headers=installation_headers)
+            if repositories_response.status_code != 200:
+                return {"ok": False, "app_id": app_id, "installation_id": installation_id,
+                        "error": f"GitHub repository access returned {repositories_response.status_code}"}
+            return {
+                "ok": True,
+                "app_id": app_id,
+                "app_name": app_response.json().get("name", ""),
+                "installation_id": installation_id,
+                "repository_count": int(repositories_response.json().get("total_count", 0)),
+            }
+        finally:
+            try:
+                requests.delete(
+                    "https://api.github.com/installation/token",
+                    timeout=15, headers=installation_headers)
+            except Exception as e:
+                get_logger().debug(f"GitHub probe token revocation skipped, error: {e}")
     except Exception as e:
         return {"ok": False, "app_id": app_id, "error": str(e)[:300]}
 

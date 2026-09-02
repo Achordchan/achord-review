@@ -328,15 +328,29 @@ class TestAuditLogs:
     def test_write_uses_short_timeout_without_retries(self, storage, monkeypatch):
         calls = []
 
-        def capture_write(*args, **kwargs):
+        def capture_transaction(*args, **kwargs):
             calls.append(kwargs)
-            return 1
+            return True
 
-        monkeypatch.setattr(storage, "_write", capture_write)
+        monkeypatch.setattr(storage, "_transaction", capture_transaction)
 
         storage.add_audit_log("LOGIN")
 
         assert calls == [{"timeout_seconds": 0.5, "max_retry": 1}]
+
+    def test_retention_bounds_count_and_age(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module, "MAX_AUDIT_LOG_ROWS", 3)
+        monkeypatch.setattr(storage_module, "AUDIT_RETENTION_DAYS", 1)
+        for index in range(5):
+            storage.add_audit_log(f"A{index}")
+        assert [row["action"] for row in storage.list_audit_logs()] == ["A4", "A3", "A2"]
+
+        storage._write(
+            "UPDATE audit_logs SET created_at = ? WHERE action = ?",
+            ("2000-01-01 00:00:00", "A2"))
+        storage.add_audit_log("A5")
+
+        assert [row["action"] for row in storage.list_audit_logs()] == ["A5", "A4", "A3"]
 
 
 class TestSharedAuthState:

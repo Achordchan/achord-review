@@ -27,6 +27,8 @@ STALE_REVIEW_SECONDS = int(os.environ.get("DASHBOARD_STALE_REVIEW_SECONDS", str(
 STALE_CLEANUP_INTERVAL_SECONDS = 5 * 60
 REVIEW_RETENTION_DAYS = max(1, int(os.environ.get("DASHBOARD_REVIEW_RETENTION_DAYS", "90")))
 MAX_REVIEW_RECORDS = max(100, int(os.environ.get("DASHBOARD_MAX_REVIEW_RECORDS", "10000")))
+AUDIT_RETENTION_DAYS = max(1, int(os.environ.get("DASHBOARD_AUDIT_RETENTION_DAYS", "90")))
+MAX_AUDIT_LOG_ROWS = max(100, int(os.environ.get("DASHBOARD_MAX_AUDIT_LOG_ROWS", "10000")))
 MAX_REVIEW_PAYLOAD_BYTES = max(
     64 * 1024, int(os.environ.get("DASHBOARD_MAX_REVIEW_PAYLOAD_BYTES", str(1024 * 1024))))
 
@@ -234,6 +236,18 @@ class DashboardStorage:
             "DELETE FROM reviews WHERE status != 'RUNNING' AND id NOT IN"
             " (SELECT id FROM reviews WHERE status != 'RUNNING' ORDER BY id DESC LIMIT ?)",
             (terminal_limit,))
+        self._maintain_audit_logs(conn, now)
+
+    @staticmethod
+    def _maintain_audit_logs(conn: sqlite3.Connection, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        conn.execute(
+            "DELETE FROM audit_logs WHERE created_at < ?",
+            (_utc_at(now - AUDIT_RETENTION_DAYS * 24 * 3600),))
+        conn.execute(
+            "DELETE FROM audit_logs WHERE id NOT IN"
+            " (SELECT id FROM audit_logs ORDER BY id DESC LIMIT ?)",
+            (MAX_AUDIT_LOG_ROWS,))
 
     def _write(self, sql: str, params: tuple = (), timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS,
                max_retry: int = _MAX_RETRY) -> Optional[int]:
@@ -677,10 +691,16 @@ class DashboardStorage:
 
     def add_audit_log(self, action: str, details: Optional[Dict[str, Any]] = None,
                       ip_address: str = "", operator: str = "admin") -> None:
-        self._write(
-            "INSERT INTO audit_logs (operator, action, details_json, ip_address, created_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (operator, action, json.dumps(details or {}, ensure_ascii=False), ip_address, _utcnow()),
+        def _insert_and_retain(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO audit_logs (operator, action, details_json, ip_address, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (operator, action, json.dumps(details or {}, ensure_ascii=False),
+                 ip_address, _utcnow()))
+            self._maintain_audit_logs(conn)
+
+        self._transaction(
+            _insert_and_retain, "audit-log write",
             timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS, max_retry=1)
 
     def list_audit_logs(self, limit: int = 100) -> List[Dict[str, Any]]:

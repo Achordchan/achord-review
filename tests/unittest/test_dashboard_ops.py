@@ -178,3 +178,57 @@ def test_llm_probe_enforces_its_own_timeout(monkeypatch):
 
     assert result["ok"] is False
     assert result["error"] == "LLM probe timed out after 0.01 seconds"
+
+
+def test_github_probe_mints_and_validates_installation_token(monkeypatch):
+    import jwt
+    import requests
+
+    class FakeSettings:
+        values = {"github.app_id": "123", "github.private_key": "private-key"}
+
+        def get(self, key, default=None):
+            return self.values.get(key, default)
+
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    import pr_agent.config_loader as config_loader
+    monkeypatch.setattr(config_loader, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(jwt, "encode", lambda *args, **kwargs: "app-jwt")
+    requested = []
+
+    def fake_get(url, **kwargs):
+        requested.append(("GET", url, kwargs["headers"]["Authorization"]))
+        if url.endswith("/app"):
+            return Response(200, {"name": "achord-review"})
+        if "/app/installations" in url:
+            return Response(200, [{"id": 42, "suspended_at": None}])
+        return Response(200, {"total_count": 7})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(
+        requests, "post",
+        lambda url, **kwargs: Response(201, {"token": "installation-token"}))
+    monkeypatch.setattr(
+        requests, "delete",
+        lambda url, **kwargs: requested.append(("DELETE", url, kwargs["headers"]["Authorization"])))
+
+    result = ops.probe_github_app()
+
+    assert result == {
+        "ok": True,
+        "app_id": "123",
+        "app_name": "achord-review",
+        "installation_id": 42,
+        "repository_count": 7,
+    }
+    assert ("GET", "https://api.github.com/installation/repositories?per_page=1",
+            "Bearer installation-token") in requested
+    assert ("DELETE", "https://api.github.com/installation/token",
+            "Bearer installation-token") in requested
