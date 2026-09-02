@@ -15,6 +15,7 @@ _REVIEW_FIELDS = frozenset({
     "can_be_split",
 })
 _REVIEW_SEVERITIES = frozenset({"P0", "P1", "P2", "P3"})
+_NO_SECURITY_PREFIXES = ("no", "none", "n/a", "there are no", "there is no")
 
 
 def _is_positive_line_number(value: Any) -> bool:
@@ -52,6 +53,22 @@ def _normalize_finding(issue: Any, require_severity: bool) -> dict | None:
     return normalized
 
 
+def _is_explicit_security_concern(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = " ".join(value.strip().lower().split())
+    is_negative = any(
+        normalized == prefix
+        or normalized.startswith(f"{prefix} ")
+        or normalized.startswith(f"{prefix}:")
+        for prefix in _NO_SECURITY_PREFIXES
+    )
+    if not normalized or is_negative:
+        return False
+    heading, separator, details = value.partition(":")
+    return bool(separator and heading.strip() and details.strip())
+
+
 def recover_missing_review_wrapper(data: Any, *, require_severity: bool = False) -> tuple[Any, bool]:
     """Recover a model response that omitted only the required top-level ``review`` key.
 
@@ -78,11 +95,7 @@ def recover_missing_review_wrapper(data: Any, *, require_severity: bool = False)
 
     has_complete_finding = isinstance(issues, list) and bool(issues)
     security_concerns = data.get("security_concerns")
-    has_explicit_security_concern = (
-        isinstance(security_concerns, str)
-        and bool(security_concerns.strip())
-        and not security_concerns.strip().lower().startswith("no")
-    )
+    has_explicit_security_concern = _is_explicit_security_concern(security_concerns)
     if not has_complete_finding and not has_explicit_security_concern:
         return data, False
 

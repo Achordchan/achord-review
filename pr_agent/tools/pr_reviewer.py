@@ -331,6 +331,8 @@ class PRReviewer:
                 return None
 
             pr_review = self._prepare_pr_review()
+            if not pr_review or not pr_review.strip():
+                raise ValueError("No usable review report was generated")
             get_logger().debug(f"PR output", artifact=pr_review)
 
             if self._single_review_submission_enabled() and get_settings().config.publish_output:
