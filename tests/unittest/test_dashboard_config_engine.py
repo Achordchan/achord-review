@@ -92,6 +92,17 @@ class TestWrite:
         ok, errors = engine.write({"unknown_field": 1})
         assert not ok
 
+    def test_unset_optional_integers_are_skipped(self, engine):
+        """read() returns None for ints absent from a sparse file; saving some
+        other field must not turn those Nones into validation failures."""
+        with open(engine.config_path, "wb") as f:
+            f.write(b'[config]\nmodel = "openai/gpt-old"\n')
+        ok, errors = engine.write({"model": "openai/changed", "ai_timeout": None,
+                                   "max_model_tokens": None, "num_max_findings": None})
+        assert ok, errors
+        values = engine.read()["values"]
+        assert values["model"] == "openai/changed"
+
     def test_backup_created(self, engine):
         import time as _time
         engine.write({"model": "openai/second"})

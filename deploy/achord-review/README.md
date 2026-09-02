@@ -17,7 +17,7 @@ Settings → Developer settings → GitHub Apps → **New GitHub App**
 |---|---|
 | Name | `achord-review` (the bot appears as `achord-review[bot]`) |
 | Webhook URL | `https://review.achord.cn/api/v1/github_webhooks` |
-| Webhook secret | generate a random string; keep it for `config.toml` |
+| Webhook secret | generate a random string; keep it for `config/.secrets.toml` |
 
 Permissions (least privilege):
 
@@ -39,12 +39,13 @@ Then generate a private key (`.pem`, downloaded once), note the **App ID**, and
 ## 2. Configure
 
 ```bash
-cp config.toml.example config.toml
-chmod 600 config.toml
-$EDITOR config.toml      # fill in every REPLACE_WITH_* placeholder
+mkdir -p config
+cp config.toml.example config/.secrets.toml
+chmod 600 config/.secrets.toml
+$EDITOR config/.secrets.toml   # fill in every REPLACE_WITH_* placeholder
 ```
 
-`config.toml` is gitignored and the directory holding it is mounted into the
+`config/.secrets.toml` is gitignored and the directory holding it is mounted into the
 container: the host `./config/` directory maps to `/app/pr_agent/settings_prod`,
 and the container loads `/app/pr_agent/settings_prod/.secrets.toml`. The panel's
 config editor backs up and atomically replaces the file inside that directory.
@@ -97,7 +98,7 @@ The web panel is served by the same process at `https://review.achord.cn/dashboa
 (no extra container, port, or nginx server — the SPA is a static build inside the
 image and the API routes share the webhook process).
 
-- Set the login password in `config.toml` under `[dashboard] admin_password`
+- Set the login password in `config/.secrets.toml` under `[dashboard] admin_password`
   (copy the section from `config.toml.example`). Leaving it empty disables the
   panel: every login attempt is rejected with 503.
 - Login is rate-limited to 5 failures per IP per 15 minutes; the client IP is
@@ -106,9 +107,11 @@ image and the API routes share the webhook process).
 - Every review run is recorded to `./data/review.db`, which feeds the overview
   stats, the review history, and the per-run detail pages. Config saves and ops
   actions (restart, git pull) are written to the audit log.
-- The config page edits the mounted `config.toml` live: each save is validated,
-  backed up (5 copies kept), applied to the running process, and — when a
-  restart-requiring field changed — can trigger a one-click container restart.
+- The config page edits the mounted `config/.secrets.toml` live: each save is validated,
+  backed up (5 copies kept, comments preserved), applied to the running process, and —
+  when a restart-requiring field changed — can trigger a container restart when the
+  docker CLI + socket are available inside the container (not mounted by default;
+  without them the panel says so and the restart happens on the host shell).
 - Some navigation entries are greyed out with a "Phase N" badge: those features
   are planned but not shipped yet; their API routes answer 501 COMING_SOON.
 

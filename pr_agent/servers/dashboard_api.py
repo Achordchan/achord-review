@@ -145,6 +145,31 @@ def require_auth(request: Request, dashboard_session: Optional[str] = Cookie(Non
         raise HTTPException(status_code=401, detail="Not authenticated")
 
 
+def require_same_origin(request: Request) -> None:
+    """CSRF guard for cookie-authenticated mutations.
+
+    The session cookie is SameSite=Lax, which still rides along on
+    top-level form posts from a same-site sibling origin. Browsers that
+    implement Fetch Metadata send Sec-Fetch-Site on every request; when the
+    header is present it must say same-origin. When it is absent (older
+    browser or scripted client) fall back to an exact Origin/Referer match.
+    Bearer-token requests skip the cookie entirely and are unaffected.
+    """
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site:
+        if fetch_site != "same-origin":
+            raise HTTPException(status_code=403, detail="Cross-site request rejected")
+        return
+    origin = request.headers.get("origin") or request.headers.get("referer") or ""
+    if not origin:
+        raise HTTPException(status_code=403, detail="Missing origin evidence")
+    host = request.headers.get("host", "")
+    # accept only an origin whose host is exactly this deployment's host
+    parsed = origin.split("://", 1)[-1].rstrip("/")
+    if parsed != host:
+        raise HTTPException(status_code=403, detail="Cross-site request rejected")
+
+
 def _ok(data: Any = None, message: str = "操作成功") -> Dict[str, Any]:
     return {"success": True, "data": data, "message": message}
 
@@ -221,6 +246,7 @@ async def get_config(request: Request, dashboard_session: Optional[str] = Cookie
 @router.put("/config")
 async def put_config(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
+    require_same_origin(request)
     body = await request.json()
     restart = bool(body.pop("restart", False))
     fields = {k: v for k, v in body.items()
@@ -233,11 +259,24 @@ async def put_config(request: Request, dashboard_session: Optional[str] = Cookie
         raise HTTPException(status_code=400, detail="; ".join(errors))
     get_storage().add_audit_log("UPDATE_CONFIG", {"fields": sorted(fields.keys())},
                                 ip_address=_client_ip(request))
-    restarted = False
-    if restart:
-        ops.restart_container()
+    # report what actually happened: without docker inside the container the
+    # restart never starts, and the UI must not wait for one
+    result = ops.restart_container() if restart else None
+    restart_started = bool(restart and result and result.get("task_id") and not result.get("already_running"))
+    already_running = bool(restart and result and result.get("already_running"))
+    if restart and not result:
+        restarted = False
+    elif already_running:
         restarted = True
-    return _ok({"restarted": restarted}, message="配置已保存并热生效" + ("，容器重启中" if restarted else ""))
+    message = "配置已保存并热生效"
+    if restart_started or already_running:
+        message += "，容器重启中"
+    elif restart:
+        message += "，但重启未发起（容器内无 docker），请在宿主机执行 docker restart"
+    return _ok({"restarted": restarted,
+                "restart_started": restart_started,
+                "restart_output": (result or {}).get("output", []) if restart else []},
+               message=message)
 
 
 # --------------------------------------------------------------------- ops
@@ -245,6 +284,7 @@ async def put_config(request: Request, dashboard_session: Optional[str] = Cookie
 @router.post("/ops/restart")
 async def ops_restart(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
+    require_same_origin(request)
     result = ops.restart_container()
     get_storage().add_audit_log("RESTART_CONTAINER", {}, ip_address=_client_ip(request))
     return _ok(result, message="容器重启指令已下发")
@@ -253,6 +293,7 @@ async def ops_restart(request: Request, dashboard_session: Optional[str] = Cooki
 @router.post("/ops/git-pull")
 async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
+    require_same_origin(request)
     result = ops.git_pull()
     get_storage().add_audit_log("GIT_PULL", {}, ip_address=_client_ip(request))
     return _ok(result, message="git pull 已执行")

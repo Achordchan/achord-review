@@ -79,6 +79,8 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
             clean[name] = value
         elif name in INT_FIELDS:
             low, high = INT_FIELDS[name][2], INT_FIELDS[name][3]
+            if value is None or value == "":
+                continue  # unset optional field keeps its configured default
             try:
                 number = int(value)
             except (TypeError, ValueError):

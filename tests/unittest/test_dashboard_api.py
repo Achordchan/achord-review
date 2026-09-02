@@ -174,6 +174,58 @@ class TestClientIp:
         assert key not in dashboard_api._failed_attempts
 
 
+class TestSameOrigin:
+    def _request(self, headers):
+        from fastapi import Request
+        from starlette.datastructures import Headers as SHeaders
+
+        scope = {
+            "type": "http", "method": "POST", "path": "/", "headers": [],
+            "query_string": b"", "client": ("10.0.0.1", 1234), "server": ("h", 80),
+        }
+        req = Request(scope)
+        req._headers = SHeaders(headers)
+        return req
+
+    def test_fetch_metadata_same_origin_passes(self, client):
+        dashboard_api.require_same_origin(self._request({"sec-fetch-site": "same-origin"}))
+
+    def test_fetch_metadata_cross_site_rejected(self, client):
+        import pytest as _pytest
+        from fastapi import HTTPException
+
+        with _pytest.raises(HTTPException) as exc:
+            dashboard_api.require_same_origin(self._request({"sec-fetch-site": "cross-site"}))
+        assert exc.value.status_code == 403
+
+    def test_origin_match_passes(self, client):
+        dashboard_api.require_same_origin(self._request({
+            "origin": "https://review.achord.cn", "host": "review.achord.cn"}))
+
+    def test_origin_mismatch_rejected(self, client):
+        import pytest as _pytest
+        from fastapi import HTTPException
+
+        with _pytest.raises(HTTPException) as exc:
+            dashboard_api.require_same_origin(self._request({
+                "origin": "https://evil.example", "host": "review.achord.cn"}))
+        assert exc.value.status_code == 403
+
+    def test_no_evidence_rejected(self, client):
+        import pytest as _pytest
+        from fastapi import HTTPException
+
+        with _pytest.raises(HTTPException) as exc:
+            dashboard_api.require_same_origin(self._request({}))
+        assert exc.value.status_code == 403
+
+    def test_mutations_require_origin_evidence(self, client):
+        # a bodyless cookie-authenticated POST without any origin header is now 403
+        auth = _auth_header(client)
+        resp = client.post("/api/v1/dashboard/ops/git-pull", headers=auth)
+        assert resp.status_code == 403
+
+
 class TestProtectedRoutes:
     def test_reviews_list_and_detail(self, client, storage):
         request_id = storage.create_review(repo_name="a/b", pr_number=1, pr_url="u")
