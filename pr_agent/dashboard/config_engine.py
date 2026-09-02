@@ -370,7 +370,8 @@ class ConfigEngine:
             return None
         try:
             stat_result = os.stat(self.config_path)
-            return stat_result.st_mtime_ns, stat_result.st_size
+            return (stat_result.st_dev, stat_result.st_ino,
+                    stat_result.st_mtime_ns, stat_result.st_size)
         except OSError:
             return None
 

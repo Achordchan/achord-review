@@ -56,6 +56,14 @@ class TestRead:
 
 
 class TestWrite:
+    def test_file_signature_includes_atomic_replace_identity(self, engine):
+        before = engine._file_signature()
+        ok, errors = engine.write({"model": "openai/same-size"})
+        after = engine._file_signature()
+        assert ok, errors
+        assert len(after) == 4
+        assert after[:2] != before[:2]
+
     def test_write_updates_fields(self, engine):
         before = os.stat(engine.config_path)
         ok, errors = engine.write({
