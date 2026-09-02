@@ -6,7 +6,10 @@ import time
 
 import pytest
 
-from pr_agent.dashboard.storage import STALE_CLEANUP_INTERVAL_SECONDS, DashboardStorage
+import pr_agent.dashboard.storage as storage_module
+
+DashboardStorage = storage_module.DashboardStorage
+STALE_CLEANUP_INTERVAL_SECONDS = storage_module.STALE_CLEANUP_INTERVAL_SECONDS
 
 
 @pytest.fixture()
@@ -346,8 +349,6 @@ class TestFailSafe:
 
 
 def test_singleton_retries_initialization_after_transient_failure(tmp_path, monkeypatch):
-    import pr_agent.dashboard.storage as storage_module
-
     monkeypatch.setattr(storage_module, "_storage", None)
     monkeypatch.setattr(storage_module, "DEFAULT_DB_PATH", str(tmp_path / "retry.db"))
     original_initialize = DashboardStorage.initialize

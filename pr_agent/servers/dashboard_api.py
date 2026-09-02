@@ -44,7 +44,7 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 # bearer tokens and source addresses never enter the database as credentials.
 MAX_LOCKOUT_KEYS = 10_000
 _password_fingerprint_key = secrets.token_bytes(32)
-_password_sync_state = {"value": ("", "")}
+_password_sync_state = {"db_path": "", "password": None}
 _password_sync_lock = threading.Lock()
 
 
@@ -93,21 +93,24 @@ def _session_hash(token: str, password: Optional[str] = None) -> str:
 
 
 def _password_fingerprint(password: str) -> str:
-    """Keyed runtime fingerprint; never used to verify a login password."""
-    return hmac.new(
-        _password_fingerprint_key, password.encode("utf-8"), hashlib.sha256).hexdigest()
+    """Slow, salted runtime fingerprint; never persisted with its random salt."""
+    return hashlib.scrypt(
+        password.encode("utf-8"), salt=_password_fingerprint_key,
+        n=2 ** 14, r=8, p=1).hex()
 
 
 def _sync_admin_password(password: str) -> bool:
-    fingerprint = _password_fingerprint(password)
     storage = get_storage()
-    state = (storage.db_path, fingerprint)
     with _password_sync_lock:
-        if state == _password_sync_state["value"]:
+        cached_password = _password_sync_state["password"]
+        if (storage.db_path == _password_sync_state["db_path"]
+                and isinstance(cached_password, str)
+                and hmac.compare_digest(password.encode("utf-8"), cached_password.encode("utf-8"))):
             return True
+        fingerprint = _password_fingerprint(password)
         if not storage.sync_admin_password(fingerprint):
             return False
-        _password_sync_state["value"] = state
+        _password_sync_state.update({"db_path": storage.db_path, "password": password})
         return True
 
 
