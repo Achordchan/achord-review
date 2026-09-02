@@ -80,15 +80,16 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
         try:
             title = reviewer.git_provider.pr.title or ""
             sha = reviewer.git_provider.get_head_commit_sha() or ""
-        except Exception:
-            pass
+        except Exception as e:
+            get_logger().debug(f"Dashboard audit could not read PR metadata, error: {e}")
         return review_started(
             pr_url=reviewer.pr_url, sender=sender, trigger_type=trigger_type,
             commit_sha=sha, pr_title=title) or ""
 
     try:
         return await asyncio.to_thread(_work)
-    except Exception:
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit start skipped, error: {e}")
         return ""
 
 
