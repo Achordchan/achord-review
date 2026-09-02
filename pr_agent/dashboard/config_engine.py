@@ -207,15 +207,20 @@ class ConfigEngine:
                     ]
                 self._apply_fields(doc, clean)
                 self._backup()
-                self._atomic_dump(doc)
+                warnings = []
+                durability_warning = self._atomic_dump(doc)
+                if durability_warning:
+                    warnings.append(durability_warning)
                 # Keep the process-local apply and signature snapshot in the
                 # same interprocess critical section as the file replacement.
                 # Otherwise another worker can replace the file between these
                 # steps and this worker can mark older values as current.
                 raw = self._load_raw()
                 if raw is None or not self._hot_reload(raw):
-                    return True, ["configuration saved but hot reload failed; restart required"]
-                self._loaded_signature = self._file_signature()
+                    warnings.append("configuration saved but hot reload failed; restart required")
+                else:
+                    self._loaded_signature = self._file_signature()
+                return True, warnings
         except Exception as e:
             get_logger().warning(f"Dashboard config write failed, error: {e}")
             return False, [f"failed to write config: {e}"]
@@ -273,7 +278,7 @@ class ConfigEngine:
                 # losing the head of the log because removal raised is not
                 get_logger().debug(f"Dashboard config backup cleanup skipped a file, error: {e}")
 
-    def _atomic_dump(self, doc) -> None:
+    def _atomic_dump(self, doc) -> str:
         directory = os.path.dirname(self.config_path) or "."
         payload = tomlkit.dumps(doc)
         source_stat = os.stat(self.config_path, follow_symlinks=False)
@@ -289,11 +294,17 @@ class ConfigEngine:
                 # Preserve owner access while enforcing the secrets-file policy.
                 os.fchmod(f.fileno(), stat.S_IRUSR | stat.S_IWUSR)
             os.replace(tmp_path, self.config_path)
-            self._fsync_directory(directory)
         except Exception:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             raise
+        try:
+            self._fsync_directory(directory)
+        except Exception as e:
+            warning = f"configuration saved but directory sync failed; crash durability unconfirmed: {e}"
+            get_logger().warning(warning)
+            return warning
+        return ""
 
     @staticmethod
     def _fsync_directory(directory: str) -> None:

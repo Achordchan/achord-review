@@ -83,6 +83,18 @@ class TestWrite:
         assert ok, errors
         assert directories == [os.path.dirname(engine.config_path)]
 
+    def test_directory_fsync_failure_reports_saved_warning(self, engine, monkeypatch):
+        def fail_directory_sync(directory):
+            raise OSError("directory fsync unsupported")
+
+        monkeypatch.setattr(engine, "_fsync_directory", fail_directory_sync)
+
+        ok, warnings = engine.write({"model": "openai/visible-but-unconfirmed"})
+
+        assert ok is True
+        assert "directory sync failed" in warnings[0]
+        assert engine._load_raw()["config"]["model"] == "openai/visible-but-unconfirmed"
+
     def test_write_updates_fields(self, engine):
         before = os.stat(engine.config_path)
         ok, errors = engine.write({

@@ -297,7 +297,9 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     success, errors = await asyncio.to_thread(engine.write, fields)
     if not success:
         raise HTTPException(status_code=400, detail="; ".join(errors))
-    hot_reload_pending = bool(errors)
+    hot_reload_pending = any("hot reload failed" in warning for warning in errors)
+    persistence_warning = next(
+        (warning for warning in errors if "directory sync failed" in warning), "")
     await asyncio.to_thread(
         _storage_call, "add_audit_log", "UPDATE_CONFIG", {"fields": sorted(fields.keys())},
         ip_address=_client_ip(request))
@@ -306,7 +308,19 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     result = await asyncio.to_thread(ops.restart_container) if restart else None
     restart_started = bool(restart and result and result.get("started"))
     restarted = bool(restart_started and result.get("completed") and result.get("exit_code") == 0)
-    message = "配置已保存，但热重载失败，需要重启" if hot_reload_pending else "配置已保存并热生效"
+    if restart:
+        await asyncio.to_thread(
+            _storage_call, "add_audit_log", "RESTART_CONTAINER",
+            {"source": "config_save", "started": restart_started,
+             "completed": bool(result and result.get("completed")),
+             "exit_code": (result or {}).get("exit_code")},
+            ip_address=_client_ip(request))
+    if hot_reload_pending:
+        message = "配置已保存，但热重载失败，需要重启"
+    elif persistence_warning:
+        message = "配置已保存并热生效，但崩溃持久性同步未确认"
+    else:
+        message = "配置已保存并热生效"
     if restarted:
         message += "，容器已完成重启"
     elif restart_started:
@@ -317,7 +331,9 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
                 "restart_started": restart_started,
                 "restart_output": (result or {}).get("output", []) if restart else [],
                 "hot_reload_pending": hot_reload_pending,
-                "reload_warning": errors[0] if errors else ""},
+                "reload_warning": next(
+                    (warning for warning in errors if "hot reload failed" in warning), ""),
+                "persistence_warning": persistence_warning},
                message=message)
 
 

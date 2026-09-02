@@ -71,9 +71,13 @@ export default function ConfigPage() {
         restart_output: string[]
         hot_reload_pending: boolean
         reload_warning: string
+        persistence_warning: string
       }>('/api/v1/dashboard/config', payload)
       if (body.hot_reload_pending && !body.restart_started) {
         toast.error('配置已保存，但尚未热生效', body.reload_warning || '请重启服务后生效')
+      } else if (body.persistence_warning) {
+        const restartNote = body.restart_started ? '；重启指令已下发，完成状态待确认' : ''
+        toast.info('配置已保存，但持久化确认失败', `${body.persistence_warning}${restartNote}`)
       } else if (restart && !body.restart_started) {
         toast.error('配置已保存，但重启未发起', body.restart_output[0] ?? '请在宿主机重启服务')
       } else if (body.restart_started && !body.restarted) {

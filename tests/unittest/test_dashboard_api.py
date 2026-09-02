@@ -341,7 +341,8 @@ class TestProtectedRoutes:
         assert resp.json()["data"]["restarted"] is False
         assert resp.json()["data"]["restart_started"] is False
 
-    def test_config_restart_acceptance_is_not_reported_as_completion(self, client, monkeypatch):
+    def test_config_restart_acceptance_is_not_reported_as_completion(
+            self, client, storage, monkeypatch):
         monkeypatch.setattr(
             dashboard_api.ops, "restart_container",
             lambda: {"started": True, "completed": False, "exit_code": None, "output": []})
@@ -356,6 +357,16 @@ class TestProtectedRoutes:
         assert resp.json()["data"]["restart_started"] is True
         assert resp.json()["data"]["restarted"] is False
         assert "待确认" in resp.json()["message"]
+        restart_logs = [
+            row for row in storage.list_audit_logs()
+            if row["action"] == "RESTART_CONTAINER"]
+        assert restart_logs
+        import json
+        details = json.loads(restart_logs[0]["details_json"])
+        assert details == {
+            "source": "config_save", "started": True,
+            "completed": False, "exit_code": None,
+        }
 
     def test_config_rejects_string_restart_flag(self, client):
         auth = _auth_header(client)
@@ -388,6 +399,26 @@ class TestProtectedRoutes:
         assert resp.status_code == 200
         assert resp.json()["data"]["hot_reload_pending"] is True
         assert "需要重启" in resp.json()["message"]
+
+    def test_config_reports_post_rename_durability_warning(self, client, monkeypatch):
+        class PartialEngine:
+            def write(self, fields):
+                return True, [
+                    "configuration saved but directory sync failed; "
+                    "crash durability unconfirmed: unsupported"
+                ]
+
+        monkeypatch.setattr(dashboard_api, "get_config_engine", lambda: PartialEngine())
+        auth = _auth_header(client)
+        resp = client.put(
+            "/api/v1/dashboard/config",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"},
+            json={"model": "openai/persisted"})
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["hot_reload_pending"] is False
+        assert "directory sync failed" in resp.json()["data"]["persistence_warning"]
+        assert "持久性同步未确认" in resp.json()["message"]
 
     def test_ops_reports_command_not_started(self, client, monkeypatch):
         auth = _auth_header(client)
