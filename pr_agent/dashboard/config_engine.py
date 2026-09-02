@@ -66,7 +66,7 @@ def mask_secret(value: str) -> str:
         return ""
     if len(value) <= 8:
         return "****"
-    return f"{value[:5]}****{value[-4:]}"
+    return f"****{value[-4:]}"
 
 
 def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:

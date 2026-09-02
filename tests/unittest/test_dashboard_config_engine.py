@@ -37,6 +37,16 @@ class TestRead:
         assert "sk-secret-key" not in data["values"]["key"]
         assert data["values"]["model"] == "openai/gpt-old"
 
+    @pytest.mark.parametrize(("secret", "masked"), [
+        ("1234", "****"),
+        ("short", "****"),
+        ("123456789", "****6789"),
+        ("sk-long-secret-key", "****-key"),
+    ])
+    def test_secret_mask_never_exposes_prefix(self, secret, masked):
+        assert mask_secret(secret) == masked
+        assert secret not in masked
+
     def test_missing_file(self, tmp_path):
         engine = ConfigEngine(config_path=str(tmp_path / "nope.toml"))
         assert engine.read()["available"] is False
@@ -294,4 +304,4 @@ class TestMaskSecret:
         assert mask_secret("") == ""
         assert mask_secret("short") == "****"
         masked = mask_secret("sk-1234567890abcdef")
-        assert masked.startswith("sk-12") and masked.endswith("cdef") and "****" in masked
+        assert masked == "****cdef"
