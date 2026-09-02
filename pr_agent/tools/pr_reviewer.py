@@ -13,14 +13,15 @@ from pr_agent.algo.inline_comment_dedup import (
     InlineCommentStore,
     can_verify_inline_comment_publication,
     get_inline_comment_store,
-    key_issue_body_with_markers,
     key_issue_anchor_fingerprint,
+    key_issue_body_with_markers,
     key_issue_fingerprint,
     key_issue_location_fingerprint,
 )
 from pr_agent.algo.pr_processing import add_ai_metadata_to_diff_files, get_pr_diff, retry_with_fallback_models
 from pr_agent.algo.publish_lock import publish_lock
 from pr_agent.algo.repo_context import build_repo_context
+from pr_agent.algo.review_parser import recover_missing_review_wrapper
 from pr_agent.algo.run_details import get_run_details, init_run_details
 from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.token_handler import TokenHandler
@@ -640,12 +641,16 @@ class PRReviewer:
                          keys_fix_yaml=["ticket_compliance_check", "estimated_effort_to_review_[1-5]:", "security_concerns:", "key_issues_to_review:",
                                         "relevant_file:", "relevant_line:", "suggestion:"],
                          first_key=first_key, last_key=last_key)
-        github_action_output(data, 'review')
+        data, recovered_wrapper = recover_missing_review_wrapper(
+            data, require_severity=get_settings().pr_reviewer.get("enable_review_verdict", False))
+        if recovered_wrapper:
+            get_logger().warning("Recovered review response with a missing top-level 'review' wrapper")
 
-        if 'review' not in data:
-            get_logger().exception("Failed to parse review data", artifact={"data": data})
+        if not isinstance(data, dict) or not isinstance(data.get("review"), dict):
+            get_logger().error("Failed to parse review data", artifact={"data": data})
             return ""
 
+        github_action_output(data, 'review')
         self.review_data = data
 
         structured_publisher = getattr(self.git_provider, "publish_structured_review", None)

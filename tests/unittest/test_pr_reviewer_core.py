@@ -907,6 +907,34 @@ def test_prepare_review_publishes_provider_neutral_structured_data(monkeypatch):
     assert list(published["review"].keys()) == ["key_issues_to_review", "security_concerns"]
 
 
+def test_prepare_review_recovers_model_output_missing_only_the_review_wrapper(monkeypatch):
+    git_provider = MagicMock()
+    git_provider.is_supported.return_value = False
+    git_provider.get_diff_files.return_value = []
+    reviewer = _make_prediction_reviewer(git_provider)
+    reviewer.prediction = """key_issues_to_review:
+  - relevant_file: pr_agent/dashboard/ops.py
+    issue_header: Enforce the probe timeout
+    severity: P2
+    issue_content: The configured timeout is accepted but not enforced.
+    start_line: 143
+    end_line: 143
+security_concerns: No
+"""
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.set_review_labels = MagicMock()
+    monkeypatch.setattr(
+        "pr_agent.tools.pr_reviewer.convert_to_markdown_v2",
+        lambda *args, **kwargs: "## Review",
+    )
+
+    result = reviewer._prepare_pr_review()
+
+    assert result == "## Review"
+    assert reviewer.review_data["review"]["key_issues_to_review"][0]["severity"] == "P2"
+    git_provider.publish_structured_review.assert_called_once()
+
+
 def test_can_run_incremental_review_skips_auto_mode_without_new_commit():
     reviewer = _make_reviewer()
     reviewer.is_auto = True
