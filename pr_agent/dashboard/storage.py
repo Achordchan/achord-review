@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS dashboard_sessions (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dashboard_auth_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    password_fingerprint TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS dashboard_login_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     lockout_key TEXT NOT NULL,
@@ -143,6 +149,9 @@ class DashboardStorage:
             os.chmod(directory, 0o700)
         with self._write_lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Sessions never survive a process restart. This also prevents an
+            # old password restored after a restart from reviving old tokens.
+            conn.execute("DELETE FROM dashboard_sessions")
             cutoff = _utc_at(time.time() - STALE_REVIEW_SECONDS)
             conn.execute(
                 "UPDATE reviews SET status='FAILED',"
@@ -230,6 +239,26 @@ class DashboardStorage:
             conn.execute("DELETE FROM dashboard_sessions WHERE token_hash = ?", (token_hash,))
 
         return self._transaction(_revoke, "session revocation")
+
+    def sync_admin_password(self, password_fingerprint: str) -> bool:
+        """Persist password generation and purge sessions on every observed rotation."""
+        def _sync(conn: sqlite3.Connection) -> None:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT password_fingerprint FROM dashboard_auth_state WHERE id = 1").fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO dashboard_auth_state (id, password_fingerprint, updated_at)"
+                    " VALUES (1, ?, ?)",
+                    (password_fingerprint, _utcnow()))
+            elif row["password_fingerprint"] != password_fingerprint:
+                conn.execute("DELETE FROM dashboard_sessions")
+                conn.execute(
+                    "UPDATE dashboard_auth_state SET password_fingerprint = ?, updated_at = ?"
+                    " WHERE id = 1",
+                    (password_fingerprint, _utcnow()))
+
+        return self._transaction(_sync, "admin-password synchronization")
 
     def verify_login_attempt(self, lockout_key: str, password_matches: bool,
                              attempted_at: float, window_seconds: int,

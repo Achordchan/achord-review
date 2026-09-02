@@ -259,6 +259,16 @@ class TestSharedAuthState:
             max_attempts=5, max_rows=10)
         assert decision["failed_count"] == 2
 
+    def test_password_rotation_purges_sessions_before_old_password_returns(self, storage):
+        assert storage.sync_admin_password("fingerprint-a")
+        assert storage.create_session("session-a", 4_000_000_000)
+        assert storage.session_is_valid("session-a", now=1_000_000_000)
+
+        assert storage.sync_admin_password("fingerprint-b")
+        assert storage.sync_admin_password("fingerprint-a")
+
+        assert not storage.session_is_valid("session-a", now=1_000_000_000)
+
     def test_concurrent_workers_cannot_exceed_lockout_threshold(self, storage):
         from concurrent.futures import ThreadPoolExecutor
 

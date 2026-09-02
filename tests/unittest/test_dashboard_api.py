@@ -116,6 +116,8 @@ class TestAuth:
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
         monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "rotated-password")
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
+        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "test-pass-123")
+        assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
 
 
 class TestClientIp:

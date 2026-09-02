@@ -134,6 +134,21 @@ class TestWrite:
         assert "saved but hot reload failed" in errors[0]
         assert engine.read()["values"]["model"] == "openai/persisted"
 
+    def test_hot_reload_preserves_environment_overrides(self, engine, monkeypatch):
+        captured = {}
+
+        class FakeSettings:
+            def set(self, dotted, value):
+                captured[dotted] = value
+
+        import pr_agent.config_loader as cl
+        monkeypatch.setattr(cl, "global_settings", FakeSettings(), raising=False)
+        monkeypatch.setenv("OPENAI__KEY", "environment-secret")
+
+        assert engine._hot_reload(engine._load_raw()) is True
+        assert "openai.key" not in captured
+        assert captured["config.model"] == "openai/gpt-old"
+
     def test_validation_rejects_bad_values(self, engine):
         ok, errors = engine.write({"ai_timeout": "not-a-number"})
         assert not ok and errors

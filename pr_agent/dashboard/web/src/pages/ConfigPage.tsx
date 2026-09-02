@@ -152,6 +152,7 @@ export default function ConfigPage() {
         </div>
       </div>
 
+      <fieldset disabled={saving} className="contents">
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader title="模型" description="审查引擎使用的 LLM 与推理参数" />
@@ -302,6 +303,7 @@ export default function ConfigPage() {
           />
         </div>
       </Card>
+      </fieldset>
 
       <ConfirmDialog
         open={confirmRestart}

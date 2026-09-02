@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import threading
 import time
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
@@ -42,6 +43,8 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 # login remains stable across gunicorn workers. Only SHA-256 digests are stored;
 # bearer tokens and source addresses never enter the database as credentials.
 MAX_LOCKOUT_KEYS = 10_000
+_synced_password_state = ("", "")
+_password_sync_lock = threading.Lock()
 
 
 def _admin_password() -> str:
@@ -80,19 +83,37 @@ def _credential_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _session_hash(token: str) -> str:
+def _session_hash(token: str, password: Optional[str] = None) -> str:
     """Bind a persisted session to the currently configured admin password."""
-    password = _admin_password()
+    password = _admin_password() if password is None else password
     if not password:
         return ""
     return hmac.new(password.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _sync_admin_password(password: str) -> bool:
+    global _synced_password_state
+    fingerprint = _credential_hash(password)
+    storage = get_storage()
+    state = (storage.db_path, fingerprint)
+    with _password_sync_lock:
+        if state == _synced_password_state:
+            return True
+        if not storage.sync_admin_password(fingerprint):
+            return False
+        _synced_password_state = state
+        return True
+
+
 async def _create_session() -> str:
     token = secrets.token_urlsafe(32)
-    created = await asyncio.to_thread(
-        get_storage().create_session,
-        _session_hash(token), int(time.time()) + SESSION_TTL_SECONDS)
+    password = _admin_password()
+
+    def _create() -> bool:
+        return bool(password and _sync_admin_password(password) and get_storage().create_session(
+            _session_hash(token, password), int(time.time()) + SESSION_TTL_SECONDS))
+
+    created = await asyncio.to_thread(_create)
     if not created:
         raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试")
     return token
@@ -101,7 +122,10 @@ async def _create_session() -> str:
 def _session_valid(token: Optional[str]) -> bool:
     if not token:
         return False
-    token_hash = _session_hash(token)
+    password = _admin_password()
+    if not password or not _sync_admin_password(password):
+        return False
+    token_hash = _session_hash(token, password)
     return bool(token_hash and get_storage().session_is_valid(token_hash))
 
 

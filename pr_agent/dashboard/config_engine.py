@@ -290,12 +290,17 @@ class ConfigEngine:
         without reporting a process-local hot reload as globally complete.
         """
         from pr_agent.config_loader import global_settings
+        environment_keys = {key.upper() for key in os.environ}
 
         def _apply(value: Any, path: str) -> None:
             if isinstance(value, dict):
                 for key, child in value.items():
                     _apply(child, f"{path}.{key}" if path else str(key))
                 return
+            nested_env_key = path.replace(".", "__").upper()
+            legacy_env_key = path.replace(".", "_").upper()
+            if nested_env_key in environment_keys or legacy_env_key in environment_keys:
+                return  # Dynaconf environment sources retain higher precedence.
             global_settings.set(path, value)
 
         try:
