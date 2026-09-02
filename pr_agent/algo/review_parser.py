@@ -43,7 +43,9 @@ def _normalize_finding(issue: Any, require_severity: bool) -> dict | None:
     if end_line_number < start_line_number:
         return None
     severity = str(issue.get("severity") or "").strip().upper()
-    if require_severity and severity not in _REVIEW_SEVERITIES:
+    if severity and severity not in _REVIEW_SEVERITIES:
+        return None
+    if require_severity and not severity:
         return None
     normalized = dict(issue)
     if severity in _REVIEW_SEVERITIES:

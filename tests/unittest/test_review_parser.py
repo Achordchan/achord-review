@@ -41,6 +41,20 @@ def test_normalizes_start_line_only_finding_as_a_single_line_issue():
     assert recovered["review"]["key_issues_to_review"][0]["severity"] == "P2"
 
 
+def test_optional_severity_rejects_invalid_value_but_accepts_omission():
+    invalid, invalid_changed = recover_missing_review_wrapper(
+        {"key_issues_to_review": [_finding(severity="P9")]}, require_severity=False)
+    without_severity = _finding()
+    without_severity.pop("severity")
+    recovered, changed = recover_missing_review_wrapper(
+        {"key_issues_to_review": [without_severity]}, require_severity=False)
+
+    assert invalid_changed is False
+    assert invalid["key_issues_to_review"][0]["severity"] == "P9"
+    assert changed is True
+    assert "severity" not in recovered["review"]["key_issues_to_review"][0]
+
+
 @pytest.mark.parametrize("data", [
     {"key_issues_to_review": []},
     {"security_concerns": "No"},
