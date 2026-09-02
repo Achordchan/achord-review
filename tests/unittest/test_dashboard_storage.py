@@ -115,6 +115,16 @@ class TestReviewsCrud:
         assert row["total_tokens"] == 133
         assert row["duration_ms"] == 4567
 
+    def test_review_payloads_are_truncated_to_configured_limit(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module, "MAX_REVIEW_PAYLOAD_BYTES", 128)
+        request_id = storage.create_review(repo_name="r", pr_number=7, pr_url="u7")
+        storage.finish_review(
+            request_id, [], markdown_output="m" * 1000, raw_prediction="r" * 1000)
+        row = storage.get_review_by_request_id(request_id)
+        assert len(row["markdown_output"].encode()) <= 128
+        assert len(row["raw_prediction"].encode()) <= 128
+        assert row["markdown_output"].endswith("[dashboard payload truncated]")
+
     def test_finish_review_retries_database_lock(self, storage, monkeypatch):
         import sqlite3
 
@@ -210,8 +220,10 @@ class TestStats:
     def test_initialize_expires_stale_running_reviews(self, storage):
         stale = storage.create_review(repo_name="r", pr_number=10, pr_url="u10")
         recent = storage.create_review(repo_name="r", pr_number=11, pr_url="u11")
+        stale_time = storage_module._utc_at(
+            time.time() - storage_module.STALE_REVIEW_SECONDS - 60)
         storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
-                       ("2000-01-01 00:00:00", stale))
+                       (stale_time, stale))
 
         storage.initialize()
 
@@ -222,8 +234,10 @@ class TestStats:
 
     def test_stats_periodically_reconcile_stale_reviews(self, storage):
         request_id = storage.create_review(repo_name="r", pr_number=12, pr_url="u12")
+        stale_time = storage_module._utc_at(
+            time.time() - storage_module.STALE_REVIEW_SECONDS - 60)
         storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
-                       ("2000-01-01 00:00:00", request_id))
+                       (stale_time, request_id))
         storage._last_stale_cleanup = time.monotonic() - STALE_CLEANUP_INTERVAL_SECONDS - 1
         previous_cleanup = storage._last_stale_cleanup
 
@@ -232,6 +246,20 @@ class TestStats:
         assert stats["running"] == 0
         assert storage._last_stale_cleanup > previous_cleanup
         assert storage.get_review_by_request_id(request_id)["status"] == "FAILED"
+
+    def test_periodic_maintenance_caps_review_count(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module, "MAX_REVIEW_RECORDS", 3)
+        for number in range(5):
+            storage.create_review(repo_name="r", pr_number=number, pr_url=f"u{number}")
+        storage.reconcile_stale_reviews(force=True)
+        assert storage.list_reviews()["total"] == 3
+
+    def test_periodic_maintenance_deletes_expired_history(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=20, pr_url="u20")
+        storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
+                       ("2000-01-01 00:00:00", request_id))
+        storage.reconcile_stale_reviews(force=True)
+        assert storage.get_review_by_request_id(request_id) is None
 
 
 class TestAuditLogs:
@@ -269,14 +297,34 @@ class TestSharedAuthState:
         assert decision["failed_count"] == 2
 
     def test_password_rotation_purges_sessions_before_old_password_returns(self, storage):
-        assert storage.sync_admin_password("fingerprint-a")
+        assert storage.sync_admin_password("password-a")
         assert storage.create_session("session-a", 4_000_000_000)
         assert storage.session_is_valid("session-a", now=1_000_000_000)
 
-        assert storage.sync_admin_password("fingerprint-b")
-        assert storage.sync_admin_password("fingerprint-a")
+        assert storage.sync_admin_password("password-b")
+        assert storage.sync_admin_password("password-a")
 
         assert not storage.session_is_valid("session-a", now=1_000_000_000)
+
+    def test_same_password_is_stable_across_workers_and_worker_restart(self, storage):
+        assert storage.sync_admin_password("shared-password")
+        assert storage.create_session("shared-session", 4_000_000_000)
+        worker = DashboardStorage(db_path=storage.db_path)
+        assert worker.sync_admin_password("shared-password")
+        worker.initialize()
+        assert worker.session_is_valid("shared-session", now=1_000_000_000)
+
+    def test_password_fingerprint_salt_is_unique_per_installation(self, tmp_path):
+        first = DashboardStorage(db_path=str(tmp_path / "one" / "review.db"))
+        second = DashboardStorage(db_path=str(tmp_path / "two" / "review.db"))
+        first.initialize()
+        second.initialize()
+        assert first.sync_admin_password("same-password")
+        assert second.sync_admin_password("same-password")
+        first_state = first._read("SELECT * FROM dashboard_auth_state WHERE id = 1")[0]
+        second_state = second._read("SELECT * FROM dashboard_auth_state WHERE id = 1")[0]
+        assert first_state["fingerprint_salt"] != second_state["fingerprint_salt"]
+        assert first_state["password_fingerprint"] != second_state["password_fingerprint"]
 
     def test_concurrent_workers_cannot_exceed_lockout_threshold(self, storage):
         from concurrent.futures import ThreadPoolExecutor

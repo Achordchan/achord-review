@@ -43,7 +43,6 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 # login remains stable across gunicorn workers. Only SHA-256 digests are stored;
 # bearer tokens and source addresses never enter the database as credentials.
 MAX_LOCKOUT_KEYS = 10_000
-_password_fingerprint_salt = b"achord-review-dashboard-password-generation-v1"
 _password_sync_state = {"db_path": "", "password": None}
 _password_sync_lock = threading.Lock()
 
@@ -92,13 +91,6 @@ def _session_hash(token: str, password: Optional[str] = None) -> str:
     return hmac.new(password.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _password_fingerprint(password: str) -> str:
-    """Slow, salted runtime fingerprint; never persisted with its random salt."""
-    return hashlib.scrypt(
-        password.encode("utf-8"), salt=_password_fingerprint_salt,
-        n=2 ** 14, r=8, p=1).hex()
-
-
 def _sync_admin_password(password: str) -> bool:
     storage = get_storage()
     with _password_sync_lock:
@@ -107,8 +99,7 @@ def _sync_admin_password(password: str) -> bool:
                 and isinstance(cached_password, str)
                 and hmac.compare_digest(password.encode("utf-8"), cached_password.encode("utf-8"))):
             return True
-        fingerprint = _password_fingerprint(password)
-        if not storage.sync_admin_password(fingerprint):
+        if not storage.sync_admin_password(password):
             return False
         _password_sync_state.update({"db_path": storage.db_path, "password": password})
         return True

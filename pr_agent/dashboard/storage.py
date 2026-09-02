@@ -9,8 +9,10 @@ storage errors where the caller can safely degrade, so dashboard persistence
 must never break the webhook review flow.
 """
 
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -23,6 +25,10 @@ from pr_agent.log import get_logger
 DEFAULT_DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "/app/data/review.db")
 STALE_REVIEW_SECONDS = int(os.environ.get("DASHBOARD_STALE_REVIEW_SECONDS", str(6 * 3600)))
 STALE_CLEANUP_INTERVAL_SECONDS = 5 * 60
+REVIEW_RETENTION_DAYS = max(1, int(os.environ.get("DASHBOARD_REVIEW_RETENTION_DAYS", "90")))
+MAX_REVIEW_RECORDS = max(100, int(os.environ.get("DASHBOARD_MAX_REVIEW_RECORDS", "10000")))
+MAX_REVIEW_PAYLOAD_BYTES = max(
+    64 * 1024, int(os.environ.get("DASHBOARD_MAX_REVIEW_PAYLOAD_BYTES", str(1024 * 1024))))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reviews (
@@ -86,6 +92,7 @@ CREATE TABLE IF NOT EXISTS dashboard_sessions (
 CREATE TABLE IF NOT EXISTS dashboard_auth_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     password_fingerprint TEXT NOT NULL,
+    fingerprint_salt BLOB,
     updated_at TEXT NOT NULL
 );
 
@@ -119,6 +126,21 @@ def _utc_at(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _password_fingerprint(password: str, salt: bytes) -> str:
+    return hashlib.scrypt(
+        password.encode("utf-8"), salt=salt, n=2 ** 14, r=8, p=1).hex()
+
+
+def _truncate_payload(value: str, max_bytes: Optional[int] = None) -> str:
+    max_bytes = MAX_REVIEW_PAYLOAD_BYTES if max_bytes is None else max_bytes
+    encoded = (value or "").encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value or ""
+    marker = b"\n\n[dashboard payload truncated]"
+    prefix = encoded[:max(0, max_bytes - len(marker))]
+    return prefix.decode("utf-8", errors="ignore") + marker.decode()
+
+
 class DashboardStorage:
     """Thread-safe SQLite access with single-writer serialization and WAL reads."""
 
@@ -149,15 +171,12 @@ class DashboardStorage:
             os.chmod(directory, 0o700)
         with self._write_lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
-            # Sessions never survive a process restart. This also prevents an
-            # old password restored after a restart from reviving old tokens.
-            conn.execute("DELETE FROM dashboard_sessions")
-            cutoff = _utc_at(time.time() - STALE_REVIEW_SECONDS)
-            conn.execute(
-                "UPDATE reviews SET status='FAILED',"
-                " error_message='审查进程未正常结束（服务重启或 worker 中断）', completed_at=?"
-                " WHERE status='RUNNING' AND created_at < ?",
-                (_utcnow(), cutoff))
+            auth_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(dashboard_auth_state)").fetchall()
+            }
+            if "fingerprint_salt" not in auth_columns:
+                conn.execute("ALTER TABLE dashboard_auth_state ADD COLUMN fingerprint_salt BLOB")
+            self._maintain_review_rows(conn)
         self._protect_storage_permissions()
         self._last_stale_cleanup = time.monotonic()
 
@@ -166,6 +185,21 @@ class DashboardStorage:
         for path in (self.db_path, f"{self.db_path}-wal", f"{self.db_path}-shm"):
             if os.path.exists(path):
                 os.chmod(path, 0o600)
+
+    def _maintain_review_rows(self, conn: sqlite3.Connection) -> None:
+        now = time.time()
+        conn.execute(
+            "UPDATE reviews SET status='FAILED',"
+            " error_message='审查进程未正常结束（服务重启或 worker 中断）', completed_at=?"
+            " WHERE status='RUNNING' AND created_at < ?",
+            (_utcnow(), _utc_at(now - STALE_REVIEW_SECONDS)))
+        conn.execute(
+            "DELETE FROM reviews WHERE created_at < ?",
+            (_utc_at(now - REVIEW_RETENTION_DAYS * 24 * 3600),))
+        conn.execute(
+            "DELETE FROM reviews WHERE id NOT IN"
+            " (SELECT id FROM reviews ORDER BY id DESC LIMIT ?)",
+            (MAX_REVIEW_RECORDS,))
 
     def _write(self, sql: str, params: tuple = (), timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS,
                max_retry: int = _MAX_RETRY) -> Optional[int]:
@@ -240,23 +274,29 @@ class DashboardStorage:
 
         return self._transaction(_revoke, "session revocation")
 
-    def sync_admin_password(self, password_fingerprint: str) -> bool:
+    def sync_admin_password(self, password: str) -> bool:
         """Persist password generation and purge sessions on every observed rotation."""
         def _sync(conn: sqlite3.Connection) -> None:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT password_fingerprint FROM dashboard_auth_state WHERE id = 1").fetchone()
+                "SELECT password_fingerprint, fingerprint_salt"
+                " FROM dashboard_auth_state WHERE id = 1").fetchone()
+            salt = bytes(row["fingerprint_salt"]) if row and row["fingerprint_salt"] else secrets.token_bytes(16)
+            password_fingerprint = _password_fingerprint(password, salt)
             if row is None:
                 conn.execute(
-                    "INSERT INTO dashboard_auth_state (id, password_fingerprint, updated_at)"
-                    " VALUES (1, ?, ?)",
-                    (password_fingerprint, _utcnow()))
-            elif row["password_fingerprint"] != password_fingerprint:
+                    "INSERT INTO dashboard_auth_state"
+                    " (id, password_fingerprint, fingerprint_salt, updated_at)"
+                    " VALUES (1, ?, ?, ?)",
+                    (password_fingerprint, salt, _utcnow()))
+            elif (not row["fingerprint_salt"]
+                  or row["password_fingerprint"] != password_fingerprint):
                 conn.execute("DELETE FROM dashboard_sessions")
                 conn.execute(
-                    "UPDATE dashboard_auth_state SET password_fingerprint = ?, updated_at = ?"
+                    "UPDATE dashboard_auth_state SET password_fingerprint = ?,"
+                    " fingerprint_salt = ?, updated_at = ?"
                     " WHERE id = 1",
-                    (password_fingerprint, _utcnow()))
+                    (password_fingerprint, salt, _utcnow()))
 
         return self._transaction(_sync, "admin-password synchronization")
 
@@ -304,22 +344,18 @@ class DashboardStorage:
         rows = self._read("SELECT COUNT(*) AS c FROM dashboard_login_attempts")
         return rows[0]["c"] if rows else 0
 
-    def reconcile_stale_reviews(self, force: bool = False) -> None:
+    def reconcile_stale_reviews(self, force: bool = False,
+                                timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS) -> None:
         """Periodically close crashed/interrupted runs after their grace period."""
         now = time.monotonic()
         with self._stale_cleanup_lock:
             if not force and now - self._last_stale_cleanup < STALE_CLEANUP_INTERVAL_SECONDS:
                 return
-            cutoff = _utc_at(time.time() - STALE_REVIEW_SECONDS)
-
             def _reconcile(conn: sqlite3.Connection) -> None:
-                conn.execute(
-                    "UPDATE reviews SET status='FAILED',"
-                    " error_message='审查进程未正常结束（服务重启或 worker 中断）', completed_at=?"
-                    " WHERE status='RUNNING' AND created_at < ?",
-                    (_utcnow(), cutoff))
+                self._maintain_review_rows(conn)
 
-            if self._transaction(_reconcile, "stale-review reconciliation"):
+            if self._transaction(
+                    _reconcile, "stale-review reconciliation", timeout_seconds=timeout_seconds):
                 self._last_stale_cleanup = now
 
     # ------------------------------------------------------------------ reviews
@@ -328,6 +364,7 @@ class DashboardStorage:
                       pr_title: str = "", sender: str = "", trigger_type: str = "manual",
                       commit_sha: str = "", model: str = "", reasoning_effort: str = "") -> str:
         """Insert a RUNNING record and return its request_id, or "" on failure."""
+        self.reconcile_stale_reviews(timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
         request_id = uuid.uuid4().hex
         inserted = self._write(
             "INSERT INTO reviews (request_id, repo_name, pr_number, pr_title, pr_url, commit_sha,"
@@ -340,6 +377,8 @@ class DashboardStorage:
 
     def complete_review(self, request_id: str, verdict: str = "", verdict_reason: str = "",
                         markdown_output: str = "", raw_prediction: str = "") -> None:
+        markdown_output = _truncate_payload(markdown_output)
+        raw_prediction = _truncate_payload(raw_prediction)
         self._write(
             "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
             " markdown_output=?, raw_prediction=?, completed_at=? WHERE request_id=?",
@@ -399,6 +438,9 @@ class DashboardStorage:
         Usage columns accept the run's live values; a stored value wins when
         the incoming one is empty/zero.
         """
+        markdown_output = _truncate_payload(markdown_output)
+        raw_prediction = _truncate_payload(raw_prediction)
+
         def _finish(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
