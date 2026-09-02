@@ -1,5 +1,6 @@
 """Tests for dashboard operation execution without process-local task state."""
 
+import asyncio
 import subprocess
 import sys
 
@@ -110,3 +111,16 @@ def test_llm_probe_uses_configured_adapter(monkeypatch):
     assert result["ok"] is True
     assert captured["model"]
     assert captured["user"] == "Reply with exactly: pong"
+
+
+def test_llm_probe_enforces_its_own_timeout(monkeypatch):
+    class SlowHandler:
+        async def chat_completion(self, **kwargs):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(ops, "_get_probe_ai_handler", lambda: SlowHandler())
+
+    result = ops.probe_llm(timeout_seconds=0.01)
+
+    assert result["ok"] is False
+    assert result["error"] == "LLM probe timed out after 0.01 seconds"

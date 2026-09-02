@@ -182,9 +182,14 @@ class DashboardStorage:
 
     def _protect_storage_permissions(self) -> None:
         """Keep the database and SQLite sidecars owner-readable only."""
-        for path in (self.db_path, f"{self.db_path}-wal", f"{self.db_path}-shm"):
-            if os.path.exists(path):
+        os.chmod(self.db_path, 0o600)
+        for path in (f"{self.db_path}-wal", f"{self.db_path}-shm"):
+            try:
                 os.chmod(path, 0o600)
+            except FileNotFoundError:
+                # SQLite creates and removes sidecars as connections open and close.
+                # Their disappearance between discovery and chmod is expected.
+                continue
 
     def _maintain_review_rows(self, conn: sqlite3.Connection) -> None:
         now = time.time()
@@ -196,10 +201,13 @@ class DashboardStorage:
         conn.execute(
             "DELETE FROM reviews WHERE created_at < ?",
             (_utc_at(now - REVIEW_RETENTION_DAYS * 24 * 3600),))
+        running_count = conn.execute(
+            "SELECT COUNT(*) FROM reviews WHERE status='RUNNING'").fetchone()[0]
+        terminal_limit = max(0, MAX_REVIEW_RECORDS - running_count)
         conn.execute(
-            "DELETE FROM reviews WHERE id NOT IN"
-            " (SELECT id FROM reviews ORDER BY id DESC LIMIT ?)",
-            (MAX_REVIEW_RECORDS,))
+            "DELETE FROM reviews WHERE status != 'RUNNING' AND id NOT IN"
+            " (SELECT id FROM reviews WHERE status != 'RUNNING' ORDER BY id DESC LIMIT ?)",
+            (terminal_limit,))
 
     def _write(self, sql: str, params: tuple = (), timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS,
                max_retry: int = _MAX_RETRY) -> Optional[int]:

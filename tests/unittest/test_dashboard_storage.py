@@ -250,9 +250,38 @@ class TestStats:
     def test_periodic_maintenance_caps_review_count(self, storage, monkeypatch):
         monkeypatch.setattr(storage_module, "MAX_REVIEW_RECORDS", 3)
         for number in range(5):
-            storage.create_review(repo_name="r", pr_number=number, pr_url=f"u{number}")
+            request_id = storage.create_review(repo_name="r", pr_number=number, pr_url=f"u{number}")
+            storage.complete_review(request_id)
         storage.reconcile_stale_reviews(force=True)
         assert storage.list_reviews()["total"] == 3
+
+    def test_periodic_maintenance_preserves_running_reviews(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module, "MAX_REVIEW_RECORDS", 3)
+        running = storage.create_review(repo_name="r", pr_number=1, pr_url="running")
+        for number in range(4):
+            request_id = storage.create_review(repo_name="r", pr_number=number + 2, pr_url=f"done-{number}")
+            storage.complete_review(request_id)
+
+        storage.reconcile_stale_reviews(force=True)
+
+        assert storage.get_review_by_request_id(running)["status"] == "RUNNING"
+        assert storage.list_reviews()["total"] == 3
+
+    def test_periodic_maintenance_allows_running_reviews_to_exceed_cap(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module, "MAX_REVIEW_RECORDS", 3)
+        completed = storage.create_review(repo_name="r", pr_number=1, pr_url="completed")
+        storage.complete_review(completed)
+        running = [
+            storage.create_review(repo_name="r", pr_number=number, pr_url=f"running-{number}")
+            for number in range(2, 6)
+        ]
+
+        storage.reconcile_stale_reviews(force=True)
+
+        assert storage.get_review_by_request_id(completed) is None
+        assert storage.list_reviews()["total"] == 4
+        assert all(storage.get_review_by_request_id(request_id)["status"] == "RUNNING"
+                   for request_id in running)
 
     def test_periodic_maintenance_deletes_expired_history(self, storage):
         request_id = storage.create_review(repo_name="r", pr_number=20, pr_url="u20")
@@ -376,6 +405,19 @@ class TestStoragePermissions:
         DashboardStorage(db_path=str(directory / "review.db")).initialize()
 
         assert str(directory) not in chmod_targets
+
+    def test_vanished_sqlite_sidecar_does_not_fail_permission_protection(self, storage, monkeypatch):
+        real_chmod = os.chmod
+
+        def disappearing_sidecar(path, mode):
+            if os.fspath(path).endswith("-wal"):
+                raise FileNotFoundError(path)
+            real_chmod(path, mode)
+
+        monkeypatch.setattr("pr_agent.dashboard.storage.os.chmod", disappearing_sidecar)
+
+        storage._protect_storage_permissions()
+        assert stat.S_IMODE(os.stat(storage.db_path).st_mode) == 0o600
 
 
 class TestHealth:

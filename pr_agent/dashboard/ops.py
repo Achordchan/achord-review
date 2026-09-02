@@ -7,6 +7,7 @@ restart returns once the controlled runtime accepts the command. Probes (LLM
 relay, GitHub App credential, storage) run in-process and never raise.
 """
 
+import asyncio
 import fcntl
 import os
 import subprocess
@@ -136,16 +137,19 @@ def probe_llm(timeout_seconds: int = 30) -> Dict[str, Any]:
     base_url = str(settings.get("openai.api_base", "")).strip()
     model = str(settings.get("config.model", "")).strip()
     try:
-        import asyncio
-
         handler = _get_probe_ai_handler()
         start = time.monotonic()
-        response, _ = asyncio.run(handler.chat_completion(
-            model=model, system="Return a minimal health-check response.",
-            user="Reply with exactly: pong", temperature=0))
+        response, _ = asyncio.run(asyncio.wait_for(
+            handler.chat_completion(
+                model=model, system="Return a minimal health-check response.",
+                user="Reply with exactly: pong", temperature=0),
+            timeout=timeout_seconds))
         latency_ms = int((time.monotonic() - start) * 1000)
         return {"ok": bool(response), "model": model, "base_url": base_url,
                 "latency_ms": latency_ms}
+    except TimeoutError:
+        return {"ok": False, "model": model, "base_url": base_url,
+                "error": f"LLM probe timed out after {timeout_seconds} seconds"}
     except Exception as e:
         return {"ok": False, "model": model, "base_url": base_url, "error": str(e)[:300]}
 
