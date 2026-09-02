@@ -6,3 +6,8 @@ pr_agent.egg-info/
 build/
 **/.env
 pr_agent/dashboard/web/node_modules/
+**/.secrets.toml*
+deploy/achord-review/config/
+deploy/achord-review/config.toml
+deploy/achord-review/config.toml.bak*
+deploy/achord-review/data/
