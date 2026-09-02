@@ -79,26 +79,12 @@ def _credential_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _is_locked_out(key: str) -> bool:
-    count = get_storage().failed_login_count(
-        _credential_hash(key), time.time() - LOCKOUT_SECONDS)
-    return count >= MAX_FAILED_ATTEMPTS
-
-
-def _record_failed_attempt(key: str) -> int:
-    return get_storage().record_failed_login(
-        _credential_hash(key), time.time(), LOCKOUT_SECONDS,
-        MAX_LOCKOUT_KEYS * MAX_FAILED_ATTEMPTS)
-
-
-def _clear_failed_attempts(key: str) -> None:
-    get_storage().clear_failed_logins(_credential_hash(key))
-
-
-def _create_session() -> str:
+async def _create_session() -> str:
     token = secrets.token_urlsafe(32)
-    if not get_storage().create_session(
-            _credential_hash(token), int(time.time()) + SESSION_TTL_SECONDS):
+    created = await asyncio.to_thread(
+        get_storage().create_session,
+        _credential_hash(token), int(time.time()) + SESSION_TTL_SECONDS)
+    if not created:
         raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试")
     return token
 
@@ -163,21 +149,26 @@ class LoginRequest(BaseModel):
 @router.post("/auth/login")
 async def auth_login(body: LoginRequest, request: Request, response: Response):
     key = _lockout_key(request)
-    if _is_locked_out(key):
-        raise HTTPException(status_code=429, detail="尝试次数过多，请 15 分钟后再试")
     expected = _admin_password()
     if not expected:
         raise HTTPException(status_code=503, detail="管理员密码未配置（config.toml [dashboard] admin_password）")
-    if not hmac.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8")):
-        failed_count = _record_failed_attempt(key)
-        remaining = max(0, MAX_FAILED_ATTEMPTS - failed_count)
+    password_matches = hmac.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8"))
+    decision = await asyncio.to_thread(
+        get_storage().verify_login_attempt,
+        _credential_hash(key), password_matches, time.time(), LOCKOUT_SECONDS,
+        MAX_FAILED_ATTEMPTS, MAX_LOCKOUT_KEYS * MAX_FAILED_ATTEMPTS)
+    if decision["storage_error"]:
+        raise HTTPException(status_code=503, detail="登录保护存储暂不可用，请稍后重试")
+    if decision["locked_out"]:
+        raise HTTPException(status_code=429, detail="尝试次数过多，请 15 分钟后再试")
+    if not decision["authenticated"]:
+        remaining = max(0, MAX_FAILED_ATTEMPTS - decision["failed_count"])
         get_logger().warning(f"Dashboard login failed from {key}")
         raise HTTPException(status_code=401, detail=f"密码错误，剩余尝试次数 {remaining}")
-    _clear_failed_attempts(key)
-    token = _create_session()
+    token = await _create_session()
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
                         max_age=SESSION_TTL_SECONDS, secure=True, path="/")
-    get_storage().add_audit_log("LOGIN", {"ip": key}, ip_address=key)
+    await asyncio.to_thread(get_storage().add_audit_log, "LOGIN", {"ip": key}, ip_address=key)
     return _ok({"authenticated": True})
 
 
@@ -291,6 +282,7 @@ async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cook
 @router.post("/ops/diagnose")
 async def ops_diagnose(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
+    require_same_origin(request)
     # probes make network calls; keep them off the shared webhook event loop
     return _ok(await asyncio.to_thread(ops.diagnose))
 
@@ -398,6 +390,7 @@ _RESERVED_PREFIXES = (
 @router.patch("/{reserved_path:path}")
 async def reserved(reserved_path: str, request: Request,
                    dashboard_session: Optional[str] = Cookie(None)):
+    require_auth(request, dashboard_session)
     if f"/{reserved_path.rstrip('/')}" in _RESERVED or reserved_path.startswith(_RESERVED_PREFIXES):
         return coming_soon()
     raise HTTPException(status_code=404, detail="未知接口")

@@ -127,6 +127,8 @@ class TestClientIp:
         assert dashboard_api._client_ip(make_request("1.2.3.4, 5.6.7.8")) == "10.0.0.1"
 
     def test_lockout_map_bounded(self, client, storage, monkeypatch):
+        import time as _time
+
         from fastapi import Request
         from starlette.datastructures import Headers
 
@@ -142,10 +144,18 @@ class TestClientIp:
         monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
         monkeypatch.setattr(dashboard_api, "MAX_LOCKOUT_KEYS", 10)
         for i in range(200):
-            dashboard_api._record_failed_attempt(dashboard_api._lockout_key(make_request(f"10.0.{i}.1")))
+            key = dashboard_api._credential_hash(
+                dashboard_api._lockout_key(make_request(f"10.0.{i}.1")))
+            storage.verify_login_attempt(
+                key, False, _time.time(), dashboard_api.LOCKOUT_SECONDS,
+                dashboard_api.MAX_FAILED_ATTEMPTS,
+                dashboard_api.MAX_LOCKOUT_KEYS * dashboard_api.MAX_FAILED_ATTEMPTS)
         assert storage.login_attempt_row_count() <= 10 * dashboard_api.MAX_FAILED_ATTEMPTS
         newest = dashboard_api._credential_hash("10.0.199.1")
-        assert storage.failed_login_count(newest, 0) == 1
+        decision = storage.verify_login_attempt(
+            newest, False, _time.time(), dashboard_api.LOCKOUT_SECONDS,
+            dashboard_api.MAX_FAILED_ATTEMPTS, 50)
+        assert decision["failed_count"] == 2
 
     def test_lockout_entries_expire(self, client, storage, monkeypatch):
         import time as _time
@@ -162,12 +172,17 @@ class TestClientIp:
         monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
         key = dashboard_api._lockout_key(req)
         key_hash = dashboard_api._credential_hash(key)
-        storage.record_failed_login(
-            key_hash, _time.time() - dashboard_api.LOCKOUT_SECONDS - 1,
-            dashboard_api.LOCKOUT_SECONDS, 100)
+        storage.verify_login_attempt(
+            key_hash, False, _time.time() - dashboard_api.LOCKOUT_SECONDS - 1,
+            dashboard_api.LOCKOUT_SECONDS, dashboard_api.MAX_FAILED_ATTEMPTS, 100)
         # the next failed login removes attempts older than the lockout window
-        dashboard_api._record_failed_attempt("some-other-key")
-        assert storage.failed_login_count(key_hash, 0) == 0
+        storage.verify_login_attempt(
+            dashboard_api._credential_hash("some-other-key"), False, _time.time(),
+            dashboard_api.LOCKOUT_SECONDS, dashboard_api.MAX_FAILED_ATTEMPTS, 100)
+        decision = storage.verify_login_attempt(
+            key_hash, False, _time.time(), dashboard_api.LOCKOUT_SECONDS,
+            dashboard_api.MAX_FAILED_ATTEMPTS, 100)
+        assert decision["failed_count"] == 1
 
 
 class TestSameOrigin:
@@ -218,8 +233,9 @@ class TestSameOrigin:
     def test_mutations_require_origin_evidence(self, client):
         # a bodyless cookie-authenticated POST without any origin header is now 403
         auth = _auth_header(client)
-        resp = client.post("/api/v1/dashboard/ops/git-pull", headers=auth)
-        assert resp.status_code == 403
+        for path in ("/api/v1/dashboard/ops/git-pull", "/api/v1/dashboard/ops/diagnose"):
+            resp = client.post(path, headers=auth)
+            assert resp.status_code == 403, path
 
 
 class TestProtectedRoutes:
@@ -301,6 +317,9 @@ class TestProtectedRoutes:
             resp = client.get(path, headers=auth)
             assert resp.status_code == 501, path
             assert resp.json()["code"] == "COMING_SOON"
+
+    def test_reserved_routes_require_auth(self, client):
+        assert client.get("/api/v1/dashboard/commands").status_code == 401
 
     def test_unknown_route_404(self, client):
         auth = _auth_header(client)

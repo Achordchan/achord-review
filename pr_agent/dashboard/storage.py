@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 from pr_agent.log import get_logger
 
 DEFAULT_DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "/app/data/review.db")
+STALE_REVIEW_SECONDS = int(os.environ.get("DASHBOARD_STALE_REVIEW_SECONDS", str(6 * 3600)))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reviews (
@@ -105,6 +106,10 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _utc_at(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 class DashboardStorage:
     """Thread-safe SQLite access with single-writer serialization and WAL reads."""
 
@@ -114,23 +119,45 @@ class DashboardStorage:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            self._protect_storage_permissions()
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
     def initialize(self) -> None:
-        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
+        directory = os.path.dirname(self.db_path) or "."
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
         with self._write_lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
+            cutoff = _utc_at(time.time() - STALE_REVIEW_SECONDS)
+            conn.execute(
+                "UPDATE reviews SET status='FAILED',"
+                " error_message='审查进程未正常结束（服务重启或 worker 中断）', completed_at=?"
+                " WHERE status='RUNNING' AND created_at < ?",
+                (_utcnow(), cutoff))
+        self._protect_storage_permissions()
+
+    def _protect_storage_permissions(self) -> None:
+        """Keep the database and SQLite sidecars owner-readable only."""
+        for path in (self.db_path, f"{self.db_path}-wal", f"{self.db_path}-shm"):
+            if os.path.exists(path):
+                os.chmod(path, 0o600)
 
     def _write(self, sql: str, params: tuple = ()) -> Optional[int]:
         for attempt in range(_MAX_RETRY):
             try:
                 with self._write_lock, self._connect() as conn:
                     cursor = conn.execute(sql, params)
-                    return cursor.lastrowid
+                    lastrowid = cursor.lastrowid
+                self._protect_storage_permissions()
+                return lastrowid
             except sqlite3.OperationalError as e:
                 # "database is locked" under momentary contention; back off and retry
                 if "locked" not in str(e) or attempt == _MAX_RETRY - 1:
@@ -146,7 +173,8 @@ class DashboardStorage:
         try:
             with self._connect() as conn:
                 rows = conn.execute(sql, params).fetchall()
-                return [dict(row) for row in rows]
+            self._protect_storage_permissions()
+            return [dict(row) for row in rows]
         except Exception as e:
             get_logger().warning(f"Dashboard storage read failed, error: {e}")
             return []
@@ -157,6 +185,7 @@ class DashboardStorage:
             try:
                 with self._write_lock, self._connect() as conn:
                     operation(conn)
+                self._protect_storage_permissions()
                 return True
             except sqlite3.OperationalError as e:
                 if "locked" not in str(e) or attempt == _MAX_RETRY - 1:
@@ -187,32 +216,45 @@ class DashboardStorage:
     def revoke_session(self, token_hash: str) -> None:
         self._write("DELETE FROM dashboard_sessions WHERE token_hash = ?", (token_hash,))
 
-    def record_failed_login(self, lockout_key: str, attempted_at: float,
-                            window_seconds: int, max_rows: int) -> int:
-        """Record a failed login and keep the shared attempt table bounded."""
-        cutoff = attempted_at - window_seconds
-        self._write("DELETE FROM dashboard_login_attempts WHERE attempted_at < ?", (cutoff,))
-        self._write(
-            "INSERT INTO dashboard_login_attempts (lockout_key, attempted_at) VALUES (?, ?)",
-            (lockout_key, attempted_at))
-        count_rows = self._read("SELECT COUNT(*) AS c FROM dashboard_login_attempts")
-        excess = max(0, (count_rows[0]["c"] if count_rows else 0) - max_rows)
-        if excess:
-            self._write(
-                "DELETE FROM dashboard_login_attempts WHERE id IN"
-                " (SELECT id FROM dashboard_login_attempts ORDER BY attempted_at, id LIMIT ?)",
-                (excess,))
-        return self.failed_login_count(lockout_key, cutoff)
+    def verify_login_attempt(self, lockout_key: str, password_matches: bool,
+                             attempted_at: float, window_seconds: int,
+                             max_attempts: int, max_rows: int) -> Dict[str, Any]:
+        """Atomically enforce lockout and record/clear attempts across workers."""
+        decision = {"authenticated": False, "locked_out": False,
+                    "failed_count": 0, "storage_error": True}
 
-    def failed_login_count(self, lockout_key: str, cutoff: float) -> int:
-        rows = self._read(
-            "SELECT COUNT(*) AS c FROM dashboard_login_attempts"
-            " WHERE lockout_key = ? AND attempted_at >= ?",
-            (lockout_key, cutoff))
-        return rows[0]["c"] if rows else 0
+        def _verify(conn: sqlite3.Connection) -> None:
+            conn.execute("BEGIN IMMEDIATE")
+            cutoff = attempted_at - window_seconds
+            conn.execute("DELETE FROM dashboard_login_attempts WHERE attempted_at < ?", (cutoff,))
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM dashboard_login_attempts"
+                " WHERE lockout_key = ? AND attempted_at >= ?",
+                (lockout_key, cutoff)).fetchone()
+            failed_count = row["c"] if row else 0
+            if failed_count >= max_attempts:
+                decision.update({"locked_out": True, "failed_count": failed_count})
+                return
+            if password_matches:
+                conn.execute("DELETE FROM dashboard_login_attempts WHERE lockout_key = ?", (lockout_key,))
+                decision.update({"authenticated": True, "failed_count": 0})
+                return
+            conn.execute(
+                "INSERT INTO dashboard_login_attempts (lockout_key, attempted_at) VALUES (?, ?)",
+                (lockout_key, attempted_at))
+            failed_count += 1
+            total = conn.execute("SELECT COUNT(*) AS c FROM dashboard_login_attempts").fetchone()["c"]
+            excess = max(0, total - max_rows)
+            if excess:
+                conn.execute(
+                    "DELETE FROM dashboard_login_attempts WHERE id IN"
+                    " (SELECT id FROM dashboard_login_attempts ORDER BY attempted_at, id LIMIT ?)",
+                    (excess,))
+            decision["failed_count"] = failed_count
 
-    def clear_failed_logins(self, lockout_key: str) -> None:
-        self._write("DELETE FROM dashboard_login_attempts WHERE lockout_key = ?", (lockout_key,))
+        if self._transaction(_verify, "login-attempt transaction"):
+            decision["storage_error"] = False
+        return decision
 
     def login_attempt_row_count(self) -> int:
         rows = self._read("SELECT COUNT(*) AS c FROM dashboard_login_attempts")

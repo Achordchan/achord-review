@@ -1,6 +1,7 @@
 """Tests for the dashboard storage layer (pr_agent/dashboard/storage.py)."""
 
 import os
+import stat
 
 import pytest
 
@@ -165,6 +166,19 @@ class TestStats:
         stats = storage.stats_overview()
         assert stats["running"] == 0
 
+    def test_initialize_expires_stale_running_reviews(self, storage):
+        stale = storage.create_review(repo_name="r", pr_number=10, pr_url="u10")
+        recent = storage.create_review(repo_name="r", pr_number=11, pr_url="u11")
+        storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
+                       ("2000-01-01 00:00:00", stale))
+
+        storage.initialize()
+
+        stale_row = storage.get_review_by_request_id(stale)
+        assert stale_row["status"] == "FAILED"
+        assert "未正常结束" in stale_row["error_message"]
+        assert storage.get_review_by_request_id(recent)["status"] == "RUNNING"
+
 
 class TestAuditLogs:
     def test_add_and_list(self, storage):
@@ -191,10 +205,49 @@ class TestSharedAuthState:
     def test_login_attempts_are_shared_and_bounded(self, storage):
         other = DashboardStorage(db_path=storage.db_path)
         for i in range(20):
-            storage.record_failed_login(f"key-{i}", attempted_at=1000 + i,
-                                        window_seconds=1000, max_rows=10)
+            storage.verify_login_attempt(
+                f"key-{i}", False, attempted_at=1000 + i,
+                window_seconds=1000, max_attempts=5, max_rows=10)
         assert other.login_attempt_row_count() == 10
-        assert other.failed_login_count("key-19", cutoff=0) == 1
+        decision = other.verify_login_attempt(
+            "key-19", False, attempted_at=1020, window_seconds=1000,
+            max_attempts=5, max_rows=10)
+        assert decision["failed_count"] == 2
+
+    def test_concurrent_workers_cannot_exceed_lockout_threshold(self, storage):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def wrong_attempt(_):
+            worker = DashboardStorage(db_path=storage.db_path)
+            return worker.verify_login_attempt(
+                "same-key", False, attempted_at=1000, window_seconds=1000,
+                max_attempts=5, max_rows=100)
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            decisions = list(pool.map(wrong_attempt, range(10)))
+
+        assert sum(not item["locked_out"] for item in decisions) == 5
+        final = DashboardStorage(db_path=storage.db_path).verify_login_attempt(
+            "same-key", True, attempted_at=1001, window_seconds=1000,
+            max_attempts=5, max_rows=100)
+        assert final["locked_out"] is True
+        assert final["authenticated"] is False
+
+
+class TestStoragePermissions:
+    def test_database_directory_and_sidecars_are_owner_only(self, storage):
+        directory = os.path.dirname(storage.db_path)
+        assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(storage.db_path).st_mode) == 0o600
+
+        for suffix in ("-wal", "-shm"):
+            path = f"{storage.db_path}{suffix}"
+            with open(path, "a", encoding="utf-8"):
+                pass
+            os.chmod(path, 0o644)
+        storage._protect_storage_permissions()
+        assert stat.S_IMODE(os.stat(f"{storage.db_path}-wal").st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(f"{storage.db_path}-shm").st_mode) == 0o600
 
 
 class TestHealth:

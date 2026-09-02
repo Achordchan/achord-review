@@ -8,8 +8,27 @@ export class ApiError extends Error {
   }
 }
 
+const TOKEN_KEY = 'dashboard_token'
+
+export function readToken(): string | null {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function storeToken(token: string | null) {
+  try {
+    if (token) sessionStorage.setItem(TOKEN_KEY, token)
+    else sessionStorage.removeItem(TOKEN_KEY)
+  } catch {
+    // DOM storage unavailable — the HttpOnly cookie session remains usable.
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = sessionStorage.getItem('dashboard_token')
+  const token = readToken()
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string> | undefined),
   }

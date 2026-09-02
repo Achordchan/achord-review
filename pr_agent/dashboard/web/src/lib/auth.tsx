@@ -1,26 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { api } from './api'
+import { api, storeToken } from './api'
 import type { SessionInfo } from './types'
-
-const TOKEN_KEY = 'dashboard_token'
-
-export function readToken(): string | null {
-  try {
-    return sessionStorage.getItem(TOKEN_KEY)
-  } catch {
-    return null
-  }
-}
-
-export function storeToken(token: string | null) {
-  try {
-    if (token) sessionStorage.setItem(TOKEN_KEY, token)
-    else sessionStorage.removeItem(TOKEN_KEY)
-  } catch {
-    // storage unavailable (private mode) — cookie session still works
-  }
-}
 
 type AuthState = {
   authenticated: boolean
