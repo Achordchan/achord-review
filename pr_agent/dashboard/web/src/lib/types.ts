@@ -80,6 +80,12 @@ export type ReviewListData = { total: number; items: ReviewRow[] }
 export type AuditLogListData = { items: AuditLogRow[] }
 export type RepoRow = { repo_name: string; review_count: number; last_review_at: string | null }
 export type OpsTask = { running: boolean; exists: boolean; exit_code: number | null; output: string[] }
+export type OpsLaunch = {
+  started: boolean
+  task_id: string | null
+  already_running: boolean
+  output: string[]
+}
 export type DiagnoseResult = {
   ok: boolean
   llm: Record<string, unknown>

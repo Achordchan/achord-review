@@ -7,9 +7,8 @@ values are validated, the file is atomically replaced after a timestamped
 backup, and the in-memory Dynaconf object is updated in place so changes apply
 without a container restart.
 
-Every write keeps the rest of the file byte-identical: the file is parsed with
-tomllib and re-dumped with targeted section updates, never regenerated from a
-template.
+Every write uses a comment-preserving TOML document and changes only the
+targeted fields, never regenerating the file from a template.
 """
 
 import glob
@@ -117,6 +116,7 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
 class ConfigEngine:
     def __init__(self, config_path: Optional[str] = None):
         self.config_path = config_path or find_config_path()
+        self._loaded_signature = self._file_signature()
 
     # ------------------------------------------------------------------ read
 
@@ -168,7 +168,8 @@ class ConfigEngine:
         except Exception as e:
             get_logger().warning(f"Dashboard config write failed, error: {e}")
             return False, [f"failed to write config: {e}"]
-        self._hot_reload(clean)
+        if self._hot_reload(clean):
+            self._loaded_signature = self._file_signature()
         return True, []
 
     def _apply_fields(self, raw: Dict[str, Any], clean: Dict[str, Any]) -> None:
@@ -217,14 +218,13 @@ class ConfigEngine:
                 os.remove(tmp_path)
             raise
 
-    def _hot_reload(self, clean: Dict[str, Any]) -> None:
+    def _hot_reload(self, clean: Dict[str, Any]) -> bool:
         """Apply saved values to the in-memory Dynaconf settings immediately.
 
-        Scope note: this mutates only THIS worker process's global_settings.
-        The shipped deployment pins GUNICORN_WORKERS=1, so the worker that
-        saves is the worker that serves reviews. With more than one worker a
-        restart is required for every worker to pick the change up — that is
-        what the "save and restart" button is for.
+        This updates the worker performing the save immediately. Other workers
+        compare the file signature at the start of their next HTTP request and
+        call reload_if_changed(), so the deployment can retain concurrency
+        without reporting a process-local hot reload as globally complete.
         """
         from pr_agent.config_loader import global_settings
         try:
@@ -241,9 +241,49 @@ class ConfigEngine:
                     global_settings.set("pr_reviewer.verdict_blocking_severities", value)
                 elif name == "ignore_glob":
                     global_settings.set("ignore.glob", value)
+            return True
         except Exception as e:
             # The file is already correct; a reload miss only delays effect until restart.
             get_logger().warning(f"Dashboard config hot reload failed, error: {e}")
+            return False
+
+    def reload_if_changed(self) -> bool:
+        """Apply external/dashboard config changes once per worker.
+
+        Returns True only after a newer on-disk document was parsed and applied.
+        File-stat and parse failures are fail-safe: the worker keeps its last
+        known-good settings and retries on the next request.
+        """
+        signature = self._file_signature()
+        if signature is None or signature == self._loaded_signature:
+            return False
+        raw = self._load_raw()
+        if raw is None:
+            return False
+        fields: Dict[str, Any] = {}
+        for name, (table, key) in STRING_FIELDS.items():
+            if key in raw.get(table, {}):
+                fields[name] = raw[table][key]
+        for name, (table, key, _, _) in INT_FIELDS.items():
+            if key in raw.get(table, {}):
+                fields[name] = raw[table][key]
+        if "verdict_blocking_severities" in raw.get("pr_reviewer", {}):
+            fields["verdict_blocking_severities"] = raw["pr_reviewer"]["verdict_blocking_severities"]
+        if "glob" in raw.get("ignore", {}):
+            fields["ignore_glob"] = raw["ignore"]["glob"]
+        if not self._hot_reload(fields):
+            return False
+        self._loaded_signature = signature
+        return True
+
+    def _file_signature(self) -> Optional[tuple]:
+        if not self.config_path:
+            return None
+        try:
+            stat = os.stat(self.config_path)
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
 
     # ------------------------------------------------------------------ misc
 

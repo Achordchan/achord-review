@@ -503,10 +503,18 @@ try:
 
     get_storage()  # initialize the SQLite file early so the first webhook write is cheap
     app.include_router(dashboard_router)
-    get_config_engine()  # fail fast here rather than on the first config request
+    dashboard_config_engine = get_config_engine()  # fail fast here rather than on the first config request
 
-    from fastapi.staticfiles import StaticFiles
+    @app.middleware("http")
+    async def refresh_dashboard_config(request, call_next):
+        # Every gunicorn worker observes the shared config file before serving
+        # its next request. The stat check is cheap and reload failures retain
+        # the worker's last known-good settings instead of breaking webhooks.
+        dashboard_config_engine.reload_if_changed()
+        return await call_next(request)
+
     from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
 
     _dashboard_dist = os.path.join(base_path, "dashboard", "static")
     if os.path.isdir(os.path.join(_dashboard_dist, "assets")) or \

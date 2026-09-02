@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, GitPullRequestArrow, HeartPulse, RefreshCcw, Terminal } from 'lucide-react'
-import { api } from '../lib/api'
-import type { AuditLogListData, DiagnoseResult, OpsTask } from '../lib/types'
+import { api, ApiError } from '../lib/api'
+import type { AuditLogListData, DiagnoseResult, OpsLaunch, OpsTask } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/Dialogs'
 import { useToast } from '../components/Toast'
@@ -77,13 +77,14 @@ export default function OpsPage() {
     setConfirmAction(null)
     try {
       const body = action === 'restart'
-        ? await api.post<{ task_id: string }>('/api/v1/dashboard/ops/restart')
-        : await api.post<{ task_id: string }>('/api/v1/dashboard/ops/git-pull')
+        ? await api.post<OpsLaunch>('/api/v1/dashboard/ops/restart')
+        : await api.post<OpsLaunch>('/api/v1/dashboard/ops/git-pull')
+      if (!body.task_id) throw new Error('操作未创建任务')
       toast.info(action === 'restart' ? '重启指令已下发' : 'git pull 已开始')
       setTask({ running: true, exists: true, exit_code: null, output: [] })
       await pollTaskResult(body.task_id)
-    } catch {
-      toast.error('指令下发失败', '请检查服务状态')
+    } catch (error) {
+      toast.error('指令未下发', error instanceof ApiError ? error.message : '请检查运行环境与服务状态')
     }
   }
 
@@ -108,7 +109,7 @@ export default function OpsPage() {
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent/15 text-accent"><RefreshCcw size={16} /></span>
             <h3 className="text-sm font-semibold text-text">重启服务</h3>
           </div>
-          <p className="mt-2 text-xs leading-relaxed text-muted">重启 achord-review 容器。中断约 10-30 秒，优雅停机保证进行中的审查不被打断。</p>
+          <p className="mt-2 text-xs leading-relaxed text-muted">重启 achord-review 容器。服务将短暂中断，正在执行的审查可能被终止，请在低峰期操作。</p>
           <button
             onClick={() => setConfirmAction('restart')}
             className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2"
@@ -220,7 +221,7 @@ export default function OpsPage() {
       <ConfirmDialog
         open={confirmAction === 'restart'}
         title="重启 achord-review 容器？"
-        body="服务将中断约 10-30 秒。进行中的审查会优雅停机，不会丢失数据。"
+        body="服务将短暂中断，正在执行的审查可能被终止。确认当前没有重要审查后再继续。"
         danger
         confirmLabel="确认重启"
         onConfirm={() => void runAction('restart')}

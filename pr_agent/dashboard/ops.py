@@ -23,12 +23,13 @@ _RUNNING_LOGS: Dict[str, List[str]] = {}
 def _run_tracked(key: str, argv: List[str], cwd: str = "/") -> Dict[str, Any]:
     """Start a whitelisted command, keep its handle, return a task id."""
     if _RUNNING_PROC.get(key) and _RUNNING_PROC[key].poll() is None:
-        return {"task_id": key, "already_running": True, "output": _RUNNING_LOGS.get(key, [])}
+        return {"started": False, "task_id": key, "already_running": True,
+                "output": _RUNNING_LOGS.get(key, [])}
     _RUNNING_LOGS[key] = []
     proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
     _RUNNING_PROC[key] = proc
-    return {"task_id": key, "already_running": False}
+    return {"started": True, "task_id": key, "already_running": False, "output": []}
 
 
 def _poll(key: str) -> Dict[str, Any]:
@@ -55,29 +56,28 @@ def _poll(key: str) -> Dict[str, Any]:
 
 
 def restart_container() -> Dict[str, Any]:
-    """Restart the achord-review container via the docker socket mount.
+    """Restart the achord-review container through a configured Docker endpoint.
 
-    Requires the host docker CLI + socket to be available inside this
-    container (mount /var/run/docker.sock read-only to enable); without it
-    the task output explains the missing prerequisite instead of the API
-    silently claiming a restart was issued.
+    The default deployment intentionally exposes no raw Docker socket. An
+    operator may supply a narrowly authorized Docker endpoint; otherwise the
+    explicit not-started result lets the API and UI report the unavailable
+    operation without creating a task that can never be polled.
     """
     argv = ["docker", "restart", "--timeout", "30", CONTAINER_NAME]
     try:
         return _run_tracked("restart", argv)
-    except FileNotFoundError:
-        return {"task_id": "restart", "already_running": False,
-                "output": ["docker CLI not available inside this container - "
-                           "mount /var/run/docker.sock (read-only) to enable one-click restart"]}
+    except OSError:
+        return {"started": False, "task_id": None, "already_running": False,
+                "output": ["docker CLI 或受控 Docker 端点不可用，容器重启未发起"]}
 
 
 def git_pull() -> Dict[str, Any]:
     argv = ["git", "-C", REPO_DIR, "pull", "--ff-only"]
     try:
         return _run_tracked("git-pull", argv, cwd=REPO_DIR)
-    except FileNotFoundError:
-        return {"task_id": "git-pull", "already_running": False,
-                "output": ["git not available inside this container"]}
+    except OSError:
+        return {"started": False, "task_id": None, "already_running": False,
+                "output": ["git 或代码目录不可用，git pull 未发起"]}
 
 
 def poll_task(task_id: str) -> Dict[str, Any]:

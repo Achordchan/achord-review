@@ -38,7 +38,8 @@ class TestRead:
             f.write(f"\n{comment_line}\n")
         ok, _ = engine.write({"model": "openai/changed"})
         assert ok
-        text = open(engine.config_path, encoding="utf-8").read()
+        with open(engine.config_path, encoding="utf-8") as f:
+            text = f.read()
         assert comment_line in text
         assert 'model = "openai/changed"' in text
         # section ordering preserved: [config] content still precedes [openai]
@@ -81,6 +82,21 @@ class TestWrite:
         assert ok
         # _hot_reload ran during write; openai.key must NOT have been set to ""
         assert captured.get("openai.key", "unset") != ""
+
+    def test_reload_if_changed_updates_another_worker(self, engine, monkeypatch):
+        captured = {}
+
+        class FakeSettings:
+            def set(self, dotted, value):
+                captured[dotted] = value
+
+        import pr_agent.config_loader as cl
+        monkeypatch.setattr(cl, "global_settings", FakeSettings(), raising=False)
+        engine._loaded_signature = (0, 0)
+
+        assert engine.reload_if_changed() is True
+        assert captured["config.model"] == "openai/gpt-old"
+        assert engine.reload_if_changed() is False
 
     def test_validation_rejects_bad_values(self, engine):
         ok, errors = engine.write({"ai_timeout": "not-a-number"})

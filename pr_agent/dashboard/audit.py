@@ -1,9 +1,10 @@
 """Audit hook: persist every PR review run into the dashboard storage.
 
-Called from PRReviewer.run() at the start and in its finally block. Every
+Called from PRReviewer.run() at the start and on every terminal path. Every
 function here is fail-safe: any storage error is logged and swallowed, the
-review flow itself is never disturbed. The actual write happens off the event
-loop via asyncio.to_thread with a fire-and-forget task.
+review flow itself is never disturbed. Terminal writes run off the event loop
+via asyncio.to_thread and are awaited before the review request returns, so a
+graceful worker shutdown cannot leave a completed run permanently RUNNING.
 """
 
 import asyncio
@@ -78,9 +79,9 @@ def review_started(pr_url: str, sender: str = "", trigger_type: str = "manual",
         return ""
 
 
-def review_finished(request_id: str, verdict: str = "", verdict_reason: str = "",
-                    markdown_output: str = "", raw_prediction: str = "",
-                    issues: Optional[list] = None) -> None:
+async def review_finished(request_id: str, verdict: str = "", verdict_reason: str = "",
+                          markdown_output: str = "", raw_prediction: str = "",
+                          issues: Optional[list] = None) -> None:
     """Complete the record with usage, findings and verdict in one transaction."""
     if not request_id:
         return
@@ -111,13 +112,10 @@ def review_finished(request_id: str, verdict: str = "", verdict_reason: str = ""
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_finished) failed, error: {e}")
 
-    try:
-        asyncio.get_running_loop().create_task(asyncio.to_thread(_work))
-    except RuntimeError:
-        _work()
+    await asyncio.to_thread(_work)
 
 
-def review_failed(request_id: str, error_message: str) -> None:
+async def review_failed(request_id: str, error_message: str) -> None:
     if not request_id:
         return
 
@@ -132,13 +130,10 @@ def review_failed(request_id: str, error_message: str) -> None:
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_failed) failed, error: {e}")
 
-    try:
-        asyncio.get_running_loop().create_task(asyncio.to_thread(_work))
-    except RuntimeError:
-        _work()
+    await asyncio.to_thread(_work)
 
 
-def review_skipped(request_id: str, reason: str) -> None:
+async def review_skipped(request_id: str, reason: str) -> None:
     """Close a RUNNING record for a run that exited before publishing.
 
     Without this the record would stay RUNNING forever and inflate the
@@ -158,10 +153,7 @@ def review_skipped(request_id: str, reason: str) -> None:
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_skipped) failed, error: {e}")
 
-    try:
-        asyncio.get_running_loop().create_task(asyncio.to_thread(_work))
-    except RuntimeError:
-        _work()
+    await asyncio.to_thread(_work)
 
 
 def _as_int(value) -> Optional[int]:

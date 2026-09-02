@@ -160,6 +160,23 @@ class TestAuditLogs:
         assert len(storage.list_audit_logs(limit=3)) == 3
 
 
+class TestSharedAuthState:
+    def test_session_is_shared_across_storage_instances(self, storage):
+        other = DashboardStorage(db_path=storage.db_path)
+        assert storage.create_session("token-hash", 4_000_000_000)
+        assert other.session_is_valid("token-hash", now=1_000_000_000)
+        other.revoke_session("token-hash")
+        assert not storage.session_is_valid("token-hash", now=1_000_000_000)
+
+    def test_login_attempts_are_shared_and_bounded(self, storage):
+        other = DashboardStorage(db_path=storage.db_path)
+        for i in range(20):
+            storage.record_failed_login(f"key-{i}", attempted_at=1000 + i,
+                                        window_seconds=1000, max_rows=10)
+        assert other.login_attempt_row_count() == 10
+        assert other.failed_login_count("key-19", cutoff=0) == 1
+
+
 class TestHealth:
     def test_health_ok(self, storage):
         health = storage.health()

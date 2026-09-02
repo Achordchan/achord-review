@@ -3,9 +3,10 @@ Dashboard persistence on a single SQLite file.
 
 The database is an isolated local file (/app/data/review.db in the container):
 no external Postgres/Redis connection, zero coupling with anything else on the
-host. All writes are queued through one worker thread so concurrent gunicorn
-workers serialize naturally, and every public entry point swallows its own
-errors - a dashboard storage failure must never break the webhook review flow.
+host. Each process serializes its own writers and SQLite coordinates access
+between gunicorn workers through WAL/file locking. Public entry points swallow
+storage errors where the caller can safely degrade, so dashboard persistence
+must never break the webhook review flow.
 """
 
 import json
@@ -74,11 +75,27 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dashboard_sessions (
+    token_hash TEXT PRIMARY KEY,
+    expires_at INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dashboard_login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lockout_key TEXT NOT NULL,
+    attempted_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo_name, pr_number);
 CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
 CREATE INDEX IF NOT EXISTS idx_reviews_created_at ON reviews(created_at);
 CREATE INDEX IF NOT EXISTS idx_issues_severity ON review_issues(severity);
 CREATE INDEX IF NOT EXISTS idx_issues_review ON review_issues(review_id);
+CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expiry ON dashboard_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_dashboard_login_attempts_key_time
+    ON dashboard_login_attempts(lockout_key, attempted_at);
+CREATE INDEX IF NOT EXISTS idx_dashboard_login_attempts_time ON dashboard_login_attempts(attempted_at);
 """
 
 _MAX_RETRY = 3
@@ -133,6 +150,56 @@ class DashboardStorage:
         except Exception as e:
             get_logger().warning(f"Dashboard storage read failed, error: {e}")
             return []
+
+    # ---------------------------------------------------------- auth state
+
+    def create_session(self, token_hash: str, expires_at: int) -> bool:
+        """Persist a dashboard session so every gunicorn worker can validate it."""
+        self._write("DELETE FROM dashboard_sessions WHERE expires_at <= ?", (int(time.time()),))
+        return self._write(
+            "INSERT OR REPLACE INTO dashboard_sessions (token_hash, expires_at, created_at)"
+            " VALUES (?, ?, ?)",
+            (token_hash, expires_at, _utcnow())) is not None
+
+    def session_is_valid(self, token_hash: str, now: Optional[int] = None) -> bool:
+        rows = self._read(
+            "SELECT 1 AS valid FROM dashboard_sessions WHERE token_hash = ? AND expires_at > ? LIMIT 1",
+            (token_hash, int(time.time()) if now is None else now))
+        return bool(rows)
+
+    def revoke_session(self, token_hash: str) -> None:
+        self._write("DELETE FROM dashboard_sessions WHERE token_hash = ?", (token_hash,))
+
+    def record_failed_login(self, lockout_key: str, attempted_at: float,
+                            window_seconds: int, max_rows: int) -> int:
+        """Record a failed login and keep the shared attempt table bounded."""
+        cutoff = attempted_at - window_seconds
+        self._write("DELETE FROM dashboard_login_attempts WHERE attempted_at < ?", (cutoff,))
+        self._write(
+            "INSERT INTO dashboard_login_attempts (lockout_key, attempted_at) VALUES (?, ?)",
+            (lockout_key, attempted_at))
+        count_rows = self._read("SELECT COUNT(*) AS c FROM dashboard_login_attempts")
+        excess = max(0, (count_rows[0]["c"] if count_rows else 0) - max_rows)
+        if excess:
+            self._write(
+                "DELETE FROM dashboard_login_attempts WHERE id IN"
+                " (SELECT id FROM dashboard_login_attempts ORDER BY attempted_at, id LIMIT ?)",
+                (excess,))
+        return self.failed_login_count(lockout_key, cutoff)
+
+    def failed_login_count(self, lockout_key: str, cutoff: float) -> int:
+        rows = self._read(
+            "SELECT COUNT(*) AS c FROM dashboard_login_attempts"
+            " WHERE lockout_key = ? AND attempted_at >= ?",
+            (lockout_key, cutoff))
+        return rows[0]["c"] if rows else 0
+
+    def clear_failed_logins(self, lockout_key: str) -> None:
+        self._write("DELETE FROM dashboard_login_attempts WHERE lockout_key = ?", (lockout_key,))
+
+    def login_attempt_row_count(self) -> int:
+        rows = self._read("SELECT COUNT(*) AS c FROM dashboard_login_attempts")
+        return rows[0]["c"] if rows else 0
 
     # ------------------------------------------------------------------ reviews
 

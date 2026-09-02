@@ -5,7 +5,6 @@ from fastapi.testclient import TestClient
 
 import pr_agent.servers.dashboard_api as dashboard_api
 from pr_agent.dashboard.storage import DashboardStorage
-from pr_agent.servers.dashboard_api import router
 
 
 @pytest.fixture()
@@ -32,18 +31,8 @@ def client(storage, monkeypatch):
     from fastapi import FastAPI
 
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(dashboard_api.router)
     return TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def _reset_lockout_state():
-    """Tests share the process with real lockout maps; reset between tests."""
-    dashboard_api._failed_attempts.clear()
-    dashboard_api._sessions.clear()
-    yield
-    dashboard_api._failed_attempts.clear()
-    dashboard_api._sessions.clear()
 
 
 def _login(client):
@@ -131,7 +120,7 @@ class TestClientIp:
         monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
         assert dashboard_api._client_ip(make_request("1.2.3.4, 5.6.7.8")) == "10.0.0.1"
 
-    def test_lockout_map_bounded(self, client, monkeypatch):
+    def test_lockout_map_bounded(self, client, storage, monkeypatch):
         from fastapi import Request
         from starlette.datastructures import Headers
 
@@ -145,15 +134,16 @@ class TestClientIp:
             return req
 
         monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
-        monkeypatch.setattr(dashboard_api, "MAX_LOCKOUT_KEYS", 50)
+        monkeypatch.setattr(dashboard_api, "MAX_LOCKOUT_KEYS", 10)
         for i in range(200):
             dashboard_api._record_failed_attempt(dashboard_api._lockout_key(make_request(f"10.0.{i}.1")))
-        assert len(dashboard_api._failed_attempts) <= 50
-        # the newest keys survive eviction
-        assert "10.0.199.1" in dashboard_api._failed_attempts
-        dashboard_api._failed_attempts.clear()
+        assert storage.login_attempt_row_count() <= 10 * dashboard_api.MAX_FAILED_ATTEMPTS
+        newest = dashboard_api._credential_hash("10.0.199.1")
+        assert storage.failed_login_count(newest, 0) == 1
 
-    def test_lockout_entries_expire(self, client, monkeypatch):
+    def test_lockout_entries_expire(self, client, storage, monkeypatch):
+        import time as _time
+
         from fastapi import Request
         from starlette.datastructures import Headers
 
@@ -165,13 +155,13 @@ class TestClientIp:
         req._headers = Headers({"host": "h"})
         monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
         key = dashboard_api._lockout_key(req)
-        dashboard_api._record_failed_attempt(key)
-        assert key in dashboard_api._failed_attempts
-        # age the entry past the window; the next failed login elsewhere evicts it
-        old = dashboard_api._failed_attempts[key]
-        dashboard_api._failed_attempts[key] = [t - dashboard_api.LOCKOUT_SECONDS - 1 for t in old]
+        key_hash = dashboard_api._credential_hash(key)
+        storage.record_failed_login(
+            key_hash, _time.time() - dashboard_api.LOCKOUT_SECONDS - 1,
+            dashboard_api.LOCKOUT_SECONDS, 100)
+        # the next failed login removes attempts older than the lockout window
         dashboard_api._record_failed_attempt("some-other-key")
-        assert key not in dashboard_api._failed_attempts
+        assert storage.failed_login_count(key_hash, 0) == 0
 
 
 class TestSameOrigin:
@@ -227,6 +217,51 @@ class TestSameOrigin:
 
 
 class TestProtectedRoutes:
+    def test_config_save_without_restart_reports_not_restarted(self, client):
+        auth = _auth_header(client)
+        resp = client.put(
+            "/api/v1/dashboard/config",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"},
+            json={"model": "openai/gpt-test", "restart": False})
+        assert resp.status_code == 200
+        assert resp.json()["data"]["restarted"] is False
+        assert resp.json()["data"]["restart_started"] is False
+
+    def test_config_rejects_string_restart_flag(self, client):
+        auth = _auth_header(client)
+        resp = client.put(
+            "/api/v1/dashboard/config",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"},
+            json={"model": "openai/gpt-test", "restart": "false"})
+        assert resp.status_code == 422
+
+    def test_ops_reports_command_not_started(self, client, monkeypatch):
+        auth = _auth_header(client)
+        monkeypatch.setattr(
+            dashboard_api.ops, "restart_container",
+            lambda: {"started": False, "task_id": None, "already_running": False,
+                     "output": ["docker unavailable"]})
+        resp = client.post(
+            "/api/v1/dashboard/ops/restart",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"})
+        assert resp.status_code == 503
+        assert resp.json()["code"] == "OPERATION_NOT_STARTED"
+        assert resp.json()["data"]["task_id"] is None
+
+    def test_audit_log_limit_is_clamped_at_lower_bound(self, client, storage, monkeypatch):
+        captured = {}
+        original = storage.list_audit_logs
+
+        def capture_limit(limit):
+            captured["limit"] = limit
+            return original(limit)
+
+        monkeypatch.setattr(storage, "list_audit_logs", capture_limit)
+        auth = _auth_header(client)
+        resp = client.get("/api/v1/dashboard/audit-logs?limit=-1", headers=auth)
+        assert resp.status_code == 200
+        assert captured["limit"] == 1
+
     def test_reviews_list_and_detail(self, client, storage):
         request_id = storage.create_review(repo_name="a/b", pr_number=1, pr_url="u")
         storage.complete_review(request_id, verdict="APPROVE")

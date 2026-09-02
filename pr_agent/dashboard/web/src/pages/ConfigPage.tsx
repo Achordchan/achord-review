@@ -60,8 +60,16 @@ export default function ConfigPage() {
       delete payload.key
       // a typed replacement is submitted; empty means "keep the stored secret"
       if (keySecret) payload.key = keySecret
-      const body = await api.put<{ restarted: boolean }>('/api/v1/dashboard/config', payload)
-      toast.success('配置已保存', body.restarted ? '容器重启中，页面将在 30 秒后自动刷新' : '变更已热生效，无需重启')
+      const body = await api.put<{
+        restarted: boolean
+        restart_started: boolean
+        restart_output: string[]
+      }>('/api/v1/dashboard/config', payload)
+      if (restart && !body.restarted) {
+        toast.error('配置已保存，但重启未发起', body.restart_output[0] ?? '请在宿主机重启服务')
+      } else {
+        toast.success('配置已保存', body.restarted ? '容器重启中，页面将在 30 秒后自动刷新' : '变更已热生效，无需重启')
+      }
       setDirty(false)
       if (body.restarted) {
         setConfirmRestart(false)

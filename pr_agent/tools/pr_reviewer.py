@@ -98,8 +98,8 @@ def _audit_verdict(reviewer: "PRReviewer", review_data: Optional[dict]) -> tuple
     return "", ""
 
 
-def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: str,
-                    prediction: Optional[str]) -> None:
+async def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: str,
+                          prediction: Optional[str]) -> None:
     try:
         from pr_agent.dashboard.audit import review_finished
         review_data = reviewer.review_data
@@ -107,25 +107,25 @@ def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: str,
         if review_data:
             issues = (review_data.get("review") or {}).get("key_issues_to_review") or []
         verdict, reason = _audit_verdict(reviewer, review_data)
-        review_finished(request_id, verdict=verdict, verdict_reason=reason,
-                        markdown_output=pr_review, raw_prediction=prediction, issues=issues)
+        await review_finished(request_id, verdict=verdict, verdict_reason=reason,
+                              markdown_output=pr_review, raw_prediction=prediction, issues=issues)
     except Exception as e:
         get_logger().debug(f"Dashboard audit (finished) skipped, error: {e}")
 
 
-def _audit_failed(request_id: str, error: Exception) -> None:
+async def _audit_failed(request_id: str, error: Exception) -> None:
     try:
         from pr_agent.dashboard.audit import review_failed
-        review_failed(request_id, str(error))
+        await review_failed(request_id, str(error))
     except Exception as e:
         get_logger().debug(f"Dashboard audit (failed) skipped, error: {e}")
 
 
-def _audit_skipped(request_id: str, reason: str) -> None:
+async def _audit_skipped(request_id: str, reason: str) -> None:
     """Close out a RUNNING record for a run that exited before publishing."""
     try:
         from pr_agent.dashboard.audit import review_skipped
-        review_skipped(request_id, reason)
+        await review_skipped(request_id, reason)
     except Exception as e:
         get_logger().debug(f"Dashboard audit (skipped) skipped, error: {e}")
 
@@ -253,14 +253,14 @@ class PRReviewer:
         try:
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
-                _audit_skipped(audit_request_id, "PR has no files")
+                await _audit_skipped(audit_request_id, "PR has no files")
                 return None
 
             if self.incremental.is_incremental:
                 can_run = self._can_run_incremental_review()
                 # If the gate disabled incremental (e.g., commits_range is None), fall through to full review.
                 if not can_run and self.incremental.is_incremental:
-                    _audit_skipped(audit_request_id, "incremental review gate closed")
+                    await _audit_skipped(audit_request_id, "incremental review gate closed")
                     return None
 
             # if isinstance(self.args, list) and self.args and self.args[0] == 'auto_approve':
@@ -288,7 +288,7 @@ class PRReviewer:
                 if get_settings().config.publish_output:
                     self.git_provider.publish_comment(f"Incremental Review Skipped\n"
                                     f"No files were changed since the [previous PR Review]({previous_review_url})")
-                _audit_skipped(audit_request_id, "incremental review: no new files")
+                await _audit_skipped(audit_request_id, "incremental review: no new files")
                 return None
 
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
@@ -303,7 +303,7 @@ class PRReviewer:
 
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
-                _audit_skipped(audit_request_id, "model returned no prediction")
+                await _audit_skipped(audit_request_id, "model returned no prediction")
                 return None
 
             pr_review = self._prepare_pr_review()
@@ -314,7 +314,7 @@ class PRReviewer:
                 # worker that blocks there stops answering webhooks. In a thread the wait
                 # can be long enough to be worth having.
                 await asyncio.to_thread(self._publish_single_review, pr_review, verdict_at_start)
-                _audit_finished(self, audit_request_id, pr_review, self.prediction)
+                await _audit_finished(self, audit_request_id, pr_review, self.prediction)
                 return
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -325,7 +325,7 @@ class PRReviewer:
                 get_logger().info(reason)
                 get_settings().data = {"artifact": pr_review}
                 self._submit_review_verdict()
-                _audit_finished(self, audit_request_id, pr_review, self.prediction)
+                await _audit_finished(self, audit_request_id, pr_review, self.prediction)
                 return
 
             # publish the review
@@ -354,11 +354,11 @@ class PRReviewer:
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
 
             self._submit_review_verdict()
-            _audit_finished(self, audit_request_id, pr_review, self.prediction)
+            await _audit_finished(self, audit_request_id, pr_review, self.prediction)
         except Exception as e:
             review_failed = True
             get_logger().error(f"Failed to review PR: {e}")
-            _audit_failed(audit_request_id, e)
+            await _audit_failed(audit_request_id, e)
             if get_settings().config.get("propagate_tool_errors", False):
                 raise
         finally:

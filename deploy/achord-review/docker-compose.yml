@@ -26,11 +26,11 @@ services:
       # Dashboard SQLite database (review history, audit logs); survives restarts.
       - ./data:/app/data
     environment:
-      # In-memory dashboard sessions live per worker process, so this
-      # deployment must run exactly one worker — with several, a login served
-      # by one worker would 401 on a sibling. One uvicorn worker still answers
-      # health checks while a review runs (all I/O is async).
-      GUNICORN_WORKERS: "1"
+      # Keep at least two workers (the gunicorn default) so a slow provider call
+      # cannot stall health checks and unrelated webhooks. Dashboard sessions
+      # and login lockouts are shared through SQLite; config changes are picked
+      # up by each worker on its next request.
+      GUNICORN_MAX_WORKERS: "2"
     mem_limit: 900m
     logging:
       driver: json-file

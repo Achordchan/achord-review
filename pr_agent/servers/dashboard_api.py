@@ -9,6 +9,7 @@ front end can wire them up before the backing features ship.
 """
 
 import asyncio
+import hashlib
 import hmac
 import os
 import secrets
@@ -17,7 +18,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Cookie, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from pr_agent.config_loader import get_settings
 from pr_agent.dashboard import ops
@@ -36,17 +37,9 @@ LOCKOUT_SECONDS = 15 * 60
 # so clients cannot rotate their X-Forwarded-For to evade the login lockout.
 TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "1"))
 
-# in-process session / lockout state; a restart simply logs everyone back in.
-# Sessions live per worker process, so this deployment must run exactly one
-# gunicorn worker (the shipped compose file sets GUNICORN_WORKERS=1): with
-# several workers, a login against one would 401 on a sibling.
-_sessions: Dict[str, float] = {}
-_failed_attempts: Dict[str, list] = {}
-# Global bound on tracked lockout keys. Unauthenticated requests can mint
-# arbitrarily many distinct keys (per-IP, and the socket address itself is
-# spoofable only up to the number of real source addresses); without a cap the
-# map grows without bound. Beyond the cap the oldest entries are evicted —
-# a lockout being lifted slightly early is acceptable, unbounded memory is not.
+# Session and lockout state is persisted in the dashboard SQLite database so
+# login remains stable across gunicorn workers. Only SHA-256 digests are stored;
+# bearer tokens and source addresses never enter the database as credentials.
 MAX_LOCKOUT_KEYS = 10_000
 
 
@@ -82,58 +75,38 @@ def _lockout_key(request: Request) -> str:
     return _client_ip(request) or "unknown"
 
 
+def _credential_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _is_locked_out(key: str) -> bool:
-    attempts = _failed_attempts.get(key, [])
-    now = time.monotonic()
-    return bool(attempts) and len(attempts) >= MAX_FAILED_ATTEMPTS and now - attempts[0] < LOCKOUT_SECONDS
+    count = get_storage().failed_login_count(
+        _credential_hash(key), time.time() - LOCKOUT_SECONDS)
+    return count >= MAX_FAILED_ATTEMPTS
 
 
-def _record_failed_attempt(key: str) -> None:
-    now = time.monotonic()
-    attempts = [t for t in _failed_attempts.get(key, []) if now - t < LOCKOUT_SECONDS]
-    attempts.append(now)
-    _failed_attempts[key] = attempts
-    _evict_lockout_state(now)
-
-
-def _evict_lockout_state(now: float) -> None:
-    """Drop expired entries and, if still over the global bound, the oldest.
-
-    Called on each failed login: a failed login is the only event that grows
-    the map, so this keeps the map proportional to actual attack pressure.
-    """
-    expired = [k for k, stamps in _failed_attempts.items()
-               if not stamps or now - stamps[-1] >= LOCKOUT_SECONDS]
-    for k in expired:
-        _failed_attempts.pop(k, None)
-    while len(_failed_attempts) > MAX_LOCKOUT_KEYS:
-        oldest = min(_failed_attempts, key=lambda k: _failed_attempts[k][-1])
-        _failed_attempts.pop(oldest, None)
+def _record_failed_attempt(key: str) -> int:
+    return get_storage().record_failed_login(
+        _credential_hash(key), time.time(), LOCKOUT_SECONDS,
+        MAX_LOCKOUT_KEYS * MAX_FAILED_ATTEMPTS)
 
 
 def _clear_failed_attempts(key: str) -> None:
-    _failed_attempts.pop(key, None)
+    get_storage().clear_failed_logins(_credential_hash(key))
 
 
 def _create_session() -> str:
     token = secrets.token_urlsafe(32)
-    _sessions[token] = time.monotonic() + SESSION_TTL_SECONDS
-    # opportunistic cleanup of expired sessions
-    for stale in [t for t, exp in _sessions.items() if exp < time.monotonic()]:
-        _sessions.pop(stale, None)
+    if not get_storage().create_session(
+            _credential_hash(token), int(time.time()) + SESSION_TTL_SECONDS):
+        raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试")
     return token
 
 
 def _session_valid(token: Optional[str]) -> bool:
     if not token:
         return False
-    expiry = _sessions.get(token)
-    if expiry is None:
-        return False
-    if expiry < time.monotonic():
-        _sessions.pop(token, None)
-        return False
-    return True
+    return get_storage().session_is_valid(_credential_hash(token))
 
 
 def require_auth(request: Request, dashboard_session: Optional[str] = Cookie(None)) -> None:
@@ -153,7 +126,8 @@ def require_same_origin(request: Request) -> None:
     implement Fetch Metadata send Sec-Fetch-Site on every request; when the
     header is present it must say same-origin. When it is absent (older
     browser or scripted client) fall back to an exact Origin/Referer match.
-    Bearer-token requests skip the cookie entirely and are unaffected.
+    Browser requests using either supported credential still provide this
+    origin evidence; non-browser bearer clients can send an explicit Origin.
     """
     fetch_site = request.headers.get("sec-fetch-site")
     if fetch_site:
@@ -195,8 +169,8 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
     if not expected:
         raise HTTPException(status_code=503, detail="管理员密码未配置（config.toml [dashboard] admin_password）")
     if not hmac.compare_digest(body.password, expected):
-        _record_failed_attempt(key)
-        remaining = max(0, MAX_FAILED_ATTEMPTS - len(_failed_attempts.get(key, [])))
+        failed_count = _record_failed_attempt(key)
+        remaining = max(0, MAX_FAILED_ATTEMPTS - failed_count)
         get_logger().warning(f"Dashboard login failed from {key}")
         raise HTTPException(status_code=401, detail=f"密码错误，剩余尝试次数 {remaining}")
     _clear_failed_attempts(key)
@@ -219,13 +193,13 @@ async def auth_me(request: Request, dashboard_session: Optional[str] = Cookie(No
 async def auth_logout(request: Request, response: Response,
                       dashboard_session: Optional[str] = Cookie(None)):
     # revoke whichever credential authenticated this request: the cookie token
-    # and the bearer token are both real sessions in _sessions, and a scripted
+    # and the bearer token are both real sessions in shared storage, and a scripted
     # client logging out via the bearer path must lose access immediately
     if dashboard_session:
-        _sessions.pop(dashboard_session, None)
+        get_storage().revoke_session(_credential_hash(dashboard_session))
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
-        _sessions.pop(auth[7:].strip(), None)
+        get_storage().revoke_session(_credential_hash(auth[7:].strip()))
     response.delete_cookie(SESSION_COOKIE, path="/")
     return _ok(message="已退出登录")
 
@@ -234,7 +208,7 @@ async def auth_logout(request: Request, response: Response,
 
 class ConfigUpdateRequest(BaseModel):
     model_config = {"extra": "allow"}
-    restart: bool = False
+    restart: StrictBool = False
 
 
 @router.get("/config")
@@ -244,12 +218,13 @@ async def get_config(request: Request, dashboard_session: Optional[str] = Cookie
 
 
 @router.put("/config")
-async def put_config(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+async def put_config(body: ConfigUpdateRequest, request: Request,
+                     dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
     require_same_origin(request)
-    body = await request.json()
-    restart = bool(body.pop("restart", False))
-    fields = {k: v for k, v in body.items()
+    payload = body.model_dump()
+    restart = payload.pop("restart")
+    fields = {k: v for k, v in payload.items()
               if k in ("model", "reasoning_effort", "ai_timeout", "max_model_tokens",
                        "api_base", "key", "verdict_blocking_severities",
                        "num_max_findings", "ignore_glob", "extra_instructions")}
@@ -262,17 +237,14 @@ async def put_config(request: Request, dashboard_session: Optional[str] = Cookie
     # report what actually happened: without docker inside the container the
     # restart never starts, and the UI must not wait for one
     result = ops.restart_container() if restart else None
-    restart_started = bool(restart and result and result.get("task_id") and not result.get("already_running"))
+    restart_started = bool(restart and result and result.get("started"))
     already_running = bool(restart and result and result.get("already_running"))
-    if restart and not result:
-        restarted = False
-    elif already_running:
-        restarted = True
+    restarted = restart_started or already_running
     message = "配置已保存并热生效"
     if restart_started or already_running:
         message += "，容器重启中"
     elif restart:
-        message += "，但重启未发起（容器内无 docker），请在宿主机执行 docker restart"
+        message += "，但重启未发起，请检查受控 Docker 端点或在宿主机重启"
     return _ok({"restarted": restarted,
                 "restart_started": restart_started,
                 "restart_output": (result or {}).get("output", []) if restart else []},
@@ -286,7 +258,14 @@ async def ops_restart(request: Request, dashboard_session: Optional[str] = Cooki
     require_auth(request, dashboard_session)
     require_same_origin(request)
     result = ops.restart_container()
-    get_storage().add_audit_log("RESTART_CONTAINER", {}, ip_address=_client_ip(request))
+    started = bool(result.get("started") or result.get("already_running"))
+    get_storage().add_audit_log("RESTART_CONTAINER", {"started": started},
+                                ip_address=_client_ip(request))
+    if not started:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "code": "OPERATION_NOT_STARTED",
+                     "message": (result.get("output") or ["容器重启未发起"])[0], "data": result})
     return _ok(result, message="容器重启指令已下发")
 
 
@@ -295,7 +274,13 @@ async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cook
     require_auth(request, dashboard_session)
     require_same_origin(request)
     result = ops.git_pull()
-    get_storage().add_audit_log("GIT_PULL", {}, ip_address=_client_ip(request))
+    started = bool(result.get("started") or result.get("already_running"))
+    get_storage().add_audit_log("GIT_PULL", {"started": started}, ip_address=_client_ip(request))
+    if not started:
+        return JSONResponse(
+            status_code=503,
+            content={"success": False, "code": "OPERATION_NOT_STARTED",
+                     "message": (result.get("output") or ["git pull 未发起"])[0], "data": result})
     return _ok(result, message="git pull 已执行")
 
 
@@ -364,7 +349,7 @@ async def stats_overview(request: Request, dashboard_session: Optional[str] = Co
 async def audit_logs(request: Request, dashboard_session: Optional[str] = Cookie(None),
                      limit: int = 100):
     require_auth(request, dashboard_session)
-    return _ok({"items": get_storage().list_audit_logs(limit=min(limit, 500))})
+    return _ok({"items": get_storage().list_audit_logs(limit=max(1, min(limit, 500)))})
 
 
 # --------------------------------------------------------------- playground
