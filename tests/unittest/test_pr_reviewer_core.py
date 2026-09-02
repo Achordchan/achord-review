@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -692,6 +693,39 @@ async def test_run_records_an_empty_review_report_as_failed(monkeypatch):
     ]
     git_provider.remove_comment.assert_called_once_with(progress_comment)
     git_provider.remove_initial_comment.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_audits_cancellation_then_reraises(monkeypatch):
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = ["app.py"]
+    reviewer = _make_reviewer(git_provider)
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    audit_failed = AsyncMock()
+
+    monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
+    monkeypatch.setattr(pr_reviewer_module, "_audit_failed", audit_failed)
+    monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr(
+        pr_reviewer_module, "retry_with_fallback_models",
+        AsyncMock(side_effect=asyncio.CancelledError()))
+
+    settings = get_settings()
+    original_publish_output = settings.config.publish_output
+    try:
+        settings.config.publish_output = False
+        with pytest.raises(asyncio.CancelledError):
+            await reviewer.run()
+    finally:
+        settings.config.publish_output = original_publish_output
+
+    error = audit_failed.await_args.args[1]
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "review task cancelled"
+    git_provider.publish_comment.assert_not_called()
 
 
 @pytest.mark.asyncio

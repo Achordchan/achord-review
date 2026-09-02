@@ -394,6 +394,10 @@ class PRReviewer:
 
             self._submit_review_verdict()
             await _audit_finished(self, audit_request_id, pr_review, self.prediction)
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                _audit_failed(audit_request_id, RuntimeError("review task cancelled")))
+            raise
         except Exception as e:
             review_failed = True
             get_logger().error(f"Failed to review PR: {e}")

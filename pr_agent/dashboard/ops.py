@@ -58,7 +58,30 @@ def _operation_lock():
         lock_file.close()
 
 
-def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int) -> Dict[str, Any]:
+def _retain_operation_lock(lock_file, proc: subprocess.Popen) -> bool:
+    """Keep a duplicated flock alive until a surviving child actually exits."""
+    if lock_file is None:
+        return False
+    try:
+        retained_fd = os.dup(lock_file.fileno())
+    except OSError:
+        return False
+
+    def _wait_and_release() -> None:
+        try:
+            proc.wait()
+        except Exception as e:
+            get_logger().warning(f"Dashboard command exit monitor failed, error: {e}")
+        finally:
+            os.close(retained_fd)
+
+    threading.Thread(
+        target=_wait_and_release, name="dashboard-command-lock-retainer", daemon=True).start()
+    return True
+
+
+def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int,
+                         lock_file=None) -> Dict[str, Any]:
     """Run a fixed command while retaining only its last bounded output bytes."""
     proc = subprocess.Popen(
         argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -77,6 +100,7 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int) -> Dic
     reader.start()
     timed_out = False
     kill_wait_expired = False
+    lock_retained = False
     try:
         exit_code = proc.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
@@ -90,15 +114,18 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int) -> Dic
         except subprocess.TimeoutExpired:
             kill_wait_expired = True
             exit_code = None
+            lock_retained = _retain_operation_lock(lock_file, proc)
     reader.join(timeout=5)
     output = output_tail.decode("utf-8", errors="replace").splitlines()
     if timed_out:
         output.append(f"命令超过 {timeout_seconds} 秒，已终止")
     if kill_wait_expired:
-        output.append("进程组收到强制终止信号后仍未退出")
-    return {"started": True, "completed": True,
+        lock_state = "运维锁将保持到进程退出" if lock_retained else "无法确认运维锁保持状态"
+        output.append(f"进程组收到强制终止信号后仍未退出，{lock_state}")
+    return {"started": True, "completed": not kill_wait_expired,
             "exit_code": None if timed_out else exit_code,
-            "timed_out": timed_out, "output": output}
+            "timed_out": timed_out, "lock_retained": lock_retained,
+            "output": output}
 
 
 def restart_container() -> Dict[str, Any]:
@@ -143,7 +170,8 @@ def git_pull() -> Dict[str, Any]:
         try:
             return _run_bounded_command(
                 ["git", "-C", REPO_DIR, "pull", "--ff-only"],
-                cwd=REPO_DIR, timeout_seconds=GIT_PULL_TIMEOUT_SECONDS)
+                cwd=REPO_DIR, timeout_seconds=GIT_PULL_TIMEOUT_SECONDS,
+                lock_file=lock_file)
         except OSError:
             return _not_started("git 或代码目录不可用，git pull 未发起")
 

@@ -146,15 +146,43 @@ def test_bounded_command_reports_when_process_survives_kill_wait(tmp_path, monke
         def wait(self, timeout):
             raise subprocess.TimeoutExpired(cmd="git pull", timeout=timeout)
 
-    monkeypatch.setattr(ops.subprocess, "Popen", lambda *args, **kwargs: StuckProcess())
+    process = StuckProcess()
+    retained = []
+    monkeypatch.setattr(ops.subprocess, "Popen", lambda *args, **kwargs: process)
     monkeypatch.setattr(ops.os, "killpg", lambda *args: None)
+    monkeypatch.setattr(
+        ops, "_retain_operation_lock",
+        lambda lock_file, proc: retained.append((lock_file, proc)) or True)
 
     result = ops._run_bounded_command(
-        ["git", "pull"], cwd=str(tmp_path), timeout_seconds=1)
+        ["git", "pull"], cwd=str(tmp_path), timeout_seconds=1, lock_file="lock")
 
     assert result["timed_out"] is True
+    assert result["completed"] is False
     assert result["exit_code"] is None
-    assert result["output"][-1] == "进程组收到强制终止信号后仍未退出"
+    assert result["lock_retained"] is True
+    assert retained == [("lock", process)]
+    assert "运维锁将保持到进程退出" in result["output"][-1]
+
+
+def test_retained_lock_blocks_operations_until_process_exits(monkeypatch):
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(0.2)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    with ops._operation_lock() as lock_file:
+        assert lock_file is not None
+        assert ops._retain_operation_lock(lock_file, process) is True
+
+    with ops._operation_lock() as blocked_lock:
+        assert blocked_lock is None
+    process.wait(timeout=2)
+    for _ in range(20):
+        with ops._operation_lock() as released_lock:
+            if released_lock is not None:
+                break
+        __import__("time").sleep(0.01)
+    assert released_lock is not None
 
 
 def test_operations_reject_while_another_worker_holds_lock(monkeypatch):
