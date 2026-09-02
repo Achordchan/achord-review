@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE TABLE IF NOT EXISTS dashboard_sessions (
     token_hash TEXT PRIMARY KEY,
     expires_at INTEGER NOT NULL,
+    password_generation INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS dashboard_auth_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     password_fingerprint TEXT NOT NULL,
     fingerprint_salt BLOB,
+    generation INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
 
@@ -178,8 +180,28 @@ class DashboardStorage:
             auth_columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(dashboard_auth_state)").fetchall()
             }
+            session_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(dashboard_sessions)").fetchall()
+            }
+            auth_generation_migrated = False
+            session_generation_migrated = False
             if "fingerprint_salt" not in auth_columns:
                 conn.execute("ALTER TABLE dashboard_auth_state ADD COLUMN fingerprint_salt BLOB")
+            if "generation" not in auth_columns:
+                conn.execute(
+                    "ALTER TABLE dashboard_auth_state ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
+                auth_generation_migrated = True
+            if "password_generation" not in session_columns:
+                conn.execute(
+                    "ALTER TABLE dashboard_sessions"
+                    " ADD COLUMN password_generation INTEGER NOT NULL DEFAULT 0")
+                session_generation_migrated = True
+            if auth_generation_migrated or session_generation_migrated:
+                # Legacy sessions have no trustworthy generation and must not revive.
+                conn.execute("DELETE FROM dashboard_sessions")
+                conn.execute(
+                    "UPDATE dashboard_auth_state SET generation=MAX(1, generation + 1), updated_at=?",
+                    (_utcnow(),))
             self._maintain_review_rows(conn)
         self._protect_storage_permissions()
         self._last_stale_cleanup = time.monotonic()
@@ -269,15 +291,39 @@ class DashboardStorage:
 
     def create_session(self, token_hash: str, expires_at: int) -> bool:
         """Persist a dashboard session so every gunicorn worker can validate it."""
-        self._write("DELETE FROM dashboard_sessions WHERE expires_at <= ?", (int(time.time()),))
-        return self._write(
-            "INSERT OR REPLACE INTO dashboard_sessions (token_hash, expires_at, created_at)"
-            " VALUES (?, ?, ?)",
-            (token_hash, expires_at, _utcnow())) is not None
+        def _create(conn: sqlite3.Connection) -> None:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT generation FROM dashboard_auth_state WHERE id = 1").fetchone()
+            if row is None:
+                raise RuntimeError("admin password state is not initialized")
+            conn.execute("DELETE FROM dashboard_sessions WHERE expires_at <= ?", (int(time.time()),))
+            conn.execute(
+                "INSERT OR REPLACE INTO dashboard_sessions"
+                " (token_hash, expires_at, password_generation, created_at) VALUES (?, ?, ?, ?)",
+                (token_hash, expires_at, int(row["generation"]), _utcnow()))
+
+        return self._transaction(_create, "session creation")
+
+    def create_session_for_password(self, token_hash: str, expires_at: int, password: str) -> bool:
+        """Synchronize password state and create its generation-bound session atomically."""
+        def _create(conn: sqlite3.Connection) -> None:
+            conn.execute("BEGIN IMMEDIATE")
+            generation = self._sync_admin_password_state(conn, password)
+            conn.execute("DELETE FROM dashboard_sessions WHERE expires_at <= ?", (int(time.time()),))
+            conn.execute(
+                "INSERT OR REPLACE INTO dashboard_sessions"
+                " (token_hash, expires_at, password_generation, created_at) VALUES (?, ?, ?, ?)",
+                (token_hash, expires_at, generation, _utcnow()))
+
+        return self._transaction(_create, "password-bound session creation")
 
     def session_is_valid(self, token_hash: str, now: Optional[int] = None) -> bool:
         rows = self._read(
-            "SELECT 1 AS valid FROM dashboard_sessions WHERE token_hash = ? AND expires_at > ? LIMIT 1",
+            "SELECT 1 AS valid FROM dashboard_sessions AS session"
+            " JOIN dashboard_auth_state AS auth"
+            " ON auth.id = 1 AND auth.generation = session.password_generation"
+            " WHERE session.token_hash = ? AND session.expires_at > ? LIMIT 1",
             (token_hash, int(time.time()) if now is None else now))
         return bool(rows)
 
@@ -292,27 +338,44 @@ class DashboardStorage:
         """Persist password generation and purge sessions on every observed rotation."""
         def _sync(conn: sqlite3.Connection) -> None:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT password_fingerprint, fingerprint_salt"
-                " FROM dashboard_auth_state WHERE id = 1").fetchone()
-            salt = bytes(row["fingerprint_salt"]) if row and row["fingerprint_salt"] else secrets.token_bytes(16)
-            password_fingerprint = _password_fingerprint(password, salt)
-            if row is None:
-                conn.execute(
-                    "INSERT INTO dashboard_auth_state"
-                    " (id, password_fingerprint, fingerprint_salt, updated_at)"
-                    " VALUES (1, ?, ?, ?)",
-                    (password_fingerprint, salt, _utcnow()))
-            elif (not row["fingerprint_salt"]
-                  or row["password_fingerprint"] != password_fingerprint):
-                conn.execute("DELETE FROM dashboard_sessions")
-                conn.execute(
-                    "UPDATE dashboard_auth_state SET password_fingerprint = ?,"
-                    " fingerprint_salt = ?, updated_at = ?"
-                    " WHERE id = 1",
-                    (password_fingerprint, salt, _utcnow()))
+            self._sync_admin_password_state(conn, password)
 
         return self._transaction(_sync, "admin-password synchronization")
+
+    @staticmethod
+    def _sync_admin_password_state(conn: sqlite3.Connection, password: str) -> int:
+        row = conn.execute(
+            "SELECT password_fingerprint, fingerprint_salt, generation"
+            " FROM dashboard_auth_state WHERE id = 1").fetchone()
+        salt = bytes(row["fingerprint_salt"]) if row and row["fingerprint_salt"] else secrets.token_bytes(16)
+        password_fingerprint = _password_fingerprint(password, salt)
+        if row is None:
+            generation = 1
+            conn.execute(
+                "INSERT INTO dashboard_auth_state"
+                " (id, password_fingerprint, fingerprint_salt, generation, updated_at)"
+                " VALUES (1, ?, ?, ?, ?)",
+                (password_fingerprint, salt, generation, _utcnow()))
+            return generation
+        generation = max(1, int(row["generation"] or 0))
+        if (not row["fingerprint_salt"]
+                or row["password_fingerprint"] != password_fingerprint):
+            generation += 1
+            conn.execute("DELETE FROM dashboard_sessions")
+            conn.execute(
+                "UPDATE dashboard_auth_state SET password_fingerprint = ?,"
+                " fingerprint_salt = ?, generation = ?, updated_at = ?"
+                " WHERE id = 1",
+                (password_fingerprint, salt, generation, _utcnow()))
+        elif int(row["generation"] or 0) < 1:
+            conn.execute(
+                "UPDATE dashboard_auth_state SET generation = ?, updated_at = ? WHERE id = 1",
+                (generation, _utcnow()))
+        return generation
+
+    def admin_password_generation(self) -> Optional[int]:
+        rows = self._read("SELECT generation FROM dashboard_auth_state WHERE id = 1")
+        return int(rows[0]["generation"]) if rows else None
 
     def verify_login_attempt(self, lockout_key: str, password_matches: bool,
                              attempted_at: float, window_seconds: int,

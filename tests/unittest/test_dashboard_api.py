@@ -143,6 +143,22 @@ class TestAuth:
         monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "test-pass-123")
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
 
+    def test_cached_password_revalidates_shared_generation(self, client, storage):
+        assert storage.sync_admin_password("password-a")
+        first_generation = storage.admin_password_generation()
+        dashboard_api._password_sync_state.update({
+            "db_path": storage.db_path,
+            "password": "password-a",
+            "generation": first_generation,
+        })
+        assert storage.sync_admin_password("password-b")
+        second_generation = storage.admin_password_generation()
+
+        assert dashboard_api._sync_admin_password("password-a") is True
+
+        assert storage.admin_password_generation() == second_generation + 1
+        assert dashboard_api._password_sync_state["generation"] == second_generation + 1
+
 
 class TestClientIp:
     def test_trusted_hops_read_rightmost_entries(self, client, monkeypatch):

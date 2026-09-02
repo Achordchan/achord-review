@@ -327,8 +327,40 @@ class TestAuditLogs:
 
 
 class TestSharedAuthState:
+    def test_generation_migration_invalidates_legacy_sessions(self, tmp_path):
+        import sqlite3
+
+        db_path = str(tmp_path / "legacy-auth.db")
+        with sqlite3.connect(db_path) as conn:
+            conn.executescript("""
+                CREATE TABLE dashboard_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    expires_at INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE dashboard_auth_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    password_fingerprint TEXT NOT NULL,
+                    fingerprint_salt BLOB,
+                    updated_at TEXT NOT NULL
+                );
+            """)
+            conn.execute(
+                "INSERT INTO dashboard_sessions VALUES ('legacy-session', 4000000000, '2026-01-01')")
+            conn.execute(
+                "INSERT INTO dashboard_auth_state VALUES (1, 'legacy-fingerprint', ?, '2026-01-01')",
+                (b"legacy-salt",))
+
+        migrated = DashboardStorage(db_path=db_path)
+        migrated.initialize()
+
+        assert migrated._read("SELECT * FROM dashboard_sessions") == []
+        state = migrated._read("SELECT generation FROM dashboard_auth_state WHERE id = 1")[0]
+        assert state["generation"] >= 1
+
     def test_session_is_shared_across_storage_instances(self, storage):
         other = DashboardStorage(db_path=storage.db_path)
+        assert storage.sync_admin_password("shared-password")
         assert storage.create_session("token-hash", 4_000_000_000)
         assert other.session_is_valid("token-hash", now=1_000_000_000)
         other.revoke_session("token-hash")
@@ -363,6 +395,23 @@ class TestSharedAuthState:
         assert worker.sync_admin_password("shared-password")
         worker.initialize()
         assert worker.session_is_valid("shared-session", now=1_000_000_000)
+
+    def test_session_generation_blocks_rows_from_an_older_password_state(self, storage):
+        assert storage.sync_admin_password("password-a")
+        assert storage.create_session("session-a", 4_000_000_000)
+        storage._write("UPDATE dashboard_auth_state SET generation = generation + 1 WHERE id = 1")
+
+        assert not storage.session_is_valid("session-a", now=1_000_000_000)
+
+    def test_password_bound_session_creation_updates_generation_atomically(self, storage):
+        assert storage.sync_admin_password("password-a")
+        first_generation = storage.admin_password_generation()
+
+        assert storage.create_session_for_password(
+            "session-b", 4_000_000_000, "password-b")
+
+        assert storage.admin_password_generation() == first_generation + 1
+        assert storage.session_is_valid("session-b", now=1_000_000_000)
 
     def test_password_fingerprint_salt_is_unique_per_installation(self, tmp_path):
         first = DashboardStorage(db_path=str(tmp_path / "one" / "review.db"))

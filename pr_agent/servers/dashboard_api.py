@@ -43,7 +43,7 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 # login remains stable across gunicorn workers. Only SHA-256 digests are stored;
 # bearer tokens and source addresses never enter the database as credentials.
 MAX_LOCKOUT_KEYS = 10_000
-_password_sync_state = {"db_path": "", "password": None}
+_password_sync_state = {"db_path": "", "password": None, "generation": None}
 _password_sync_lock = threading.Lock()
 
 
@@ -104,13 +104,23 @@ def _sync_admin_password(password: str) -> bool:
     storage = get_storage()
     with _password_sync_lock:
         cached_password = _password_sync_state["password"]
-        if (storage.db_path == _password_sync_state["db_path"]
+        shared_generation = storage.admin_password_generation()
+        if (shared_generation is not None
+                and storage.db_path == _password_sync_state["db_path"]
+                and shared_generation == _password_sync_state["generation"]
                 and isinstance(cached_password, str)
                 and hmac.compare_digest(password.encode("utf-8"), cached_password.encode("utf-8"))):
             return True
         if not storage.sync_admin_password(password):
             return False
-        _password_sync_state.update({"db_path": storage.db_path, "password": password})
+        shared_generation = storage.admin_password_generation()
+        if shared_generation is None:
+            return False
+        _password_sync_state.update({
+            "db_path": storage.db_path,
+            "password": password,
+            "generation": shared_generation,
+        })
         return True
 
 
@@ -122,8 +132,10 @@ async def _create_session(verified_password: str) -> str:
         if not hmac.compare_digest(
                 verified_password.encode("utf-8"), current_password.encode("utf-8")):
             return "password_changed"
-        created = bool(_sync_admin_password(verified_password) and get_storage().create_session(
-            _session_hash(token, verified_password), int(time.time()) + SESSION_TTL_SECONDS))
+        created = get_storage().create_session_for_password(
+            _session_hash(token, verified_password),
+            int(time.time()) + SESSION_TTL_SECONDS,
+            verified_password)
         return "created" if created else "storage_error"
 
     result = await asyncio.to_thread(_create)
