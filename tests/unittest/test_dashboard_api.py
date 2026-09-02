@@ -90,30 +90,78 @@ class TestAuth:
 
 
 class TestClientIp:
-    def test_trusted_hops_strip_client_spoofing(self, client, monkeypatch):
+    def test_trusted_hops_read_rightmost_entries(self, client, monkeypatch):
         from fastapi import Request
+        from starlette.datastructures import Headers
 
         def make_request(xff):
             headers = {"x-forwarded-for": xff} if xff else {"host": "h"}
             scope = {
                 "type": "http", "method": "GET", "path": "/", "headers": [],
                 "query_string": b"", "client": ("10.0.0.1", 1234), "server": ("h", 80),
-                "test_headers": headers,
             }
             req = Request(scope)
-            req._headers = __import__("starlette.datastructures", fromlist=["Headers"]).Headers(headers)
+            req._headers = Headers(headers)
             return req
 
-        # one trusted hop: last value is what our nginx saw, the one before it
-        # is the real client — anything the client prepended is ignored
-        assert dashboard_api._client_ip(make_request("1.2.3.4, 5.6.7.8")) == "1.2.3.4"
-        # attacker rotating the FIRST value cannot change the derived key
-        assert dashboard_api._client_ip(make_request("evil, 1.2.3.4, 5.6.7.8")) == "1.2.3.4"
+        # one trusted hop: nginx APPENDS the address it saw, so the rightmost
+        # entry is the real client; the leftmost is client-supplied noise
+        assert dashboard_api._client_ip(make_request("1.2.3.4, 5.6.7.8")) == "5.6.7.8"
+        # rotating the prepended values cannot change the derived lockout key
+        assert dashboard_api._client_ip(make_request("evil, 1.2.3.4, 5.6.7.8")) == "5.6.7.8"
         # no header: fall back to the socket address
         assert dashboard_api._client_ip(make_request(None)) == "10.0.0.1"
-        # zero trusted hops: the raw socket address wins
+        # two trusted hops, chain shorter than hops: the header carries no
+        # fully-trusted entry, fall back to the socket address
+        monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 2)
+        assert dashboard_api._client_ip(make_request("1.2.3.4")) == "10.0.0.1"
+        # two hops: second-from-right is what the outer trusted hop observed
+        assert dashboard_api._client_ip(make_request("noise, 9.9.9.9, 8.8.8.8")) == "9.9.9.9"
+        # zero trusted hops: the header is ignored entirely
         monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
         assert dashboard_api._client_ip(make_request("1.2.3.4, 5.6.7.8")) == "10.0.0.1"
+
+    def test_lockout_map_bounded(self, client, monkeypatch):
+        from fastapi import Request
+        from starlette.datastructures import Headers
+
+        def make_request(ip):
+            scope = {
+                "type": "http", "method": "GET", "path": "/", "headers": [],
+                "query_string": b"", "client": (ip, 1234), "server": ("h", 80),
+            }
+            req = Request(scope)
+            req._headers = Headers({"host": "h"})
+            return req
+
+        monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
+        monkeypatch.setattr(dashboard_api, "MAX_LOCKOUT_KEYS", 50)
+        for i in range(200):
+            dashboard_api._record_failed_attempt(dashboard_api._lockout_key(make_request(f"10.0.{i}.1")))
+        assert len(dashboard_api._failed_attempts) <= 50
+        # the newest keys survive eviction
+        assert "10.0.199.1" in dashboard_api._failed_attempts
+        dashboard_api._failed_attempts.clear()
+
+    def test_lockout_entries_expire(self, client, monkeypatch):
+        from fastapi import Request
+        from starlette.datastructures import Headers
+
+        scope = {
+            "type": "http", "method": "GET", "path": "/", "headers": [],
+            "query_string": b"", "client": ("10.9.9.9", 1234), "server": ("h", 80),
+        }
+        req = Request(scope)
+        req._headers = Headers({"host": "h"})
+        monkeypatch.setattr(dashboard_api, "TRUSTED_PROXY_HOPS", 0)
+        key = dashboard_api._lockout_key(req)
+        dashboard_api._record_failed_attempt(key)
+        assert key in dashboard_api._failed_attempts
+        # age the entry past the window; the next failed login elsewhere evicts it
+        old = dashboard_api._failed_attempts[key]
+        dashboard_api._failed_attempts[key] = [t - dashboard_api.LOCKOUT_SECONDS - 1 for t in old]
+        dashboard_api._record_failed_attempt("some-other-key")
+        assert key not in dashboard_api._failed_attempts
 
 
 class TestProtectedRoutes:

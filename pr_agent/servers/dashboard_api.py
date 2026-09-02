@@ -42,6 +42,12 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "1"))
 # several workers, a login against one would 401 on a sibling.
 _sessions: Dict[str, float] = {}
 _failed_attempts: Dict[str, list] = {}
+# Global bound on tracked lockout keys. Unauthenticated requests can mint
+# arbitrarily many distinct keys (per-IP, and the socket address itself is
+# spoofable only up to the number of real source addresses); without a cap the
+# map grows without bound. Beyond the cap the oldest entries are evicted —
+# a lockout being lifted slightly early is acceptable, unbounded memory is not.
+MAX_LOCKOUT_KEYS = 10_000
 
 
 def _admin_password() -> str:
@@ -54,10 +60,12 @@ def _admin_password() -> str:
 def _client_ip(request: Request) -> str:
     """Client address, consuming only the trusted proxy hops' XFF entries.
 
-    gunicorn is run with --forwarded-allow-ips '*' behind our nginx, so each
-    hop appends the address it saw to X-Forwarded-For. With H hops, the real
-    client is the (H+1)-th value from the end; anything an attacker prepends
-    is ignored. With zero trusted hops the header is ignored entirely.
+    nginx appends the address it observed to X-Forwarded-For, so with H
+    trusted hops the real client is the H-th value counting from the RIGHT:
+    chain[-1] is what the last hop saw, chain[-2] what the second-to-last
+    saw, and so on. Anything further left was supplied by the client (or an
+    earlier hop) and is never trusted. With zero hops the header is ignored
+    entirely and the socket address is used.
     """
     hops = max(0, TRUSTED_PROXY_HOPS)
     if hops == 0:
@@ -65,11 +73,8 @@ def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
         chain = [part.strip() for part in forwarded.split(",") if part.strip()]
-        # chain[-1] is the address the last trusted hop saw; walk back H+1
-        # entries to reach the original client
-        index = len(chain) - 1 - hops
-        if index >= 0:
-            return chain[index]
+        if len(chain) >= hops:
+            return chain[-hops]
     return request.client.host if request.client else ""
 
 
@@ -88,6 +93,22 @@ def _record_failed_attempt(key: str) -> None:
     attempts = [t for t in _failed_attempts.get(key, []) if now - t < LOCKOUT_SECONDS]
     attempts.append(now)
     _failed_attempts[key] = attempts
+    _evict_lockout_state(now)
+
+
+def _evict_lockout_state(now: float) -> None:
+    """Drop expired entries and, if still over the global bound, the oldest.
+
+    Called on each failed login: a failed login is the only event that grows
+    the map, so this keeps the map proportional to actual attack pressure.
+    """
+    expired = [k for k, stamps in _failed_attempts.items()
+               if not stamps or now - stamps[-1] >= LOCKOUT_SECONDS]
+    for k in expired:
+        _failed_attempts.pop(k, None)
+    while len(_failed_attempts) > MAX_LOCKOUT_KEYS:
+        oldest = min(_failed_attempts, key=lambda k: _failed_attempts[k][-1])
+        _failed_attempts.pop(oldest, None)
 
 
 def _clear_failed_attempts(key: str) -> None:

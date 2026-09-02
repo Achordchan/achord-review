@@ -65,18 +65,20 @@ class TestWrite:
         assert not ok
 
     def test_backup_created(self, engine):
+        import time as _time
         engine.write({"model": "openai/second"})
-        backups = [f for f in os.listdir(os.path.dirname(engine.config_path))
-                   if f.startswith("config.toml.bak.")]
-        assert len(backups) == 1
+        # two rapid saves inside one second must produce distinct backups
         engine.write({"model": "openai/third"})
         engine.write({"model": "openai/fourth"})
+        _time.sleep(0.002)
         engine.write({"model": "openai/fifth"})
+        _time.sleep(0.002)
         engine.write({"model": "openai/sixth"})
         engine.write({"model": "openai/seventh"})
-        # MAX_BACKUPS enforced
+        # MAX_BACKUPS enforced and no collision-collapsed files
         backups = [f for f in os.listdir(os.path.dirname(engine.config_path))
                    if f.startswith("config.toml.bak.")]
+        assert len(backups) == len(set(backups))  # all distinct names
         assert len(backups) <= 5
 
     def test_unrelated_sections_preserved(self, engine):

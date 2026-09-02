@@ -3,6 +3,13 @@
 # The container binds to loopback only; the host's existing nginx terminates TLS and
 # reverse-proxies to it (see nginx-achord-review.conf). Do not publish 80/443 here:
 # nginx already owns those ports on the target host.
+#
+# Config layout: the host directory ./config is mounted over the container's
+# settings_prod directory. It must contain .secrets.toml. Migrating from the old
+# single-file layout (./config.toml on the host):
+#   mkdir -p config && mv config.toml config/.secrets.toml && chmod 600 config/.secrets.toml
+# The parent directory is mounted rather than the file itself so the dashboard
+# config editor can back up and atomically replace .secrets.toml.
 services:
   achord-review:
     build:
@@ -15,18 +22,9 @@ services:
     ports:
       - "127.0.0.1:33001:3000"
     volumes:
-      # Secrets live here, never baked into the image. The parent directory is
-      # mounted (not the file itself) so the dashboard config editor can back up
-      # and atomically replace config.toml — a single-file bind mount would be
-      # read-only for os.replace and every save would fail.
       - ./config:/app/pr_agent/settings_prod
       # Dashboard SQLite database (review history, audit logs); survives restarts.
       - ./data:/app/data
-      # One-click restart from the panel shells out to the host docker daemon.
-      # Read-only socket: the panel can restart the (fixed) container, nothing else.
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      # docker CLI for the restart button (the slim base image ships none)
-      - /usr/bin/docker:/usr/bin/docker:ro
     environment:
       # In-memory dashboard sessions live per worker process, so this
       # deployment must run exactly one worker — with several, a login served

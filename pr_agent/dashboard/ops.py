@@ -150,12 +150,29 @@ def diagnose() -> Dict[str, Any]:
 
 
 def tail_logs(max_lines: int = 200) -> List[str]:
-    """Best-effort recent log lines for the ops console."""
+    """Best-effort recent log lines for the ops console.
+
+    Seeks backwards from the end of the file instead of reading it whole: the
+    ops page polls this every few seconds and a multi-hundred-MB production
+    log must not be slurped into memory each time.
+    """
     try:
         log_file = os.environ.get("ACHORD_REVIEW_LOG_FILE", "")
-        if log_file and os.path.isfile(log_file):
-            with open(log_file, "r", errors="replace") as f:
-                return f.read().splitlines()[-max_lines:]
+        if not log_file or not os.path.isfile(log_file):
+            return []
+        chunk_size = 64 * 1024
+        with open(log_file, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            data = b""
+            pos = size
+            while pos > 0 and data.count(b"\n") <= max_lines:
+                read = min(chunk_size, pos)
+                pos -= read
+                f.seek(pos)
+                data = f.read(read) + data
+        lines = data.decode(errors="replace").splitlines()
+        return lines[-max_lines:]
     except Exception as e:
         get_logger().warning(f"Dashboard log tail failed, error: {e}")
     return []

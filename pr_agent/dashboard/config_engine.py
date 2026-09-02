@@ -16,6 +16,7 @@ import glob
 import os
 import shutil
 import tempfile
+import time
 import tomllib
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -186,7 +187,10 @@ class ConfigEngine:
                 raw.setdefault("ignore", {})["glob"] = value
 
     def _backup(self) -> None:
-        backup = f"{self.config_path}.bak.{int(__import__('time').time())}"
+        # millisecond suffix: two saves inside the same second must not overwrite
+        # each other's recovery snapshot
+        stamp = time.time()
+        backup = f"{self.config_path}.bak.{int(stamp)}{int(stamp * 1000) % 1000:03d}"
         shutil.copy2(self.config_path, backup)
         backups = sorted(glob.glob(f"{self.config_path}.bak.*"))
         for stale in backups[:-MAX_BACKUPS]:

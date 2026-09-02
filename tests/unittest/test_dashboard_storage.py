@@ -65,6 +65,18 @@ class TestReviewsCrud:
         assert "no files" in row["error_message"]
         assert row["completed_at"] is not None
 
+    def test_finish_review_atomic_writes_issues_and_status(self, storage):
+        request_id = _seed_review(storage, status_complete=False)
+        storage.finish_review(
+            request_id,
+            [{"severity": "P0", "relevant_file": "a.py", "relevant_lines_start": 1,
+              "relevant_lines_end": 2, "issue_summary": "boom", "suggestion": "fix"}],
+            verdict="REQUEST_CHANGES", markdown_output="# r")
+        detail = storage.get_review_detail(storage.get_review_by_request_id(request_id)["id"])
+        assert detail["status"] == "COMPLETED"
+        assert len(detail["issues"]) == 1
+        assert detail["verdict"] == "REQUEST_CHANGES"
+
     def test_list_reviews_filters(self, storage):
         _seed_review(storage, repo="a/b", pr=1, verdict="APPROVE")
         _seed_review(storage, repo="c/d", pr=2, verdict="REQUEST_CHANGES",

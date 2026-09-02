@@ -81,7 +81,7 @@ def review_started(pr_url: str, sender: str = "", trigger_type: str = "manual",
 def review_finished(request_id: str, verdict: str = "", verdict_reason: str = "",
                     markdown_output: str = "", raw_prediction: str = "",
                     issues: Optional[list] = None) -> None:
-    """Complete the record with verdict, usage, findings and the report body."""
+    """Complete the record with usage, findings and verdict in one transaction."""
     if not request_id:
         return
 
@@ -91,20 +91,23 @@ def review_finished(request_id: str, verdict: str = "", verdict_reason: str = ""
             if storage is None:
                 return
             fields = _run_payload_fields()
-            storage.set_review_usage(request_id, **fields)
-            storage.complete_review(request_id, verdict=verdict, verdict_reason=verdict_reason,
-                                    markdown_output=markdown_output, raw_prediction=raw_prediction)
+            clean_issues = []
             for issue in issues or []:
                 if not isinstance(issue, dict):
                     continue
-                storage.add_review_issues(request_id, [{
+                clean_issues.append({
                     "severity": str(issue.get("severity") or "").strip(),
                     "relevant_file": str(issue.get("relevant_file") or "").strip(),
                     "relevant_lines_start": _as_int(issue.get("start_line")),
                     "relevant_lines_end": _as_int(issue.get("end_line")),
                     "issue_summary": str(issue.get("issue_header") or "").strip(),
                     "suggestion": str(issue.get("issue_content") or "").strip(),
-                }])
+                })
+            # single transaction: usage, findings and the COMPLETED status land
+            # together, so a status=COMPLETED read never races a missing finding
+            storage.finish_review(
+                request_id, clean_issues, verdict=verdict, verdict_reason=verdict_reason,
+                markdown_output=markdown_output, raw_prediction=raw_prediction, **fields)
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_finished) failed, error: {e}")
 

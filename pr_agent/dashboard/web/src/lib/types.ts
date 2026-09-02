@@ -17,7 +17,7 @@ export type ReviewRow = {
   sender: string | null
   trigger_type: string
   command: string
-  status: 'RUNNING' | 'COMPLETED' | 'FAILED'
+  status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED'
   verdict: string | null
   verdict_reason: string | null
   model: string | null

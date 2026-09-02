@@ -214,6 +214,38 @@ class DashboardStorage:
                  issue.get("relevant_lines_start"), issue.get("relevant_lines_end"),
                  issue.get("issue_summary"), issue.get("suggestion"), now))
 
+    def finish_review(self, request_id: str, issues: List[Dict[str, Any]], verdict: str = "",
+                      verdict_reason: str = "", markdown_output: str = "",
+                      raw_prediction: str = "") -> None:
+        """Atomically persist usage, findings and the terminal COMPLETED state.
+
+        One transaction so a reader that sees status=COMPLETED also sees every
+        finding — the detail page polls on status and would otherwise render a
+        permanent empty/partial finding list for a review finished mid-write.
+        """
+        row = self.get_review_by_request_id(request_id, summary_only=False)
+        details = row or {}
+        with self._write_lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
+                " markdown_output=?, raw_prediction=?,"
+                " prompt_tokens=?, completion_tokens=?, total_tokens=?, duration_ms=?,"
+                " model=COALESCE(NULLIF(?, ''), model), completed_at=? WHERE request_id=?",
+                (verdict, verdict_reason, markdown_output, raw_prediction,
+                 details.get("prompt_tokens", 0), details.get("completion_tokens", 0),
+                 details.get("total_tokens", 0), details.get("duration_ms", 0),
+                 details.get("model", ""), _utcnow(), request_id))
+            if row and issues:
+                now = _utcnow()
+                conn.executemany(
+                    "INSERT INTO review_issues (review_id, severity, relevant_file,"
+                    " relevant_lines_start, relevant_lines_end, issue_summary, suggestion, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [(row["id"], issue.get("severity"), issue.get("relevant_file"),
+                      issue.get("relevant_lines_start"), issue.get("relevant_lines_end"),
+                      issue.get("issue_summary"), issue.get("suggestion"), now)
+                     for issue in issues])
+
     def get_review_by_request_id(self, request_id: str, summary_only: bool = False) -> Optional[Dict[str, Any]]:
         columns = "id, repo_name, pr_number" if summary_only else "*"
         rows = self._read(f"SELECT {columns} FROM reviews WHERE request_id = ?", (request_id,))

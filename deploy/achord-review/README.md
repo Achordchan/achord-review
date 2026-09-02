@@ -44,9 +44,17 @@ chmod 600 config.toml
 $EDITOR config.toml      # fill in every REPLACE_WITH_* placeholder
 ```
 
-`config.toml` is gitignored and mounted read-only into the container at
-`/app/pr_agent/settings_prod/.secrets.toml`, which `pr_agent/config_loader.py` loads.
+`config.toml` is gitignored and the directory holding it is mounted into the
+container: the host `./config/` directory maps to `/app/pr_agent/settings_prod`,
+and the container loads `/app/pr_agent/settings_prod/.secrets.toml`. The panel's
+config editor backs up and atomically replaces the file inside that directory.
 Secrets never enter the image or the repository.
+
+Migrating from the earlier single-file layout (`./config.toml` on the host):
+
+```bash
+mkdir -p config && mv config.toml config/.secrets.toml && chmod 600 config/.secrets.toml
+```
 
 ## 3. Set up nginx and the certificate
 
@@ -92,7 +100,9 @@ image and the API routes share the webhook process).
 - Set the login password in `config.toml` under `[dashboard] admin_password`
   (copy the section from `config.toml.example`). Leaving it empty disables the
   panel: every login attempt is rejected with 503.
-- Login is rate-limited to 5 failures per IP per 15 minutes.
+- Login is rate-limited to 5 failures per IP per 15 minutes; the client IP is
+  derived from the trusted proxy hops only (tune with `DASHBOARD_TRUSTED_PROXY_HOPS`,
+  default 1 for the shipped nginx setup).
 - Every review run is recorded to `./data/review.db`, which feeds the overview
   stats, the review history, and the per-run detail pages. Config saves and ops
   actions (restart, git pull) are written to the audit log.

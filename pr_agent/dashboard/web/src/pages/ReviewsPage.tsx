@@ -12,6 +12,7 @@ const STATUS_OPTIONS = [
   { value: '', label: '全部状态' },
   { value: 'RUNNING', label: '进行中' },
   { value: 'COMPLETED', label: '已完成' },
+  { value: 'SKIPPED', label: '已跳过' },
   { value: 'FAILED', label: '失败' },
 ]
 const VERDICT_OPTIONS = [

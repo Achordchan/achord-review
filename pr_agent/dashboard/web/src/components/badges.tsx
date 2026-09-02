@@ -45,16 +45,20 @@ const STATUS_STYLES = {
   RUNNING: 'bg-info/15 text-info border border-info/30',
   COMPLETED: 'bg-good/10 text-good border border-good/30',
   FAILED: 'bg-bad/15 text-bad border border-bad/30',
+  SKIPPED: 'bg-muted/10 text-muted border border-muted/30',
 } as const
 
-export function StatusBadge({ status }: { status: 'RUNNING' | 'COMPLETED' | 'FAILED' | string }) {
+export function StatusBadge({ status }: { status: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'SKIPPED' | string }) {
   const style = STATUS_STYLES[status as keyof typeof STATUS_STYLES] ?? 'bg-muted/10 text-muted'
   return (
     <Chip className={style}>
       {status === 'RUNNING' && <span className="animate-breathe h-1.5 w-1.5 rounded-full bg-info" />}
       {status === 'COMPLETED' && <span className="h-1.5 w-1.5 rounded-full bg-good" />}
       {status === 'FAILED' && <span className="h-1.5 w-1.5 rounded-full bg-bad" />}
-      {status === 'RUNNING' ? '进行中' : status === 'COMPLETED' ? '已完成' : '失败'}
+      {status === 'RUNNING' ? '进行中'
+        : status === 'COMPLETED' ? '已完成'
+        : status === 'SKIPPED' ? '已跳过'
+        : '失败'}
     </Chip>
   )
 }
