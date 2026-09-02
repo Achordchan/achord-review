@@ -149,6 +149,30 @@ class TestWrite:
         assert "openai.key" not in captured
         assert captured["config.model"] == "openai/gpt-old"
 
+    def test_hot_reload_unsets_values_removed_from_custom_file(self, engine, monkeypatch):
+        captured = {"set": {}, "unset": []}
+
+        class FakeSettings:
+            def set(self, dotted, value):
+                captured["set"][dotted] = value
+
+            def unset(self, dotted):
+                captured["unset"].append(dotted)
+
+        import pr_agent.config_loader as cl
+        monkeypatch.setattr(cl, "global_settings", FakeSettings(), raising=False)
+        with open(engine.config_path, "a", encoding="utf-8") as f:
+            f.write('\n[dashboard]\nadmin_password = "temporary"\n')
+        assert engine.reload_if_changed() is True
+        assert captured["set"]["dashboard.admin_password"] == "temporary"
+
+        with open(engine.config_path, encoding="utf-8") as f:
+            text = f.read()
+        with open(engine.config_path, "w", encoding="utf-8") as f:
+            f.write(text.replace('\n[dashboard]\nadmin_password = "temporary"\n', ""))
+        assert engine.reload_if_changed() is True
+        assert "dashboard.admin_password" in captured["unset"]
+
     def test_validation_rejects_bad_values(self, engine):
         ok, errors = engine.write({"ai_timeout": "not-a-number"})
         assert not ok and errors

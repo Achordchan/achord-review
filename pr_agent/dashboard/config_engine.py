@@ -137,6 +137,8 @@ class ConfigEngine:
     def __init__(self, config_path: Optional[str] = None):
         self.config_path = config_path or find_config_path()
         self._loaded_signature = self._file_signature()
+        initial_raw = self._load_raw() or {}
+        self._loaded_paths = self._flatten_paths(initial_raw)
 
     # ------------------------------------------------------------------ read
 
@@ -291,26 +293,56 @@ class ConfigEngine:
         """
         from pr_agent.config_loader import global_settings, global_settings_lock
         environment_keys = {key.upper() for key in os.environ}
+        current_paths = self._flatten_paths(raw)
+
+        def _has_environment_override(path: str) -> bool:
+            nested_env_key = path.replace(".", "__").upper()
+            legacy_env_key = path.replace(".", "_").upper()
+            return nested_env_key in environment_keys or legacy_env_key in environment_keys
 
         def _apply(value: Any, path: str) -> None:
             if isinstance(value, dict):
                 for key, child in value.items():
                     _apply(child, f"{path}.{key}" if path else str(key))
                 return
-            nested_env_key = path.replace(".", "__").upper()
-            legacy_env_key = path.replace(".", "_").upper()
-            if nested_env_key in environment_keys or legacy_env_key in environment_keys:
+            if _has_environment_override(path):
                 return  # Dynaconf environment sources retain higher precedence.
             global_settings.set(path, value)
 
         try:
             with global_settings_lock:
-                _apply(raw, "")
+                if self._is_dynaconf_managed_path() and callable(getattr(global_settings, "reload", None)):
+                    # Rebuild from normal sources so removed file values fall
+                    # back to defaults and environment precedence is replayed.
+                    global_settings.reload()
+                else:
+                    for removed_path in self._loaded_paths - current_paths:
+                        if not _has_environment_override(removed_path):
+                            global_settings.unset(removed_path)
+                    _apply(raw, "")
+                self._loaded_paths = current_paths
             return True
         except Exception as e:
             # The file is already correct; a reload miss only delays effect until restart.
             get_logger().warning(f"Dashboard config hot reload failed, error: {e}")
             return False
+
+    @staticmethod
+    def _flatten_paths(raw: Dict[str, Any], prefix: str = "") -> set:
+        paths = set()
+        for key, value in raw.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                paths.update(ConfigEngine._flatten_paths(value, path))
+            else:
+                paths.add(path)
+        return paths
+
+    def _is_dynaconf_managed_path(self) -> bool:
+        managed = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "settings_prod", ".secrets.toml")
+        return bool(self.config_path and os.path.realpath(self.config_path) == os.path.realpath(managed))
 
     def reload_if_changed(self) -> bool:
         """Apply external/dashboard config changes once per worker.

@@ -469,7 +469,7 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
     # absent in CLI runs, hence the guard
     try:
         context["dashboard_sender"] = body.get("sender", {}).get("login", "")
-        context["dashboard_trigger_type"] = "pr_open"
+        context["dashboard_trigger_type"] = "push" if commands_conf == "push_commands" else "pr_open"
     except Exception as e:
         get_logger().debug(f"Dashboard auto-command metadata unavailable, error: {e}")
     for command in commands:
