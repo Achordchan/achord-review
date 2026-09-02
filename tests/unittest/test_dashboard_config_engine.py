@@ -119,15 +119,13 @@ class TestWrite:
         values = engine.read()["values"]
         assert values["model"] == "openai/changed"
 
-    def test_backup_created(self, engine):
-        import time as _time
+    def test_backup_created(self, engine, monkeypatch):
+        monkeypatch.setattr("pr_agent.dashboard.config_engine.time.time_ns", lambda: 123456789)
         engine.write({"model": "openai/second"})
-        # two rapid saves inside one second must produce distinct backups
+        # Even a clock returning the same value must produce distinct backups.
         engine.write({"model": "openai/third"})
         engine.write({"model": "openai/fourth"})
-        _time.sleep(0.002)
         engine.write({"model": "openai/fifth"})
-        _time.sleep(0.002)
         engine.write({"model": "openai/sixth"})
         engine.write({"model": "openai/seventh"})
         # MAX_BACKUPS enforced and no collision-collapsed files

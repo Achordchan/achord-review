@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import time
 import tomllib
+import uuid
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -205,10 +206,9 @@ class ConfigEngine:
                 raw.setdefault("ignore", {})["glob"] = value
 
     def _backup(self) -> None:
-        # millisecond suffix: two saves inside the same second must not overwrite
-        # each other's recovery snapshot
-        stamp = time.time()
-        backup = f"{self.config_path}.bak.{int(stamp)}{int(stamp * 1000) % 1000:03d}"
+        # time_ns keeps backups sortable; UUID guarantees uniqueness even on
+        # filesystems/clocks whose effective timestamp resolution is coarser.
+        backup = f"{self.config_path}.bak.{time.time_ns()}.{uuid.uuid4().hex}"
         shutil.copy2(self.config_path, backup)
         backups = sorted(glob.glob(f"{self.config_path}.bak.*"))
         for stale in backups[:-MAX_BACKUPS]:

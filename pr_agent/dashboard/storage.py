@@ -22,6 +22,7 @@ from pr_agent.log import get_logger
 
 DEFAULT_DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "/app/data/review.db")
 STALE_REVIEW_SECONDS = int(os.environ.get("DASHBOARD_STALE_REVIEW_SECONDS", str(6 * 3600)))
+STALE_CLEANUP_INTERVAL_SECONDS = 5 * 60
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reviews (
@@ -116,6 +117,8 @@ class DashboardStorage:
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
         self._write_lock = threading.Lock()
+        self._stale_cleanup_lock = threading.Lock()
+        self._last_stale_cleanup = 0.0
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -143,6 +146,7 @@ class DashboardStorage:
                 " WHERE status='RUNNING' AND created_at < ?",
                 (_utcnow(), cutoff))
         self._protect_storage_permissions()
+        self._last_stale_cleanup = time.monotonic()
 
     def _protect_storage_permissions(self) -> None:
         """Keep the database and SQLite sidecars owner-readable only."""
@@ -259,6 +263,21 @@ class DashboardStorage:
     def login_attempt_row_count(self) -> int:
         rows = self._read("SELECT COUNT(*) AS c FROM dashboard_login_attempts")
         return rows[0]["c"] if rows else 0
+
+    def reconcile_stale_reviews(self, force: bool = False) -> None:
+        """Periodically close crashed/interrupted runs after their grace period."""
+        now = time.monotonic()
+        with self._stale_cleanup_lock:
+            if not force and now - self._last_stale_cleanup < STALE_CLEANUP_INTERVAL_SECONDS:
+                return
+            cutoff = _utc_at(time.time() - STALE_REVIEW_SECONDS)
+            result = self._write(
+                "UPDATE reviews SET status='FAILED',"
+                " error_message='审查进程未正常结束（服务重启或 worker 中断）', completed_at=?"
+                " WHERE status='RUNNING' AND created_at < ?",
+                (_utcnow(), cutoff))
+            if result is not None:
+                self._last_stale_cleanup = now
 
     # ------------------------------------------------------------------ reviews
 
@@ -391,6 +410,7 @@ class DashboardStorage:
 
     def list_reviews(self, repo: str = "", status: str = "", verdict: str = "",
                      trigger_type: str = "", limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        self.reconcile_stale_reviews()
         where, params = [], []
         if repo:
             where.append("repo_name = ?")
@@ -429,6 +449,7 @@ class DashboardStorage:
         return {"total": total_rows[0]["c"] if total_rows else 0, "items": rows}
 
     def get_review_detail(self, review_id: int) -> Optional[Dict[str, Any]]:
+        self.reconcile_stale_reviews()
         rows = self._read("SELECT * FROM reviews WHERE id = ?", (review_id,))
         if not rows:
             return None
@@ -447,6 +468,7 @@ class DashboardStorage:
     # ------------------------------------------------------------------- stats
 
     def stats_overview(self) -> Dict[str, Any]:
+        self.reconcile_stale_reviews()
         today = _utcnow()[:10]
         overview: Dict[str, Any] = {}
         single = self._read(

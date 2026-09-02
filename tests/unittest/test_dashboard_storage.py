@@ -179,6 +179,17 @@ class TestStats:
         assert "未正常结束" in stale_row["error_message"]
         assert storage.get_review_by_request_id(recent)["status"] == "RUNNING"
 
+    def test_stats_periodically_reconcile_stale_reviews(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=12, pr_url="u12")
+        storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
+                       ("2000-01-01 00:00:00", request_id))
+        storage._last_stale_cleanup = 0
+
+        stats = storage.stats_overview()
+
+        assert stats["running"] == 0
+        assert storage.get_review_by_request_id(request_id)["status"] == "FAILED"
+
 
 class TestAuditLogs:
     def test_add_and_list(self, storage):
