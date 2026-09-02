@@ -363,7 +363,10 @@ async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cook
     result = await asyncio.to_thread(ops.git_pull)
     started = bool(result.get("started"))
     await asyncio.to_thread(
-        _storage_call, "add_audit_log", "GIT_PULL", {"started": started},
+        _storage_call, "add_audit_log", "GIT_PULL",
+        {"started": started, "completed": bool(result.get("completed")),
+         "exit_code": result.get("exit_code"),
+         "timed_out": bool(result.get("timed_out"))},
         ip_address=_client_ip(request))
     if not started:
         return JSONResponse(

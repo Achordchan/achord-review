@@ -124,8 +124,13 @@ export default function ReviewDetailPage() {
             <span className="font-medium text-text">裁决理由：</span>{data.verdict_reason}
           </p>
         )}
-        {data.status === 'FAILED' && data.error_message && (
-          <p className="mt-4 rounded-lg border border-bad/30 bg-bad/10 px-4 py-3 font-mono text-xs leading-relaxed text-bad">
+        {(data.status === 'FAILED' || data.status === 'SKIPPED') && data.error_message && (
+          <p className={`mt-4 rounded-lg border px-4 py-3 text-xs leading-relaxed ${
+            data.status === 'FAILED'
+              ? 'border-bad/30 bg-bad/10 font-mono text-bad'
+              : 'border-line bg-surface-2/60 text-muted'
+          }`}>
+            {data.status === 'SKIPPED' && <span className="font-medium text-text">跳过原因：</span>}
             {data.error_message}
           </p>
         )}
@@ -138,8 +143,9 @@ export default function ReviewDetailPage() {
         />
         {issues.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-10">
-            <span className="text-3xl">🎉</span>
-            <p className="mt-2 text-sm text-muted">本次审查没有发现任何问题</p>
+            <p className="text-sm text-muted">
+              {data.status === 'SKIPPED' ? '本次审查已跳过，未生成 Findings' : '本次审查没有发现问题'}
+            </p>
           </div>
         ) : (
           <ul className="divide-y divide-line">

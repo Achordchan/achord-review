@@ -433,6 +433,28 @@ class TestProtectedRoutes:
         assert resp.json()["code"] == "OPERATION_NOT_STARTED"
         assert resp.json()["data"]["started"] is False
 
+    def test_git_pull_audit_records_terminal_outcome(self, client, storage, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_api.ops, "git_pull",
+            lambda: {"started": True, "completed": True, "exit_code": 7,
+                     "timed_out": False, "output": ["pull rejected"]})
+        auth = _auth_header(client)
+
+        resp = client.post(
+            "/api/v1/dashboard/ops/git-pull",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"})
+
+        assert resp.status_code == 500
+        logs = [row for row in storage.list_audit_logs() if row["action"] == "GIT_PULL"]
+        assert logs
+        import json
+        assert json.loads(logs[0]["details_json"]) == {
+            "started": True,
+            "completed": True,
+            "exit_code": 7,
+            "timed_out": False,
+        }
+
     def test_audit_log_limit_is_clamped_at_lower_bound(self, client, storage, monkeypatch):
         captured = {}
         original = storage.list_audit_logs
