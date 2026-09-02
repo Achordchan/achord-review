@@ -99,6 +99,13 @@ class TestAuth:
         auth = _auth_header(client)
         assert client.post("/api/v1/dashboard/auth/logout", headers=auth).status_code == 403
 
+    def test_password_disable_or_rotation_invalidates_existing_session(self, client, monkeypatch):
+        auth = _auth_header(client)
+        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "")
+        assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
+        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "rotated-password")
+        assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 401
+
 
 class TestClientIp:
     def test_trusted_hops_read_rightmost_entries(self, client, monkeypatch):

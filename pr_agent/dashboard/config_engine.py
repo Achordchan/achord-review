@@ -169,6 +169,12 @@ class ConfigEngine:
                 doc = self._load_document()
                 if doc is None:
                     return False, ["config file could not be parsed"]
+                if "key" in clean:
+                    stored_key = str(doc.get("openai", {}).get("key", "") or "")
+                    if clean["key"] == mask_secret(stored_key):
+                        clean.pop("key")  # masked GET value round-tripped unchanged
+                if not clean:
+                    return True, []
                 self._apply_fields(doc, clean)
                 self._backup()
                 self._atomic_dump(doc)

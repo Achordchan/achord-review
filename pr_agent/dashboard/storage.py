@@ -271,12 +271,15 @@ class DashboardStorage:
             if not force and now - self._last_stale_cleanup < STALE_CLEANUP_INTERVAL_SECONDS:
                 return
             cutoff = _utc_at(time.time() - STALE_REVIEW_SECONDS)
-            result = self._write(
-                "UPDATE reviews SET status='FAILED',"
-                " error_message='审查进程未正常结束（服务重启或 worker 中断）', completed_at=?"
-                " WHERE status='RUNNING' AND created_at < ?",
-                (_utcnow(), cutoff))
-            if result is not None:
+
+            def _reconcile(conn: sqlite3.Connection) -> None:
+                conn.execute(
+                    "UPDATE reviews SET status='FAILED',"
+                    " error_message='审查进程未正常结束（服务重启或 worker 中断）', completed_at=?"
+                    " WHERE status='RUNNING' AND created_at < ?",
+                    (_utcnow(), cutoff))
+
+            if self._transaction(_reconcile, "stale-review reconciliation"):
                 self._last_stale_cleanup = now
 
     # ------------------------------------------------------------------ reviews

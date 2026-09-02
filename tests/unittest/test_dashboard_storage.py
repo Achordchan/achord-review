@@ -185,10 +185,12 @@ class TestStats:
         storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
                        ("2000-01-01 00:00:00", request_id))
         storage._last_stale_cleanup = time.monotonic() - STALE_CLEANUP_INTERVAL_SECONDS - 1
+        previous_cleanup = storage._last_stale_cleanup
 
         stats = storage.stats_overview()
 
         assert stats["running"] == 0
+        assert storage._last_stale_cleanup > previous_cleanup
         assert storage.get_review_by_request_id(request_id)["status"] == "FAILED"
 
 

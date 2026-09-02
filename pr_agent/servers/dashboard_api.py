@@ -80,11 +80,19 @@ def _credential_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _session_hash(token: str) -> str:
+    """Bind a persisted session to the currently configured admin password."""
+    password = _admin_password()
+    if not password:
+        return ""
+    return hmac.new(password.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 async def _create_session() -> str:
     token = secrets.token_urlsafe(32)
     created = await asyncio.to_thread(
         get_storage().create_session,
-        _credential_hash(token), int(time.time()) + SESSION_TTL_SECONDS)
+        _session_hash(token), int(time.time()) + SESSION_TTL_SECONDS)
     if not created:
         raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试")
     return token
@@ -93,7 +101,8 @@ async def _create_session() -> str:
 def _session_valid(token: Optional[str]) -> bool:
     if not token:
         return False
-    return get_storage().session_is_valid(_credential_hash(token))
+    token_hash = _session_hash(token)
+    return bool(token_hash and get_storage().session_is_valid(token_hash))
 
 
 def require_auth(request: Request, dashboard_session: Optional[str] = Cookie(None)) -> None:
@@ -190,10 +199,14 @@ async def auth_logout(request: Request, response: Response,
     # and the bearer token are both real sessions in shared storage, and a scripted
     # client logging out via the bearer path must lose access immediately
     if dashboard_session:
-        get_storage().revoke_session(_credential_hash(dashboard_session))
+        token_hash = _session_hash(dashboard_session)
+        if token_hash:
+            get_storage().revoke_session(token_hash)
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
-        get_storage().revoke_session(_credential_hash(auth[7:].strip()))
+        token_hash = _session_hash(auth[7:].strip())
+        if token_hash:
+            get_storage().revoke_session(token_hash)
     response.delete_cookie(SESSION_COOKIE, path="/")
     return _ok(message="已退出登录")
 

@@ -83,6 +83,17 @@ class TestWrite:
         # _hot_reload ran during write; openai.key must NOT have been set to ""
         assert captured.get("openai.key", "unset") != ""
 
+    def test_masked_key_round_trip_keeps_secret(self, engine):
+        masked = engine.read()["values"]["key"]
+        ok, errors = engine.write({"key": masked, "model": "openai/round-trip"})
+
+        assert ok, errors
+        with open(engine.config_path, "rb") as f:
+            import tomllib
+            raw = tomllib.load(f)
+        assert raw["openai"]["key"] == "sk-secret-key-1234567890"
+        assert raw["config"]["model"] == "openai/round-trip"
+
     def test_reload_if_changed_updates_another_worker(self, engine, monkeypatch):
         captured = {}
 
