@@ -5,3 +5,8 @@ pics/
 pr_agent.egg-info/
 build/
 **/.env
+**/.secrets.toml*
+deploy/achord-review/config/
+deploy/achord-review/config.toml
+deploy/achord-review/config.toml.bak*
+deploy/achord-review/data/
