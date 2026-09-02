@@ -109,6 +109,15 @@ class TestWrite:
         assert captured["config.model"] == "openai/gpt-old"
         assert engine.reload_if_changed() is False
 
+    def test_hot_reload_failure_is_reported_after_persisting_file(self, engine, monkeypatch):
+        monkeypatch.setattr(engine, "_hot_reload", lambda fields: False)
+
+        ok, errors = engine.write({"model": "openai/persisted"})
+
+        assert ok is False
+        assert "saved but hot reload failed" in errors[0]
+        assert engine.read()["values"]["model"] == "openai/persisted"
+
     def test_validation_rejects_bad_values(self, engine):
         ok, errors = engine.write({"ai_timeout": "not-a-number"})
         assert not ok and errors

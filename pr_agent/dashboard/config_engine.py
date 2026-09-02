@@ -178,11 +178,16 @@ class ConfigEngine:
                 self._apply_fields(doc, clean)
                 self._backup()
                 self._atomic_dump(doc)
+                # Keep the process-local apply and signature snapshot in the
+                # same interprocess critical section as the file replacement.
+                # Otherwise another worker can replace the file between these
+                # steps and this worker can mark older values as current.
+                if not self._hot_reload(clean):
+                    return False, ["configuration saved but hot reload failed; restart required"]
+                self._loaded_signature = self._file_signature()
         except Exception as e:
             get_logger().warning(f"Dashboard config write failed, error: {e}")
             return False, [f"failed to write config: {e}"]
-        if self._hot_reload(clean):
-            self._loaded_signature = self._file_signature()
         return True, []
 
     @contextmanager
