@@ -43,7 +43,8 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 # login remains stable across gunicorn workers. Only SHA-256 digests are stored;
 # bearer tokens and source addresses never enter the database as credentials.
 MAX_LOCKOUT_KEYS = 10_000
-_synced_password_state = ("", "")
+_password_fingerprint_key = secrets.token_bytes(32)
+_password_sync_state = {"value": ("", "")}
 _password_sync_lock = threading.Lock()
 
 
@@ -91,17 +92,22 @@ def _session_hash(token: str, password: Optional[str] = None) -> str:
     return hmac.new(password.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _password_fingerprint(password: str) -> str:
+    """Keyed runtime fingerprint; never used to verify a login password."""
+    return hmac.new(
+        _password_fingerprint_key, password.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def _sync_admin_password(password: str) -> bool:
-    global _synced_password_state
-    fingerprint = _credential_hash(password)
+    fingerprint = _password_fingerprint(password)
     storage = get_storage()
     state = (storage.db_path, fingerprint)
     with _password_sync_lock:
-        if state == _synced_password_state:
+        if state == _password_sync_state["value"]:
             return True
         if not storage.sync_admin_password(fingerprint):
             return False
-        _synced_password_state = state
+        _password_sync_state["value"] = state
         return True
 
 
