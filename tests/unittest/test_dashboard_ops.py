@@ -1,6 +1,8 @@
 """Tests for dashboard operation execution without process-local task state."""
 
 import asyncio
+import io
+import signal
 import subprocess
 import sys
 
@@ -81,6 +83,39 @@ def test_bounded_command_keeps_only_output_tail(tmp_path, monkeypatch):
         cwd=str(tmp_path), timeout_seconds=10)
     assert result["exit_code"] == 0
     assert len("\n".join(result["output"]).encode()) <= 1024
+
+
+def test_bounded_command_kills_process_group_on_timeout(tmp_path, monkeypatch):
+    class FakeProcess:
+        pid = 4242
+        stdout = io.BytesIO(b"")
+
+        def __init__(self):
+            self.wait_calls = 0
+
+        def wait(self, timeout):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise subprocess.TimeoutExpired(cmd="git pull", timeout=timeout)
+            return -signal.SIGKILL
+
+    process = FakeProcess()
+    popen_kwargs = {}
+    killed = []
+
+    def fake_popen(*args, **kwargs):
+        popen_kwargs.update(kwargs)
+        return process
+
+    monkeypatch.setattr(ops.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ops.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    result = ops._run_bounded_command(
+        ["git", "pull"], cwd=str(tmp_path), timeout_seconds=1)
+
+    assert popen_kwargs["start_new_session"] is True
+    assert killed == [(process.pid, signal.SIGKILL)]
+    assert result["timed_out"] is True
 
 
 def test_operations_reject_while_another_worker_holds_lock(monkeypatch):

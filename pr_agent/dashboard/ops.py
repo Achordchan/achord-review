@@ -10,6 +10,7 @@ relay, GitHub App credential, storage) run in-process and never raise.
 import asyncio
 import fcntl
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -58,7 +59,9 @@ def _operation_lock():
 
 def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int) -> Dict[str, Any]:
     """Run a fixed command while retaining only its last bounded output bytes."""
-    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        start_new_session=True)
     output_tail = bytearray()
 
     def _drain() -> None:
@@ -76,7 +79,10 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int) -> Dic
         exit_code = proc.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         exit_code = proc.wait(timeout=5)
     reader.join(timeout=5)
     output = output_tail.decode("utf-8", errors="replace").splitlines()
