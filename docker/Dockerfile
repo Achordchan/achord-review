@@ -49,6 +49,7 @@ RUN pip install --no-cache-dir -r requirements-dev.txt && rm requirements-dev.tx
 ADD pr_agent pr_agent
 ADD tests tests
 ADD docker/mosaico docker/mosaico
+ADD .dockerignore .dockerignore
 
 FROM base AS cli
 ADD pr_agent pr_agent
