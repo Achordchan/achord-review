@@ -135,8 +135,10 @@ class DashboardStorage:
 
     def initialize(self) -> None:
         directory = os.path.dirname(self.db_path) or "."
+        directory_created = not os.path.exists(directory)
         os.makedirs(directory, mode=0o700, exist_ok=True)
-        os.chmod(directory, 0o700)
+        if directory_created:
+            os.chmod(directory, 0o700)
         with self._write_lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
             cutoff = _utc_at(time.time() - STALE_REVIEW_SECONDS)
@@ -217,8 +219,12 @@ class DashboardStorage:
             (token_hash, int(time.time()) if now is None else now))
         return bool(rows)
 
-    def revoke_session(self, token_hash: str) -> None:
-        self._write("DELETE FROM dashboard_sessions WHERE token_hash = ?", (token_hash,))
+    def revoke_session(self, token_hash: str) -> bool:
+        """Delete a session and report whether revocation reached durable storage."""
+        def _revoke(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM dashboard_sessions WHERE token_hash = ?", (token_hash,))
+
+        return self._transaction(_revoke, "session revocation")
 
     def verify_login_attempt(self, lockout_key: str, password_matches: bool,
                              attempted_at: float, window_seconds: int,

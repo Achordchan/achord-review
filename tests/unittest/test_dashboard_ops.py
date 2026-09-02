@@ -50,3 +50,14 @@ def test_restart_stops_after_failed_preflight(monkeypatch):
 
     assert result["started"] is False
     assert popen_called is False
+
+
+def test_tail_logs_caps_a_single_huge_line(monkeypatch, tmp_path):
+    log_path = tmp_path / "service.log"
+    log_path.write_bytes(b"x" * (ops.MAX_LOG_TAIL_BYTES + 1024))
+    monkeypatch.setenv("ACHORD_REVIEW_LOG_FILE", str(log_path))
+
+    lines = ops.tail_logs()
+
+    assert len(lines) == 1
+    assert len(lines[0].encode()) == ops.MAX_LOG_TAIL_BYTES

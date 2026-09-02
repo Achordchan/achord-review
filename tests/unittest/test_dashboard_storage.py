@@ -249,8 +249,10 @@ class TestSharedAuthState:
 
 
 class TestStoragePermissions:
-    def test_database_directory_and_sidecars_are_owner_only(self, storage):
-        directory = os.path.dirname(storage.db_path)
+    def test_new_database_directory_and_sidecars_are_owner_only(self, tmp_path):
+        directory = tmp_path / "dedicated-dashboard-data"
+        storage = DashboardStorage(db_path=str(directory / "review.db"))
+        storage.initialize()
         assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
         assert stat.S_IMODE(os.stat(storage.db_path).st_mode) == 0o600
 
@@ -261,6 +263,21 @@ class TestStoragePermissions:
         storage._protect_storage_permissions()
         assert stat.S_IMODE(os.stat(f"{storage.db_path}-wal").st_mode) == 0o600
         assert stat.S_IMODE(os.stat(f"{storage.db_path}-shm").st_mode) == 0o600
+
+    def test_existing_parent_directory_permissions_are_not_changed(self, tmp_path, monkeypatch):
+        directory = tmp_path / "shared-parent"
+        directory.mkdir()
+        real_chmod = os.chmod
+        chmod_targets = []
+
+        def record_chmod(path, mode):
+            chmod_targets.append(os.fspath(path))
+            real_chmod(path, mode)
+
+        monkeypatch.setattr("pr_agent.dashboard.storage.os.chmod", record_chmod)
+        DashboardStorage(db_path=str(directory / "review.db")).initialize()
+
+        assert str(directory) not in chmod_targets
 
 
 class TestHealth:

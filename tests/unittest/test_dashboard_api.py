@@ -24,7 +24,9 @@ def client(storage, monkeypatch):
             return {"available": False, "path": None, "values": {}}
 
         def write(self, fields):
-            return True, []
+            from pr_agent.dashboard.config_engine import _validate
+            _, errors = _validate(fields)
+            return not errors, errors
 
     monkeypatch.setattr(dashboard_api, "get_config_engine", lambda: StubEngine())
     # FastAPI app with only the dashboard router
@@ -98,6 +100,15 @@ class TestAuth:
         assert client.post("/api/v1/dashboard/auth/logout").status_code == 401
         auth = _auth_header(client)
         assert client.post("/api/v1/dashboard/auth/logout", headers=auth).status_code == 403
+
+    def test_logout_reports_revocation_failure(self, client, storage, monkeypatch):
+        auth = _auth_header(client)
+        monkeypatch.setattr(storage, "revoke_session", lambda token_hash: False)
+        resp = client.post(
+            "/api/v1/dashboard/auth/logout",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"})
+        assert resp.status_code == 503
+        assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 200
 
     def test_password_disable_or_rotation_invalidates_existing_session(self, client, monkeypatch):
         auth = _auth_header(client)
@@ -274,6 +285,15 @@ class TestProtectedRoutes:
             headers={**auth, "Sec-Fetch-Site": "same-origin"},
             json={"model": "openai/gpt-test", "restart": "false"})
         assert resp.status_code == 422
+
+    def test_config_rejects_unknown_fields(self, client):
+        auth = _auth_header(client)
+        resp = client.put(
+            "/api/v1/dashboard/config",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"},
+            json={"modle": "openai/typo"})
+        assert resp.status_code == 400
+        assert "unknown field" in resp.json()["detail"]
 
     def test_ops_reports_command_not_started(self, client, monkeypatch):
         auth = _auth_header(client)

@@ -19,6 +19,7 @@ CONTAINER_NAME = os.environ.get("ACHORD_REVIEW_CONTAINER", "achord-review")
 REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "/app")
 GIT_PULL_TIMEOUT_SECONDS = 120
 DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 5
+MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
 
 
 def _not_started(message: str) -> Dict[str, Any]:
@@ -152,8 +153,9 @@ def tail_logs(max_lines: int = 200) -> List[str]:
             size = f.tell()
             data = b""
             pos = size
-            while pos > 0 and data.count(b"\n") <= max_lines:
-                read = min(chunk_size, pos)
+            while (pos > 0 and data.count(b"\n") <= max_lines
+                   and len(data) < MAX_LOG_TAIL_BYTES):
+                read = min(chunk_size, pos, MAX_LOG_TAIL_BYTES - len(data))
                 pos -= read
                 f.seek(pos)
                 data = f.read(read) + data

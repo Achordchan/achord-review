@@ -198,15 +198,19 @@ async def auth_logout(request: Request, response: Response,
     # revoke whichever credential authenticated this request: the cookie token
     # and the bearer token are both real sessions in shared storage, and a scripted
     # client logging out via the bearer path must lose access immediately
-    if dashboard_session:
-        token_hash = _session_hash(dashboard_session)
-        if token_hash:
-            get_storage().revoke_session(token_hash)
+    token_hashes = set()
+    if dashboard_session and (token_hash := _session_hash(dashboard_session)):
+        token_hashes.add(token_hash)
     auth = request.headers.get("authorization", "")
-    if auth.startswith("Bearer "):
-        token_hash = _session_hash(auth[7:].strip())
-        if token_hash:
-            get_storage().revoke_session(token_hash)
+    if auth.startswith("Bearer ") and (token_hash := _session_hash(auth[7:].strip())):
+        token_hashes.add(token_hash)
+
+    def _revoke_sessions() -> bool:
+        storage = get_storage()
+        return all(storage.revoke_session(token_hash) for token_hash in token_hashes)
+
+    if not await asyncio.to_thread(_revoke_sessions):
+        raise HTTPException(status_code=503, detail="会话吊销失败，请稍后重试")
     response.delete_cookie(SESSION_COOKIE, path="/")
     return _ok(message="已退出登录")
 
@@ -231,10 +235,7 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     require_same_origin(request)
     payload = body.model_dump()
     restart = payload.pop("restart")
-    fields = {k: v for k, v in payload.items()
-              if k in ("model", "reasoning_effort", "ai_timeout", "max_model_tokens",
-                       "api_base", "key", "verdict_blocking_severities",
-                       "num_max_findings", "ignore_glob", "extra_instructions")}
+    fields = payload
     engine = get_config_engine()
     success, errors = engine.write(fields)
     if not success:
@@ -306,7 +307,7 @@ async def ops_diagnose(request: Request, dashboard_session: Optional[str] = Cook
 @router.get("/ops/logs")
 async def ops_logs(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     require_auth(request, dashboard_session)
-    return _ok({"lines": ops.tail_logs()})
+    return _ok({"lines": await asyncio.to_thread(ops.tail_logs)})
 
 
 # ------------------------------------------------------ reviews and history
