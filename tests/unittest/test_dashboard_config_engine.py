@@ -8,7 +8,7 @@ from pr_agent.dashboard.config_engine import ConfigEngine, mask_secret
 
 
 @pytest.fixture()
-def engine(tmp_path):
+def engine(tmp_path, monkeypatch):
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[config]\nmodel = "openai/gpt-old"\nreasoning_effort = "high"\n'
@@ -17,6 +17,15 @@ def engine(tmp_path):
         '[pr_reviewer]\nnum_max_findings = 10\nverdict_blocking_severities = ["P0"]\n\n'
         '[ignore]\nglob = ["dist/**"]\n\n[github]\napp_id = "123"\n',
         encoding="utf-8")
+    class IsolatedSettings:
+        def __init__(self):
+            self.values = {}
+
+        def set(self, dotted, value):
+            self.values[dotted] = value
+
+    import pr_agent.config_loader as cl
+    monkeypatch.setattr(cl, "global_settings", IsolatedSettings(), raising=False)
     return ConfigEngine(config_path=str(config_path))
 
 
