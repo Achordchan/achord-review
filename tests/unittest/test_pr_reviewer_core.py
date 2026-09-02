@@ -918,7 +918,6 @@ def test_prepare_review_recovers_model_output_missing_only_the_review_wrapper(mo
     severity: P2
     issue_content: The configured timeout is accepted but not enforced.
     start_line: 143
-    end_line: 143
 security_concerns: No
 """
     reviewer.incremental = SimpleNamespace(is_incremental=False)
@@ -932,6 +931,7 @@ security_concerns: No
 
     assert result == "## Review"
     assert reviewer.review_data["review"]["key_issues_to_review"][0]["severity"] == "P2"
+    assert reviewer.review_data["review"]["key_issues_to_review"][0]["end_line"] == 143
     git_provider.publish_structured_review.assert_called_once()
 
 
