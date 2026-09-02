@@ -15,6 +15,7 @@ import fcntl
 import glob
 import os
 import shutil
+import stat
 import tempfile
 import time
 import tomllib
@@ -246,14 +247,19 @@ class ConfigEngine:
     def _atomic_dump(self, doc) -> None:
         directory = os.path.dirname(self.config_path)
         payload = tomlkit.dumps(doc)
+        source_stat = os.stat(self.config_path, follow_symlinks=False)
         fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+                temp_stat = os.fstat(f.fileno())
+                if (temp_stat.st_uid, temp_stat.st_gid) != (source_stat.st_uid, source_stat.st_gid):
+                    os.fchown(f.fileno(), source_stat.st_uid, source_stat.st_gid)
+                # Preserve owner access while enforcing the secrets-file policy.
+                os.fchmod(f.fileno(), stat.S_IRUSR | stat.S_IWUSR)
             os.replace(tmp_path, self.config_path)
-            os.chmod(self.config_path, 0o600)
         except Exception:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -306,8 +312,8 @@ class ConfigEngine:
         if not self.config_path:
             return None
         try:
-            stat = os.stat(self.config_path)
-            return stat.st_mtime_ns, stat.st_size
+            stat_result = os.stat(self.config_path)
+            return stat_result.st_mtime_ns, stat_result.st_size
         except OSError:
             return None
 

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { api, storeToken } from './api'
+import { api, AUTH_INVALIDATED_EVENT, storeToken } from './api'
 import type { SessionInfo } from './types'
 
 type AuthState = {
@@ -38,6 +38,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  useEffect(() => {
+    const invalidate = () => {
+      setState((prev) => ({ ...prev, authenticated: false, loading: false }))
+    }
+    window.addEventListener(AUTH_INVALIDATED_EVENT, invalidate)
+    return () => window.removeEventListener(AUTH_INVALIDATED_EVENT, invalidate)
+  }, [])
 
   const login = useCallback(async (password: string) => {
     const body = await api.post<{ authenticated: boolean }>('/api/v1/dashboard/auth/login', { password })

@@ -9,6 +9,7 @@ export class ApiError extends Error {
 }
 
 const TOKEN_KEY = 'dashboard_token'
+export const AUTH_INVALIDATED_EVENT = 'dashboard:auth-invalidated'
 
 export function readToken(): string | null {
   try {
@@ -37,6 +38,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, { ...options, headers })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
+    if (response.status === 401) {
+      storeToken(null)
+      window.dispatchEvent(new Event(AUTH_INVALIDATED_EVENT))
+    }
     const detail =
       (body as { message?: string; detail?: string }).message ??
       (body as { detail?: string }).detail ??

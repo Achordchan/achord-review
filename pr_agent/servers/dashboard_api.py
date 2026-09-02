@@ -105,11 +105,11 @@ def _session_valid(token: Optional[str]) -> bool:
     return bool(token_hash and get_storage().session_is_valid(token_hash))
 
 
-def require_auth(request: Request, dashboard_session: Optional[str] = Cookie(None)) -> None:
-    if not _session_valid(dashboard_session):
+async def require_auth(request: Request, dashboard_session: Optional[str] = Cookie(None)) -> None:
+    if not await asyncio.to_thread(_session_valid, dashboard_session):
         # also accept a bearer token for scripted access
         auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer ") and _session_valid(auth[7:].strip()):
+        if auth.startswith("Bearer ") and await asyncio.to_thread(_session_valid, auth[7:].strip()):
             return
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -184,7 +184,7 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
 
 @router.get("/auth/me")
 async def auth_me(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     model = str(get_settings().get("config.model", ""))
     return _ok({"authenticated": True, "model": model,
                 "version": os.environ.get("DASHBOARD_VERSION", "1.0.0")})
@@ -193,7 +193,7 @@ async def auth_me(request: Request, dashboard_session: Optional[str] = Cookie(No
 @router.post("/auth/logout")
 async def auth_logout(request: Request, response: Response,
                       dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     require_same_origin(request)
     # revoke whichever credential authenticated this request: the cookie token
     # and the bearer token are both real sessions in shared storage, and a scripted
@@ -224,14 +224,14 @@ class ConfigUpdateRequest(BaseModel):
 
 @router.get("/config")
 async def get_config(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     return _ok(get_config_engine().read())
 
 
 @router.put("/config")
 async def put_config(body: ConfigUpdateRequest, request: Request,
                      dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     require_same_origin(request)
     payload = body.model_dump()
     restart = payload.pop("restart")
@@ -265,7 +265,7 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
 
 @router.post("/ops/restart")
 async def ops_restart(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     require_same_origin(request)
     result = await asyncio.to_thread(ops.restart_container)
     started = bool(result.get("started"))
@@ -281,7 +281,7 @@ async def ops_restart(request: Request, dashboard_session: Optional[str] = Cooki
 
 @router.post("/ops/git-pull")
 async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     require_same_origin(request)
     result = await asyncio.to_thread(ops.git_pull)
     started = bool(result.get("started"))
@@ -301,7 +301,7 @@ async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cook
 
 @router.post("/ops/diagnose")
 async def ops_diagnose(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     require_same_origin(request)
     # probes make network calls; keep them off the shared webhook event loop
     return _ok(await asyncio.to_thread(ops.diagnose))
@@ -309,7 +309,7 @@ async def ops_diagnose(request: Request, dashboard_session: Optional[str] = Cook
 
 @router.get("/ops/logs")
 async def ops_logs(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     return _ok({"lines": await asyncio.to_thread(ops.tail_logs)})
 
 
@@ -319,7 +319,7 @@ async def ops_logs(request: Request, dashboard_session: Optional[str] = Cookie(N
 async def list_reviews(request: Request, dashboard_session: Optional[str] = Cookie(None),
                        repo: str = "", status: str = "", verdict: str = "",
                        trigger_type: str = "", limit: int = 50, offset: int = 0):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     return _ok(get_storage().list_reviews(repo=repo, status=status, verdict=verdict,
@@ -329,7 +329,7 @@ async def list_reviews(request: Request, dashboard_session: Optional[str] = Cook
 @router.get("/reviews/{review_id}")
 async def review_detail(review_id: int, request: Request,
                         dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     detail = get_storage().get_review_detail(review_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="审查记录不存在")
@@ -339,26 +339,26 @@ async def review_detail(review_id: int, request: Request,
 @router.post("/reviews/{review_id}/retry")
 async def retry_review(review_id: int, request: Request,
                        dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     return coming_soon()  # wired to the playground runner when F-01 lights up
 
 
 @router.get("/repos")
 async def list_repos(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     return _ok({"items": get_storage().list_repos()})
 
 
 @router.get("/stats/overview")
 async def stats_overview(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     return _ok(get_storage().stats_overview())
 
 
 @router.get("/audit-logs")
 async def audit_logs(request: Request, dashboard_session: Optional[str] = Cookie(None),
                      limit: int = 100):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     return _ok({"items": get_storage().list_audit_logs(limit=max(1, min(limit, 500)))})
 
 
@@ -374,7 +374,7 @@ class PlaygroundRunRequest(BaseModel):
 @router.post("/playground/run")
 async def playground_run(body: PlaygroundRunRequest, request: Request,
                          dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     # Phase 1 ships the storage + API surface; streaming execution lands with F-01.
     return coming_soon()
 
@@ -410,7 +410,7 @@ _RESERVED_PREFIXES = (
 @router.patch("/{reserved_path:path}")
 async def reserved(reserved_path: str, request: Request,
                    dashboard_session: Optional[str] = Cookie(None)):
-    require_auth(request, dashboard_session)
+    await require_auth(request, dashboard_session)
     if f"/{reserved_path.rstrip('/')}" in _RESERVED or reserved_path.startswith(_RESERVED_PREFIXES):
         return coming_soon()
     raise HTTPException(status_code=404, detail="未知接口")

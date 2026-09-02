@@ -57,6 +57,7 @@ class TestRead:
 
 class TestWrite:
     def test_write_updates_fields(self, engine):
+        before = os.stat(engine.config_path)
         ok, errors = engine.write({
             "model": "openai/gpt-new",
             "ai_timeout": 900,
@@ -69,6 +70,9 @@ class TestWrite:
         assert values["ai_timeout"] == 900
         assert values["verdict_blocking_severities"] == ["P0", "P1"]
         assert values["ignore_glob"] == ["dist/**", "node_modules/**"]
+        after = os.stat(engine.config_path)
+        assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+        assert after.st_mode & 0o777 == 0o600
 
     def test_empty_key_keeps_secret(self, engine):
         before = engine.read()["values"]["key"]
