@@ -75,6 +75,17 @@ class TestAuth:
         assert resp.status_code == 200
         assert resp.json()["data"]["authenticated"] is True
 
+    def test_session_storage_failure_returns_retryable_503(self, client, storage, monkeypatch):
+        auth = _auth_header(client)
+        monkeypatch.setattr(
+            storage, "admin_password_generation",
+            lambda: (_ for _ in ()).throw(DashboardStorageReadError("volume unavailable")))
+
+        resp = client.get("/api/v1/dashboard/auth/me", headers=auth)
+
+        assert resp.status_code == 503
+        assert "暂不可用" in resp.json()["detail"]
+
     def test_login_wrong_password(self, client):
         resp = client.post("/api/v1/dashboard/auth/login", json={"password": "wrong"})
         assert resp.status_code == 401

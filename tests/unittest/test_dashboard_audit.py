@@ -28,6 +28,23 @@ def test_terminal_audit_write_is_complete_before_await_returns(tmp_path, monkeyp
     assert row["total_tokens"] == 3
 
 
+def test_finished_audit_normalizes_valid_severity_before_storage(tmp_path, monkeypatch):
+    storage = DashboardStorage(db_path=str(tmp_path / "audit.db"))
+    storage.initialize()
+    request_id = storage.create_review(repo_name="a/b", pr_number=1, pr_url="u")
+    monkeypatch.setattr(audit, "_run_audit", lambda: storage)
+
+    asyncio.run(audit.review_finished(
+        request_id,
+        issues=[{"severity": "p1", "issue_header": "lowercase finding"}],
+    ))
+
+    row = storage.get_review_by_request_id(request_id)
+    detail = storage.get_review_detail(row["id"])
+    assert detail["issues"][0]["severity"] == "P1"
+    assert storage.stats_overview()["p0_p1_blocked"] == 1
+
+
 def test_review_heartbeat_loop_refreshes_until_cancelled(monkeypatch):
     touched = asyncio.Event()
 

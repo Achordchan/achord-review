@@ -356,7 +356,7 @@ class DashboardStorage:
             " JOIN dashboard_auth_state AS auth"
             " ON auth.id = 1 AND auth.generation = session.password_generation"
             " WHERE session.token_hash = ? AND session.expires_at > ? LIMIT 1",
-            (token_hash, int(time.time()) if now is None else now))
+            (token_hash, int(time.time()) if now is None else now), strict=True)
         return bool(rows)
 
     def revoke_session(self, token_hash: str) -> bool:
@@ -423,7 +423,8 @@ class DashboardStorage:
         return generation
 
     def admin_password_generation(self) -> Optional[int]:
-        rows = self._read("SELECT generation FROM dashboard_auth_state WHERE id = 1")
+        rows = self._read(
+            "SELECT generation FROM dashboard_auth_state WHERE id = 1", strict=True)
         return int(rows[0]["generation"]) if rows else None
 
     def verify_login_attempt(self, lockout_key: str, password_matches: bool,

@@ -16,6 +16,7 @@ from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
 _PR_URL_RE = re.compile(r"(?:pull|pull-requests|merge_requests)/(\d+)")
+_VALID_SEVERITIES = {"P0", "P1", "P2", "P3"}
 
 
 def _parse_pr_url(pr_url: str) -> tuple:
@@ -99,8 +100,14 @@ async def review_finished(request_id: str, verdict: str = "", verdict_reason: st
             for issue in issues or []:
                 if not isinstance(issue, dict):
                     continue
+                raw_severity = str(issue.get("severity") or "").strip()
+                normalized_severity = raw_severity.upper()
                 clean_issues.append({
-                    "severity": str(issue.get("severity") or "").strip(),
+                    "severity": (
+                        normalized_severity
+                        if normalized_severity in _VALID_SEVERITIES
+                        else raw_severity
+                    ),
                     "relevant_file": str(issue.get("relevant_file") or "").strip(),
                     "relevant_lines_start": _as_int(issue.get("start_line")),
                     "relevant_lines_end": _as_int(issue.get("end_line")),

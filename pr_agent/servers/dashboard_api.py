@@ -182,7 +182,7 @@ async def _create_session(verified_password: str) -> str:
 def _session_valid(token: Optional[str]) -> bool:
     password, signature = _admin_password_snapshot()
     if not _sync_admin_password(password, signature):
-        return False
+        raise DashboardStorageReadError("dashboard authentication state is unavailable")
     if not token or not password:
         return False
     token_hash = _session_hash(token, password)
@@ -196,12 +196,16 @@ def _session_valid(token: Optional[str]) -> bool:
 
 
 async def require_auth(request: Request, dashboard_session: Optional[str] = Cookie(None)) -> None:
-    if not await asyncio.to_thread(_session_valid, dashboard_session):
-        # also accept a bearer token for scripted access
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer ") and await asyncio.to_thread(_session_valid, auth[7:].strip()):
-            return
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        if not await asyncio.to_thread(_session_valid, dashboard_session):
+            # also accept a bearer token for scripted access
+            auth = request.headers.get("authorization", "")
+            if auth.startswith("Bearer ") and await asyncio.to_thread(_session_valid, auth[7:].strip()):
+                return
+            raise HTTPException(status_code=401, detail="Not authenticated")
+    except DashboardStorageReadError as e:
+        get_logger().warning(f"Dashboard session validation unavailable, error: {e}")
+        raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试") from e
 
 
 def require_same_origin(request: Request) -> None:

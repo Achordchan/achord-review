@@ -96,6 +96,13 @@ class TestReviewsCrud:
         with pytest.raises(DashboardStorageReadError):
             storage._read("SELECT 1", strict=True)
 
+    def test_session_validation_propagates_storage_failure(self, storage, monkeypatch):
+        monkeypatch.setattr(storage, "_connect", lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("volume unavailable")))
+
+        with pytest.raises(DashboardStorageReadError):
+            storage.session_is_valid("token-hash")
+
     def test_finish_review_atomic_writes_issues_and_status(self, storage):
         request_id = _seed_review(storage, status_complete=False)
         storage.finish_review(
