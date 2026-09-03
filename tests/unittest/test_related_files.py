@@ -271,3 +271,12 @@ class TestPerModelRendering:
             provider, handler, "gpt-5", "diff", [])
 
         assert files == {"b.py": "kept"}
+
+
+def test_an_offered_dotfile_survives_path_validation():
+    # lstrip("./") would turn this into "github/workflows/ci.yml" and fail the
+    # allowlist it is supposed to pass.
+    candidates = [".github/workflows/ci.yml", ".eslintrc"]
+
+    assert related_files._parse_selection(
+        _yaml("./.github/workflows/ci.yml", ".eslintrc"), candidates, 6) == candidates

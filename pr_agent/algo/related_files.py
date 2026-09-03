@@ -154,7 +154,9 @@ def _parse_selection(response: str, candidates: List[str], max_files: int) -> Li
         path = entry.get("path") if isinstance(entry, dict) else entry
         if not isinstance(path, str):
             continue
-        path = path.strip().lstrip("./")
+        # removeprefix, not lstrip: lstrip("./") would eat the leading dot of an
+        # offered dotfile (".github/workflows/ci.yml") and fail its own allowlist.
+        path = path.strip().removeprefix("./")
         if path in allowed and path not in selected:
             selected.append(path)
         if len(selected) >= max_files:

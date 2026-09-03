@@ -1489,8 +1489,10 @@ def test_changed_paths_exclude_the_pre_rename_path():
     assert reviewer._changed_paths() == ["new/name.py", "old/name.py", "kept.py"]
 
 
-def test_changed_paths_degrade_when_the_provider_cannot_list_files():
+def test_changed_paths_report_failure_rather_than_an_empty_exclusion_list():
+    # An empty list would let the base version of a modified file be attached as
+    # unchanged context; None tells the caller to skip retrieval entirely.
     reviewer = _make_reviewer()
     reviewer.git_provider.get_diff_files.side_effect = RuntimeError("provider down")
 
-    assert reviewer._changed_paths() == []
+    assert reviewer._changed_paths() is None

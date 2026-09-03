@@ -750,12 +750,17 @@ class PRReviewer:
         if not self.git_provider.submit_review_verdict(event, f"Automated review: {reason}."):
             get_logger().info(f"Review verdict {event} was not submitted")
 
-    def _changed_paths(self) -> list:
-        """Paths this PR touches; they are excluded from the retrieval candidates.
+    def _changed_paths(self) -> Optional[list]:
+        """Paths this PR touches, or None when they cannot be determined.
+
+        These paths are what retrieval excludes from its candidates, so an
+        incomplete list is not a degraded answer — it lets the base version of a
+        file this PR modifies be attached as "unchanged" context, and the review
+        then reasons about content the diff has already replaced. None tells the
+        caller to skip retrieval instead.
 
         A rename touches two paths: the base tree still carries the old one, so
-        without it the pre-rename file could be attached as unchanged context and
-        the review would reason about content this PR removes.
+        without it the pre-rename file could be attached the same way.
         """
         paths = []
         try:
@@ -765,7 +770,9 @@ class PRReviewer:
                     if path and path not in paths:
                         paths.append(path)
         except Exception as e:
-            get_logger().debug(f"Could not list changed paths for retrieval, error: {e}")
+            get_logger().warning(
+                f"Skipping related-file retrieval: changed paths are unknown, error: {e}")
+            return None
         return paths
 
     async def _prepare_prediction(self, model: str) -> None:
@@ -789,9 +796,10 @@ class PRReviewer:
             # window, and inheriting a block sized for the primary would spend
             # the retry on the same overflow it exists to escape.
             if self.related_files is None:
-                self.related_files = await collect_related_files(
+                changed_paths = self._changed_paths()
+                self.related_files = {} if changed_paths is None else await collect_related_files(
                     self.git_provider, self.ai_handler, model, self.patches_diff,
-                    self._changed_paths(), title=self.vars.get("title", ""))
+                    changed_paths, title=self.vars.get("title", ""))
             self.vars["related_files"] = render_related_files(
                 self.related_files, model, self.patches_diff, self.token_handler)
             self.prediction = await self._get_prediction(model)
