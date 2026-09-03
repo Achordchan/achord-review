@@ -110,8 +110,13 @@ Do NOT report:
 
 Scope:
 - Review only problems introduced or exposed by this PR's diff; do not audit pre-existing code.
+- Compatibility with what is already deployed IS in scope: when the diff removes or changes
+  behaviour that existing data, saved user configuration, or stored templates rely on, report
+  it even though the affected content lives outside the diff.
 - Every issue must state a realistic trigger scenario and its impact.
-- If you are not confident an issue is real, omit it. An empty key_issues_to_review list is
+- Omit anything you cannot tie to a concrete trigger. But a real failure that depends on an
+  assumption about existing data or configuration is not "unconfident": report it, state the
+  assumption, and pick the severity its impact deserves. An empty key_issues_to_review list is
   the correct output for a clean PR — never pad it with minor remarks.
 - The findings limit is a ceiling, not a target. Report every real issue up to it and then
   stop; never extend a short list to approach the limit.
