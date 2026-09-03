@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import datetime
+import math
 import os
 import re
 import threading
@@ -48,8 +49,22 @@ from pr_agent.servers.help import HelpMessage
 from pr_agent.tools.ticket_pr_compliance_check import extract_and_cache_pr_tickets
 
 MAX_REVIEW_COVERAGE_FILES = 50
-AUDIT_START_TIMEOUT_SECONDS = max(
-    0.1, float(os.environ.get("DASHBOARD_AUDIT_START_TIMEOUT_SECONDS", "2")))
+
+
+def _load_audit_start_timeout_seconds() -> float:
+    """Read the optional audit deadline without making reviewer import fragile."""
+    try:
+        timeout = float(os.environ.get("DASHBOARD_AUDIT_START_TIMEOUT_SECONDS", "2"))
+        if not math.isfinite(timeout):
+            raise ValueError("timeout must be finite")
+        return max(0.1, timeout)
+    except (TypeError, ValueError) as e:
+        get_logger().warning(
+            f"Invalid DASHBOARD_AUDIT_START_TIMEOUT_SECONDS; using 2 seconds, error: {e}")
+        return 2.0
+
+
+AUDIT_START_TIMEOUT_SECONDS = _load_audit_start_timeout_seconds()
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
 _AUDIT_CLEANUP_TASKS: set[asyncio.Task] = set()
 
@@ -154,7 +169,7 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
         return ""
     except asyncio.CancelledError:
         abandoned.set()
-        await asyncio.shield(_close_late_record("review task cancelled during audit startup"))
+        _schedule_late_cleanup("review task cancelled during audit startup")
         raise
     except Exception as e:
         get_logger().debug(f"Dashboard audit start skipped, error: {e}")

@@ -2,13 +2,25 @@
 
 import asyncio
 import threading
-from unittest.mock import AsyncMock
 
 import pytest
 
 from pr_agent.dashboard import audit
 from pr_agent.dashboard.storage import DashboardStorage
 from pr_agent.tools import pr_reviewer
+
+
+@pytest.mark.parametrize("value", ["", "2s", "nan", "inf", "-inf"])
+def test_invalid_audit_start_timeout_uses_safe_default(value, monkeypatch):
+    monkeypatch.setenv("DASHBOARD_AUDIT_START_TIMEOUT_SECONDS", value)
+
+    assert pr_reviewer._load_audit_start_timeout_seconds() == 2.0
+
+
+def test_audit_start_timeout_preserves_supported_lower_bound(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_AUDIT_START_TIMEOUT_SECONDS", "-5")
+
+    assert pr_reviewer._load_audit_start_timeout_seconds() == 0.1
 
 
 def test_terminal_audit_write_is_complete_before_await_returns(tmp_path, monkeypatch):
@@ -260,7 +272,7 @@ def test_audit_start_timeout_returns_while_storage_stalls_and_closes_late_record
 def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
     started = threading.Event()
     release = threading.Event()
-    audit_failed = AsyncMock()
+    closed = {}
 
     class Reviewer:
         pr_url = "https://github.com/a/b/pull/1"
@@ -271,19 +283,29 @@ def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
         assert release.wait(timeout=2)
         return "late-request-id"
 
-    monkeypatch.setattr(audit, "review_started", delayed_started)
-    monkeypatch.setattr(pr_reviewer, "_audit_failed", audit_failed)
-
     async def scenario():
+        record_closed = asyncio.Event()
+
+        async def fake_failed(request_id, error):
+            closed["request_id"] = request_id
+            closed["error"] = str(error)
+            record_closed.set()
+
+        monkeypatch.setattr(audit, "review_started", delayed_started)
+        monkeypatch.setattr(pr_reviewer, "_audit_failed", fake_failed)
+
         task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
-        await asyncio.to_thread(started.wait, 2)
+        assert await asyncio.to_thread(started.wait, 1)
         task.cancel()
-        release.set()
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.gather(task)
+            await asyncio.wait_for(asyncio.shield(task), 0.2)
+        assert closed == {}
+
+        release.set()
+        await asyncio.wait_for(record_closed.wait(), 1)
 
     asyncio.run(scenario())
-
-    error = audit_failed.await_args.args[1]
-    assert audit_failed.await_args.args[0] == "late-request-id"
-    assert str(error) == "review task cancelled during audit startup"
+    assert closed == {
+        "request_id": "late-request-id",
+        "error": "review task cancelled during audit startup",
+    }
