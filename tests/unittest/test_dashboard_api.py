@@ -625,6 +625,8 @@ class TestProtectedRoutes:
             dashboard_api.ops, "restart_capability",
             lambda: {"available": False, "reason": "host restarted"})
 
+        monkeypatch.setattr(dashboard_api.ops, "rebuild_required", lambda: True)
+
         resp = client.get(
             "/api/v1/dashboard/ops/capabilities", headers=_auth_header(client))
 
@@ -633,6 +635,8 @@ class TestProtectedRoutes:
             "available": False, "reason": "host managed"}
         assert resp.json()["data"]["restart"] == {
             "available": False, "reason": "host restarted"}
+        # Server-authoritative so the panel can restore the blocked-restart state.
+        assert resp.json()["data"]["rebuild_required"] is True
 
     def test_ops_check_update_is_reachable_and_returns_the_probe(self, client, monkeypatch):
         monkeypatch.setattr(

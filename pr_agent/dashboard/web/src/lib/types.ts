@@ -90,6 +90,7 @@ export type OpsResult = {
 export type OpsCapabilities = {
   git_pull: { available: boolean; reason: string }
   restart: { available: boolean; reason: string; mode?: string }
+  rebuild_required: boolean
 }
 export type VersionCommit = { sha: string | null; subject: string | null }
 export type VersionInfo = {

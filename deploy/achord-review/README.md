@@ -132,12 +132,15 @@ image and the API routes share the webhook process).
   the tracked remote so you can update and restart in place.
 - **In-panel updates are opt-in**, because the shipped image bakes its code in rather than
   running from a live checkout. To enable the sub2api-style "check → one-click update →
-  restart" flow, uncomment four lines in `docker-compose.yml`: `working_dir: /app/repo`,
+  restart" flow, uncomment the opt-in lines in `docker-compose.yml`: `working_dir: /app/repo`,
   the `../..:/app/repo` mount (the repo root the image is already built from — no separate
-  clone), and the `ACHORD_REVIEW_REPO_DIR` / `ACHORD_REVIEW_SELF_RESTART` env. `working_dir`
-  matters: `python -m gunicorn` puts the working directory at `sys.path[0]`, ahead of any
-  `PYTHONPATH`, so without it the baked `/app/pr_agent` shadows the mounted checkout and a
-  pull has no effect. With it in place: **check update** does `git fetch` and shows how far
+  clone), the `./config:/app/repo/pr_agent/settings_prod` mount, and the
+  `ACHORD_REVIEW_REPO_DIR` / `ACHORD_REVIEW_SELF_RESTART` env. Both matter: `python -m
+  gunicorn` puts the working directory at `sys.path[0]`, ahead of any `PYTHONPATH`, so without
+  `working_dir` the baked `/app/pr_agent` shadows the mounted checkout and a pull has no
+  effect; and once the app imports from `/app/repo`, `config_loader` reads settings from
+  `/app/repo/pr_agent/settings_prod`, so the config must be mounted there too or the deployed
+  secrets go unread after a self-restart. With them in place: **check update** does `git fetch` and shows how far
   behind you are; **one-click update** runs `git pull --ff-only`; **restart** self-exits so
   the fresh process imports the pulled code. The browser polls the service back up and
   reloads automatically — the HttpOnly session cookie and the SQLite session row both

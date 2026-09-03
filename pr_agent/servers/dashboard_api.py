@@ -523,11 +523,15 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
 @router.get("/ops/capabilities")
 async def ops_capabilities(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    git_pull, restart = await asyncio.gather(
+    git_pull, restart, rebuild_required = await asyncio.gather(
         asyncio.to_thread(ops.git_pull_capability),
         asyncio.to_thread(ops.restart_capability),
+        asyncio.to_thread(ops.rebuild_required),
     )
-    return _ok({"git_pull": git_pull, "restart": restart})
+    # rebuild_required is server-authoritative and stateless, so the panel can
+    # restore the "needs a host rebuild, restart blocked" state after a reload.
+    return _ok({"git_pull": git_pull, "restart": restart,
+                "rebuild_required": rebuild_required})
 
 
 @router.post("/ops/restart")

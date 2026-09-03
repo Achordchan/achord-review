@@ -94,6 +94,11 @@ export function VersionCenter({ onClose, version }: {
   const info = updateQuery.data
   const restartAvailable = capabilitiesQuery.data?.restart.available === true
   const updateAvailable = info?.update_available === true
+  // Rebuild-required is server-authoritative, so it survives a reopen even after
+  // the local depsChanged flag has reset; either one blocks an in-place restart.
+  const rebuildRequired = depsChanged || capabilitiesQuery.data?.rebuild_required === true
+  const aheadOnly = info?.checked === true && !updateAvailable && !info.diverged
+    && (info.ahead ?? 0) > 0
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -204,6 +209,15 @@ export function VersionCenter({ onClose, version }: {
                     ⚠ 本地与远端已分叉（本地领先 {info.ahead}、落后 {info.behind}），
                     无法一键 fast-forward 更新，请在宿主机处理
                   </p>
+                ) : rebuildRequired ? (
+                  <p className="text-xs font-medium text-warn">
+                    ⚠ 运行镜像与检出依赖不一致，重启已被禁用——
+                    请在宿主机执行 <code className="font-mono">docker compose up -d --build</code>
+                  </p>
+                ) : aheadOnly ? (
+                  <p className="text-xs font-medium text-warn">
+                    ⚠ 本地领先远端 {info.ahead} 个提交（有未推送的本地改动），与远端不一致
+                  </p>
                 ) : (
                   <p className="flex items-center gap-1.5 text-xs text-good">
                     <CheckCircle2 size={14} /> 已是最新版本
@@ -235,18 +249,18 @@ export function VersionCenter({ onClose, version }: {
                 )}
                 <button
                   onClick={() => void runRestart()}
-                  disabled={!restartAvailable || phase === 'updating' || depsChanged}
-                  title={depsChanged
-                    ? '依赖有变更，重启会因缺少新依赖导致导入失败并进入重启循环，请在宿主机重建镜像'
+                  disabled={!restartAvailable || phase === 'updating' || rebuildRequired}
+                  title={rebuildRequired
+                    ? '依赖与运行镜像不一致，重启会因缺少新依赖导入失败并进入重启循环，请在宿主机重建镜像'
                     : (restartAvailable ? '' : capabilitiesQuery.data?.restart.reason)}
                   className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-semibold transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
-                    phase === 'updated' && !depsChanged
+                    phase === 'updated' && !rebuildRequired
                       ? 'bg-accent-strong text-white hover:bg-accent'
                       : 'border border-line text-text hover:bg-surface-2'
                   }`}
                 >
                   <RefreshCw size={14} />
-                  {depsChanged ? '需宿主机重建' : phase === 'updated' ? '重启以生效' : '重启'}
+                  {rebuildRequired ? '需宿主机重建' : phase === 'updated' ? '重启以生效' : '重启'}
                 </button>
               </div>
             </div>
