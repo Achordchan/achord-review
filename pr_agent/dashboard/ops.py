@@ -384,6 +384,8 @@ def check_update() -> Dict[str, Any]:
         "current": None,
         "latest": None,
         "behind": None,
+        "ahead": None,
+        "diverged": False,
         "update_available": False,
     }
     if not capability["available"]:
@@ -426,13 +428,23 @@ def check_update() -> Dict[str, Any]:
                 "subject": latest_subject or None,
                 "branch": upstream,
             }
+            # Count both sides: a diverged branch has upstream commits we lack AND
+            # local commits upstream lacks, so `git pull --ff-only` cannot succeed —
+            # never advertise a one-click update that is bound to fail.
             behind_rc, behind = _git_text(
                 ["rev-list", "--count", "HEAD..@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
-            if behind_rc != 0 or not behind.isdigit():
+            ahead_rc, ahead = _git_text(
+                ["rev-list", "--count", "@{u}..HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            if behind_rc != 0 or not behind.isdigit() or ahead_rc != 0 or not ahead.isdigit():
                 result["reason"] = "无法比较与远端的差异，暂时无法确认更新。"
                 return result
             result["behind"] = int(behind)
-            result["update_available"] = int(behind) > 0
+            result["ahead"] = int(ahead)
+            if int(ahead) > 0 and int(behind) > 0:
+                result["diverged"] = True
+                result["reason"] = "本地与远端已分叉，无法 fast-forward 更新，请在宿主机处理。"
+            else:
+                result["update_available"] = int(behind) > 0
             result["checked"] = True
             return result
         except (OSError, subprocess.TimeoutExpired) as e:

@@ -199,6 +199,11 @@ export function VersionCenter({ onClose, version }: {
                   <p className="flex items-center gap-1.5 text-xs font-medium text-good">
                     <CheckCircle2 size={14} /> 代码已拉取，重启后生效
                   </p>
+                ) : info.diverged ? (
+                  <p className="text-xs font-medium text-warn">
+                    ⚠ 本地与远端已分叉（本地领先 {info.ahead}、落后 {info.behind}），
+                    无法一键 fast-forward 更新，请在宿主机处理
+                  </p>
                 ) : (
                   <p className="flex items-center gap-1.5 text-xs text-good">
                     <CheckCircle2 size={14} /> 已是最新版本

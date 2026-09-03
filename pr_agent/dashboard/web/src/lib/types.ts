@@ -100,6 +100,8 @@ export type VersionInfo = {
   current: VersionCommit | null
   latest: (VersionCommit & { branch: string }) | null
   behind: number | null
+  ahead: number | null
+  diverged: boolean
   update_available: boolean
 }
 export type DiagnoseResult = {

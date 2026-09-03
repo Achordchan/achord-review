@@ -45,6 +45,12 @@ services:
       # restart; a change to requirements.txt / pyproject.toml / Dockerfile still
       # needs a host rebuild — the panel detects this and blocks the restart.
       #- ../..:/app/repo
+      # With working_dir /app/repo the app imports pr_agent from the checkout, so
+      # config_loader resolves settings_prod relative to /app/repo/pr_agent. Mount
+      # the same config there too, or the deployed secrets go unread after a
+      # self-restart. (The /app/pr_agent/settings_prod mount above still covers the
+      # baked package for the pre-opt-in boot.)
+      #- ./config:/app/repo/pr_agent/settings_prod
     environment:
       # Keep at least two workers (the gunicorn default) so a slow provider call
       # cannot stall health checks and unrelated webhooks. Dashboard sessions
