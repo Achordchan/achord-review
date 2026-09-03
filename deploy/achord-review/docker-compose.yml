@@ -25,6 +25,15 @@ services:
       - ./config:/app/pr_agent/settings_prod
       # Dashboard SQLite database (review history, audit logs); survives restarts.
       - ./data:/app/data
+      # --- In-panel code updates (opt-in) -------------------------------------
+      # Mount a host git checkout so the panel's "check update / one-click update"
+      # can pull live code that the app then imports. Set it up once on the host:
+      #   git clone <this repo> ./repo
+      # then uncomment this mount together with the three ACHORD_REVIEW_* / PYTHONPATH
+      # env vars below. Code-only updates apply on restart; changes to
+      # requirements.txt / pyproject.toml / Dockerfile still need a host rebuild
+      # (the panel detects this and says so).
+      #- ./repo:/app/repo
     environment:
       # Keep at least two workers (the gunicorn default) so a slow provider call
       # cannot stall health checks and unrelated webhooks. Dashboard sessions
@@ -37,9 +46,15 @@ services:
       # Exact public browser origin used by the CSRF fallback when Fetch
       # Metadata headers are unavailable. Scheme and effective port matter.
       DASHBOARD_EXTERNAL_ORIGIN: "https://review.achord.cn"
-      # Intentionally omit ACHORD_REVIEW_REPO_DIR: this image is not a checkout.
-      # Code releases are performed by the host deployment workflow. A custom
-      # deployment may opt in only with a deliberately mounted writable checkout.
+      # In-panel updates (opt-in) — uncomment together with the ./repo mount above.
+      # Run the app from the mounted checkout, let the panel git-pull it, and allow
+      # a socket-free self-restart that exits PID 1 so `restart: unless-stopped`
+      # (below) respawns a fresh process importing the pulled code. No Docker socket.
+      #ACHORD_REVIEW_REPO_DIR: "/app/repo"
+      #PYTHONPATH: "/app/repo:/app"
+      #ACHORD_REVIEW_SELF_RESTART: "1"
+      # Left commented by default: the shipped image is not a checkout, so releases
+      # are host-managed (git pull + docker compose up -d --build).
     mem_limit: 900m
     logging:
       driver: json-file

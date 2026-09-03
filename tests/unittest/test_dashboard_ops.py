@@ -32,6 +32,7 @@ def test_git_pull_returns_completed_output(monkeypatch, tmp_path):
     assert result == {
         "started": True, "completed": True, "exit_code": 0,
         "timed_out": False, "output": ["Updating files", "Done"],
+        "dependencies_changed": False,
     }
 
 
@@ -568,3 +569,156 @@ def test_github_probe_reports_a_rejected_token_revocation(monkeypatch):
 
     assert result["ok"] is True
     assert any("403" in message for message in warnings)
+
+
+def _fake_git_text(responses):
+    """Map a git argument tuple to a (returncode, stdout) pair for check_update."""
+    def _run(args, timeout_seconds):
+        return responses[tuple(args)]
+    return _run
+
+
+def test_check_update_flags_an_available_update(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "old commit"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet"): (0, ""),
+        ("rev-parse", "--short", "@{u}"): (0, "bbbbbbb"),
+        ("log", "-1", "--format=%s", "@{u}"): (0, "new commit"),
+        ("rev-list", "--count", "HEAD..@{u}"): (0, "3"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is True
+    assert result["update_available"] is True
+    assert result["behind"] == 3
+    assert result["current"]["sha"] == "aaaaaaa"
+    assert result["latest"]["sha"] == "bbbbbbb"
+    assert result["latest"]["branch"] == "origin/main"
+
+
+def test_check_update_reports_up_to_date(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "head"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet"): (0, ""),
+        ("rev-parse", "--short", "@{u}"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s", "@{u}"): (0, "head"),
+        ("rev-list", "--count", "HEAD..@{u}"): (0, "0"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is True
+    assert result["update_available"] is False
+    assert result["behind"] == 0
+
+
+def test_check_update_disabled_without_checkout(monkeypatch):
+    monkeypatch.setattr(
+        ops, "git_pull_capability",
+        lambda: {"available": False, "reason": "not a checkout"})
+
+    result = ops.check_update()
+
+    assert result["available"] is False
+    assert result["checked"] is False
+    assert result["update_available"] is False
+    assert result["reason"] == "not a checkout"
+
+
+def test_check_update_surfaces_fetch_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "head"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet"): (1, "fatal: could not read from remote"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is False
+    assert result["update_available"] is False
+    assert "could not read from remote" in result["reason"]
+
+
+def test_restart_capability_prefers_docker_when_endpoint_is_live(monkeypatch):
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="[]"))
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
+
+    capability = ops.restart_capability()
+
+    assert capability["available"] is True
+    assert capability["mode"] == "docker"
+
+
+def test_restart_capability_falls_back_to_self_exit_without_docker(monkeypatch):
+    def no_docker(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(ops.subprocess, "run", no_docker)
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
+
+    capability = ops.restart_capability()
+
+    assert capability["available"] is True
+    assert capability["mode"] == "self"
+
+
+def test_restart_capability_stays_disabled_without_docker_or_self_restart(monkeypatch):
+    def no_docker(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(ops.subprocess, "run", no_docker)
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", False)
+
+    capability = ops.restart_capability()
+
+    assert capability["available"] is False
+
+
+def test_execute_restart_self_mode_signals_pid_one(monkeypatch):
+    signals = []
+    monkeypatch.setattr(ops.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    class _Ctx:
+        def __exit__(self, *a):
+            return False
+
+    ops.execute_restart(ops._RestartTicket(_Ctx(), None, mode="self"))
+
+    assert signals == [(1, ops.signal.SIGTERM)]
+
+
+def test_git_pull_flags_dependency_changes(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(
+        ops, "_run_bounded_command",
+        lambda *args, **kwargs: {
+            "started": True, "completed": True, "exit_code": 0,
+            "timed_out": False, "output": ["Updated"],
+        })
+    monkeypatch.setattr(ops, "_git_text", lambda args, timeout: (
+        (0, "oldsha") if args[:1] == ["rev-parse"]
+        else (0, "requirements.txt\npr_agent/foo.py")))
+
+    result = ops.git_pull()
+
+    assert result["dependencies_changed"] is True
+    assert any("重建镜像" in line or "--build" in line for line in result["output"])

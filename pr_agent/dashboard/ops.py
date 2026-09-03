@@ -22,7 +22,14 @@ from pr_agent.log import get_logger
 # Fixed commands only; nothing constructed from user input reaches the shell.
 CONTAINER_NAME = os.environ.get("ACHORD_REVIEW_CONTAINER", "achord-review")
 REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "").strip()
+# Socket-free self-restart: terminate the gunicorn master (PID 1) and let the
+# container's `restart: unless-stopped` policy bring a fresh process up, which
+# re-imports code from the mounted checkout. Opt-in, because it is only safe
+# when the container actually carries a restart policy (the shipped compose does).
+SELF_RESTART_ENABLED = os.environ.get("ACHORD_REVIEW_SELF_RESTART", "").strip().lower() in (
+    "1", "true", "yes", "on")
 GIT_PULL_TIMEOUT_SECONDS = 120
+GIT_FETCH_TIMEOUT_SECONDS = 45
 GIT_PREFLIGHT_TIMEOUT_SECONDS = 5
 DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 5
 RESTART_COMMAND_TIMEOUT_SECONDS = 45
@@ -136,26 +143,41 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int,
 class _RestartTicket:
     """Transfer the held operations lock into an after-response restart task."""
 
-    def __init__(self, lock_context, lock_file):
+    def __init__(self, lock_context, lock_file, mode: str = "docker"):
         self.lock_context = lock_context
         self.lock_file = lock_file
+        self.mode = mode
+
+
+def _self_restart_capability() -> Optional[Dict[str, Any]]:
+    """Socket-free fallback: exit PID 1 and let the restart policy respawn us."""
+    if not SELF_RESTART_ENABLED:
+        return None
+    return {"available": True, "mode": "self",
+            "reason": "将通过退出进程、由容器重启策略自动拉起（无需 Docker 端点）。"}
 
 
 def restart_capability() -> Dict[str, Any]:
-    """Check whether a deliberately configured Docker endpoint can see the target."""
+    """Report how a restart can happen: a Docker endpoint, or a socket-free self-exit."""
     try:
         preflight = subprocess.run(
             ["docker", "inspect", CONTAINER_NAME], stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, timeout=DOCKER_PREFLIGHT_TIMEOUT_SECONDS,
             check=False)
     except subprocess.TimeoutExpired:
-        return {"available": False, "reason": "Docker 端点预检超时，重启由宿主机管理。"}
+        preflight = None
     except OSError:
-        return {"available": False, "reason": "未配置受控 Docker 端点，重启由宿主机管理。"}
-    if preflight.returncode != 0:
-        reason = (preflight.stdout or "Docker 端点不可用").strip()[:300]
-        return {"available": False, "reason": reason}
-    return {"available": True, "reason": "已连接受控 Docker 端点，重启将在响应后执行。"}
+        preflight = None
+    if preflight is not None and preflight.returncode == 0:
+        return {"available": True, "mode": "docker",
+                "reason": "已连接受控 Docker 端点，重启将在响应后执行。"}
+    # Docker endpoint absent or unusable — fall back to a self-exit if enabled.
+    self_restart = _self_restart_capability()
+    if self_restart is not None:
+        return self_restart
+    if preflight is not None and preflight.returncode != 0:
+        return {"available": False, "reason": (preflight.stdout or "Docker 端点不可用").strip()[:300]}
+    return {"available": False, "reason": "未配置受控 Docker 端点，重启由宿主机管理。"}
 
 
 def prepare_restart() -> tuple[Dict[str, Any], Optional[_RestartTicket]]:
@@ -169,19 +191,27 @@ def prepare_restart() -> tuple[Dict[str, Any], Optional[_RestartTicket]]:
     if not capability["available"]:
         lock_context.__exit__(None, None, None)
         return _not_started(capability["reason"]), None
+    mode = capability.get("mode", "docker")
+    scheduled_note = ("重启已排队：将在当前响应后退出进程，由容器重启策略自动拉起"
+                      if mode == "self"
+                      else "重启已排队，将在当前响应发送并完成审计后执行")
     result = {
         "started": True,
         "completed": False,
         "exit_code": None,
         "scheduled": True,
-        "output": ["重启已排队，将在当前响应发送并完成审计后执行"],
+        "mode": mode,
+        "output": [scheduled_note],
     }
-    return result, _RestartTicket(lock_context, lock_file)
+    return result, _RestartTicket(lock_context, lock_file, mode)
 
 
 def execute_restart(ticket: _RestartTicket) -> None:
-    """Run the fixed self-restart command from a post-response background task."""
+    """Restart from a post-response background task, via Docker or a self-exit."""
     try:
+        if ticket.mode == "self":
+            _execute_self_restart()
+            return
         result = _run_bounded_command(
             ["docker", "restart", "--timeout", "30", CONTAINER_NAME],
             cwd="/", timeout_seconds=RESTART_COMMAND_TIMEOUT_SECONDS,
@@ -193,6 +223,20 @@ def execute_restart(ticket: _RestartTicket) -> None:
         get_logger().warning(f"Scheduled dashboard restart failed, error: {e}")
     finally:
         ticket.lock_context.__exit__(None, None, None)
+
+
+def _execute_self_restart() -> None:
+    """Gracefully terminate the gunicorn master (PID 1) so the policy respawns us.
+
+    The container's `restart: unless-stopped` starts a fresh process that, under
+    `preload_app`, re-imports the application from the mounted checkout — this is
+    how a pulled code update actually takes effect. Needs no Docker socket.
+    """
+    get_logger().info("Dashboard self-restart: signaling gunicorn master (PID 1) to exit")
+    try:
+        os.kill(1, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError) as e:
+        get_logger().warning(f"Dashboard self-restart could not signal PID 1, error: {e}")
 
 
 def git_pull_capability() -> Dict[str, Any]:
@@ -214,6 +258,21 @@ def git_pull_capability() -> Dict[str, Any]:
     return {"available": True, "reason": "已连接受控 Git 工作区，仅允许 fast-forward 更新。"}
 
 
+# A code-only update takes effect on restart; a change to any of these means the
+# installed environment is stale and only a host image rebuild will apply it.
+DEP_SENTINEL_FILES = ("requirements.txt", "pyproject.toml", "docker/Dockerfile", "Dockerfile")
+
+
+def _dependencies_changed(before_sha: str) -> bool:
+    """True when the pull touched a dependency/build file the running image baked in."""
+    rc, out = _git_text(
+        ["diff", "--name-only", f"{before_sha}..HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+    if rc != 0:
+        return False
+    changed = set(out.splitlines())
+    return any(sentinel in changed for sentinel in DEP_SENTINEL_FILES)
+
+
 def git_pull() -> Dict[str, Any]:
     capability = git_pull_capability()
     if not capability["available"]:
@@ -222,12 +281,95 @@ def git_pull() -> Dict[str, Any]:
         if lock_file is None:
             return _not_started("另一项运维操作正在执行，git pull 未发起")
         try:
-            return _run_bounded_command(
+            _, before_sha = _git_text(["rev-parse", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            result = _run_bounded_command(
                 ["git", "-C", REPO_DIR, "pull", "--ff-only"],
                 cwd=REPO_DIR, timeout_seconds=GIT_PULL_TIMEOUT_SECONDS,
                 lock_file=lock_file)
+            result["dependencies_changed"] = False
+            if result.get("exit_code") == 0 and before_sha:
+                if _dependencies_changed(before_sha):
+                    result["dependencies_changed"] = True
+                    result["output"].append(
+                        "检测到依赖/构建文件变更（requirements.txt 等），仅重启不生效，"
+                        "需在宿主机执行 docker compose up -d --build")
+            return result
         except OSError:
             return _not_started("git 或代码目录不可用，git pull 未发起")
+
+
+def _git_text(args: List[str], timeout_seconds: int) -> tuple[int, str]:
+    """Run one read-only git command in the checkout, returning trimmed output."""
+    proc = subprocess.run(
+        ["git", "-C", REPO_DIR, *args], stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, timeout=timeout_seconds, check=False)
+    return proc.returncode, (proc.stdout or "").strip()
+
+
+def check_update() -> Dict[str, Any]:
+    """Compare the local checkout against its tracked remote without touching it.
+
+    Fetches the remote-tracking ref (network read only; never writes the working
+    tree) so the version panel can decide whether a one-click update is worth
+    offering. Runs under the shared ops lock so it never races an in-flight pull.
+    """
+    from pr_agent.dashboard.version import get_app_version
+    version = get_app_version()
+    capability = git_pull_capability()
+    result: Dict[str, Any] = {
+        "version": version,
+        "available": capability["available"],
+        "reason": capability["reason"],
+        "checked": False,
+        "current": None,
+        "latest": None,
+        "behind": None,
+        "update_available": False,
+    }
+    if not capability["available"]:
+        return result
+    with _operation_lock() as lock_file:
+        if lock_file is None:
+            result["reason"] = "另一项运维操作正在执行，暂时无法检查更新"
+            return result
+        try:
+            head_rc, head_sha = _git_text(
+                ["rev-parse", "--short", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            _, head_subject = _git_text(
+                ["log", "-1", "--format=%s"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            result["current"] = {
+                "sha": head_sha if head_rc == 0 else None,
+                "subject": head_subject or None,
+            }
+            upstream_rc, upstream = _git_text(
+                ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            if upstream_rc != 0 or not upstream:
+                result["reason"] = "当前分支未跟踪远端分支，无法检查更新。"
+                return result
+            fetch_rc, fetch_out = _git_text(["fetch", "--quiet"], GIT_FETCH_TIMEOUT_SECONDS)
+            if fetch_rc != 0:
+                result["reason"] = ("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300]
+                return result
+            latest_rc, latest_sha = _git_text(
+                ["rev-parse", "--short", "@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            _, latest_subject = _git_text(
+                ["log", "-1", "--format=%s", "@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            result["latest"] = {
+                "sha": latest_sha if latest_rc == 0 else None,
+                "subject": latest_subject or None,
+                "branch": upstream,
+            }
+            behind_rc, behind = _git_text(
+                ["rev-list", "--count", "HEAD..@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            if behind_rc == 0 and behind.isdigit():
+                result["behind"] = int(behind)
+                result["update_available"] = int(behind) > 0
+            result["checked"] = True
+            return result
+        except (OSError, subprocess.TimeoutExpired) as e:
+            result["reason"] = ("检查更新失败：" + str(e))[:300]
+            return result
 
 
 # ------------------------------------------------------------------ probes

@@ -33,6 +33,7 @@ from pr_agent.dashboard.config_engine import (
 )
 from pr_agent.dashboard.env import bounded_env_int
 from pr_agent.dashboard.storage import DashboardStorageReadError, get_storage
+from pr_agent.dashboard.version import get_app_version
 from pr_agent.log import get_logger
 
 router = APIRouter(prefix="/api/v1/dashboard")
@@ -412,7 +413,7 @@ async def auth_me(request: Request, dashboard_session: Optional[str] = Cookie(No
     await require_auth(request, dashboard_session)
     model = str(get_settings().get("config.model", ""))
     return _ok({"authenticated": True, "model": model,
-                "version": os.environ.get("DASHBOARD_VERSION", "1.0.0")})
+                "version": get_app_version()})
 
 
 @router.post("/auth/logout")
@@ -573,6 +574,13 @@ async def ops_git_pull(request: Request, dashboard_session: Optional[str] = Cook
             content={"success": False, "code": "OPERATION_FAILED",
                      "message": (result.get("output") or ["git pull 执行失败"])[-1], "data": result})
     return _ok(result, message="git pull 已完成")
+
+
+@router.get("/ops/check-update")
+async def ops_check_update(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+    await require_auth(request, dashboard_session)
+    # git fetch reaches the network; keep it off the shared webhook event loop
+    return _ok(await asyncio.to_thread(ops.check_update))
 
 
 @router.post("/ops/diagnose")

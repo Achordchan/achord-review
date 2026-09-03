@@ -84,10 +84,23 @@ export type OpsResult = {
   completed: boolean
   exit_code: number | null
   output: string[]
+  dependencies_changed?: boolean
+  mode?: string
 }
 export type OpsCapabilities = {
   git_pull: { available: boolean; reason: string }
-  restart: { available: boolean; reason: string }
+  restart: { available: boolean; reason: string; mode?: string }
+}
+export type VersionCommit = { sha: string | null; subject: string | null }
+export type VersionInfo = {
+  version: string
+  available: boolean
+  reason: string
+  checked: boolean
+  current: VersionCommit | null
+  latest: (VersionCommit & { branch: string }) | null
+  behind: number | null
+  update_available: boolean
 }
 export type DiagnoseResult = {
   ok: boolean

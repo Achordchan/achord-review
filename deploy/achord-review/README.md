@@ -114,19 +114,37 @@ image and the API routes share the webhook process).
   is reconciled as interrupted.
 - The config page edits the mounted `config/.secrets.toml` live: each save is validated,
   backed up (5 copies kept, comments preserved), applied to the running process, and —
-  when a restart-requiring field changed — can trigger a container restart when the
-  docker CLI + socket are available inside the container (not mounted by default;
-  without them the panel disables the action and restart happens on the host shell).
-  An explicitly enabled self-restart is queued as an after-response task, so the
-  browser acknowledgment and audit row are emitted before the container stops.
+  when a restart-requiring field changed — can trigger a restart. A restart happens one
+  of two ways: through a controlled Docker endpoint when one is mounted, or, when
+  `ACHORD_REVIEW_SELF_RESTART=1`, by a **socket-free self-exit** — the panel terminates
+  the gunicorn master (PID 1) and the container's `restart: unless-stopped` policy
+  respawns a fresh process. Either way the restart is queued as an after-response task,
+  so the browser acknowledgment and audit row are emitted before the process stops.
 - Some navigation entries are greyed out with a "Phase N" badge: those features
   are planned but not shipped yet; their API routes answer 501 COMING_SOON.
-- The shipped image contains application files, not a writable Git checkout, so
-  code releases remain delegated to the host (`git pull --ff-only` followed by
-  `docker compose up -d --build`). The panel disables its update button by
-  default instead of advertising an operation that cannot work. Custom
-  deployments may expose it only by mounting a dedicated writable checkout and
-  setting `ACHORD_REVIEW_REPO_DIR` to that mount.
+
+### Version panel & in-panel updates
+
+- The version chip (top bar, and the sidebar) opens the **version & update** panel.
+  It reports the running version — a single baked constant, `pr_agent/dashboard/version.py`
+  `APP_VERSION` (currently `0.0.1`; bump it by one in the PR that ships each change and
+  tag the merge `v<APP_VERSION>`) — and, when a checkout is mounted, compares it against
+  the tracked remote so you can update and restart in place.
+- **In-panel updates are opt-in**, because the shipped image bakes its code in rather than
+  running from a live checkout. To enable the sub2api-style "check → one-click update →
+  restart" flow, uncomment the `./repo` mount and the `ACHORD_REVIEW_REPO_DIR` /
+  `PYTHONPATH` / `ACHORD_REVIEW_SELF_RESTART` env in `docker-compose.yml`, after placing a
+  git checkout at `./repo` on the host. Then: **check update** does `git fetch` and shows
+  how far behind you are; **one-click update** runs `git pull --ff-only`; **restart**
+  self-exits so the fresh process imports the pulled code. The browser polls the service
+  back up and reloads automatically — the HttpOnly session cookie and the SQLite session
+  row both survive, so no re-login.
+- **The one limit, surfaced honestly:** a restart only re-imports Python — it cannot
+  install packages. When a pull changes `requirements.txt` / `pyproject.toml` / the
+  Dockerfile, the panel detects it and tells you to rebuild on the host
+  (`docker compose up -d --build`) instead of implying a restart is enough.
+- Left fully commented, the buttons stay disabled and releases remain host-managed
+  (`git pull --ff-only` then `docker compose up -d --build`).
 
 ## Behaviour summary
 
