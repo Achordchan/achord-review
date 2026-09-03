@@ -23,6 +23,7 @@ having no retrieval at all:
 import fnmatch
 import os
 import re
+from html import escape
 from typing import List, Optional
 
 from pr_agent.algo.utils import load_yaml
@@ -155,13 +156,24 @@ def _provider_supports_tree(git_provider) -> bool:
     return provider_method is not None and provider_method is not GitProvider.get_repo_tree
 
 
+def _is_safe_path(path) -> bool:
+    """A path safe to place in a prompt: a non-empty single line, no control chars.
+
+    Git permits a newline in a filename, and such a path inserted verbatim into
+    the candidate list or a <file path="..."> tag could carry its own closing
+    tag and break out of the intended framing. These are dropped, not rendered.
+    """
+    if not isinstance(path, str) or not path.strip():
+        return False
+    return not any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in path)
+
+
 def _repo_tree(git_provider) -> List[str]:
     """Tree of the base ref, cached on the provider for the life of the request."""
     cached = getattr(git_provider, TREE_CACHE_ATTRIBUTE, None)
     if cached is not None:
         return cached
-    tree = git_provider.get_repo_tree() or []
-    tree = [path for path in tree if isinstance(path, str) and path.strip()]
+    tree = [path for path in (git_provider.get_repo_tree() or []) if _is_safe_path(path)]
     setattr(git_provider, TREE_CACHE_ATTRIBUTE, tree)
     return tree
 
@@ -180,7 +192,9 @@ def _rank_candidates(tree: List[str], changed_paths: List[str], limit: int) -> L
 
     near, same_kind, rest = [], [], []
     for path in tree:
-        if path in changed or _is_excluded(path, patterns):
+        # _is_safe_path here too: ranking must not depend on the caller having
+        # filtered the tree first (_repo_tree does, but this is defence in depth).
+        if path in changed or not _is_safe_path(path) or _is_excluded(path, patterns):
             continue
         directory = os.path.dirname(path)
         if directory in changed_dirs or any(
@@ -214,7 +228,7 @@ def _parse_selection(response: str, candidates: List[str], max_files: int) -> Li
         # removeprefix, not lstrip: lstrip("./") would eat the leading dot of an
         # offered dotfile (".github/workflows/ci.yml") and fail its own allowlist.
         path = path.strip().removeprefix("./")
-        if path in allowed and path not in selected:
+        if path in allowed and _is_safe_path(path) and path not in selected:
             selected.append(path)
         if len(selected) >= max_files:
             break
@@ -328,7 +342,7 @@ def _largest_prefix_that_fits(path: str, lines: List[str], fence: str, blocks: l
     """
     def block_for(count: int) -> list:
         body = lines[:count] + [TRUNCATION_MARKER]
-        return [f'<file path="{path}">', fence, *body, fence, "</file>"]
+        return [f'<file path="{escape(path, quote=True)}">', fence, *body, fence, "</file>"]
 
     low, high, best = 1, len(lines) - 1, None
     while low <= high:
@@ -378,7 +392,7 @@ def _render(files: dict, max_total_lines: int, max_tokens: int = 0, count_tokens
     for path, content in files.items():
         lines = content.splitlines()
         fence = _fence_for(content)
-        block = [f'<file path="{path}">', fence, *lines, fence, "</file>"]
+        block = [f'<file path="{escape(path, quote=True)}">', fence, *lines, fence, "</file>"]
         if fits(assemble(blocks + [block])):
             blocks.append(block)
         else:

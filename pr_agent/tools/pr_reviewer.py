@@ -764,8 +764,12 @@ class PRReviewer:
         """
         paths = []
         try:
+            # get_diff_files() returns FilePatchInfo, whose old_filename already
+            # carries GitHub's previous_filename (see GithubProvider.get_diff_files).
+            # previous_filename is read too so a provider that hands back a raw file
+            # object — rather than a FilePatchInfo — is still covered.
             for file in (self.git_provider.get_diff_files() or []):
-                for attribute in ("filename", "old_filename"):
+                for attribute in ("filename", "old_filename", "previous_filename"):
                     path = getattr(file, attribute, "")
                     if path and path not in paths:
                         paths.append(path)

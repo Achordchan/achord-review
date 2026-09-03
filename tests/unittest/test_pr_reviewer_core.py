@@ -1496,3 +1496,16 @@ def test_changed_paths_report_failure_rather_than_an_empty_exclusion_list():
     reviewer.git_provider.get_diff_files.side_effect = RuntimeError("provider down")
 
     assert reviewer._changed_paths() is None
+
+
+def test_changed_paths_use_the_populated_rename_field():
+    # get_diff_files returns FilePatchInfo, whose old_filename already carries
+    # GitHub's previous_filename. Both names are read so a provider that returns
+    # a raw file object (previous_filename) is covered too.
+    reviewer = _make_reviewer()
+    from pr_agent.algo.types import FilePatchInfo
+    reviewer.git_provider.get_diff_files.return_value = [
+        FilePatchInfo("", "", "", "new/name.py", old_filename="old/name.py"),
+    ]
+
+    assert reviewer._changed_paths() == ["new/name.py", "old/name.py"]
