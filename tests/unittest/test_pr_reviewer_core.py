@@ -769,7 +769,7 @@ async def test_cancellation_during_completion_does_not_start_competing_failure(m
         await terminal_started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.gather(task)
         audit_failed.assert_not_awaited()
 
         release_terminal.set()
