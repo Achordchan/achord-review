@@ -1436,3 +1436,40 @@ def test_answer_mode_prefers_the_newest_question_and_answer(monkeypatch):
 
     assert reviewer.vars["question_str"] == "Questions to better understand the PR:\n- Current question?"
     assert reviewer.vars["answer_str"] == "/answer Current answer."
+
+
+@pytest.mark.asyncio
+async def test_run_backfills_the_audit_metadata_on_the_review_path(monkeypatch):
+    # The audit row is inserted without a title or commit on purpose; the run
+    # itself has to fill them, or the dashboard history shows neither.
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = ["app.py"]
+    reviewer = _make_reviewer(git_provider)
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    reviewer.prediction = None
+    reviewer._prepare_pr_review = lambda: ""
+
+    async def fake_retry(prepare_fn, model_type=None):
+        reviewer.prediction = "malformed prediction"
+
+    audit_metadata = AsyncMock()
+    monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "retry_with_fallback_models", fake_retry)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
+    monkeypatch.setattr(pr_reviewer_module, "_start_audit_heartbeat", lambda request_id: None)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_failed", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "_audit_finished", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "_audit_metadata", audit_metadata)
+
+    settings = get_settings()
+    original_publish_output = settings.config.publish_output
+    try:
+        settings.config.publish_output = False
+        await reviewer.run()
+    finally:
+        settings.config.publish_output = original_publish_output
+
+    audit_metadata.assert_awaited_once_with("request-id", reviewer)

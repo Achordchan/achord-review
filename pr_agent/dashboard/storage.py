@@ -672,6 +672,18 @@ class DashboardStorage:
             (model, reasoning_effort, prompt_tokens, completion_tokens, total_tokens,
              duration_ms, request_id), timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
+    def set_review_metadata(self, request_id: str, pr_title: str = "", commit_sha: str = "") -> None:
+        """Backfill provider metadata the audit start deliberately does not read.
+
+        Empty values leave the stored column untouched, so one field can be
+        filled without erasing the other. Status is not touched, so a row that
+        already reached a terminal state keeps it.
+        """
+        self._write(
+            "UPDATE reviews SET pr_title=COALESCE(NULLIF(?, ''), pr_title),"
+            " commit_sha=COALESCE(NULLIF(?, ''), commit_sha) WHERE request_id=?",
+            (pr_title, commit_sha, request_id), timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+
     def add_review_issues(self, request_id: str, issues: List[Dict[str, Any]]) -> None:
         row = self.get_review_by_request_id(request_id)
         issues = _bounded_review_issues(issues)

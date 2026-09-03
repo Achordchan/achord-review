@@ -199,6 +199,29 @@ async def review_skipped(request_id: str, reason: str) -> None:
     await asyncio.to_thread(_work)
 
 
+async def review_metadata(request_id: str, pr_title: str = "", commit_sha: str = "") -> None:
+    """Attach the PR title and head commit to an existing record.
+
+    review_started deliberately makes no provider calls, so these arrive once
+    the review's own path has read them; without this the history list and the
+    detail view show every row with no title and no commit.
+    """
+    if not request_id or not (pr_title or commit_sha):
+        return
+
+    def _work():
+        try:
+            storage = _run_audit()
+            if storage is None:
+                return
+            storage.set_review_metadata(
+                request_id, pr_title=pr_title[:500], commit_sha=commit_sha[:64])
+        except Exception as e:
+            get_logger().warning(f"Dashboard audit (review_metadata) failed, error: {e}")
+
+    await asyncio.to_thread(_work)
+
+
 async def review_heartbeat(request_id: str) -> None:
     """Refresh one RUNNING record without affecting the review flow on failure."""
     if not request_id:

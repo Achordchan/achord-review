@@ -329,3 +329,63 @@ def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
     asyncio.run(scenario())
     assert closed["request_id"]
     assert closed["error"] == "review task cancelled during audit startup"
+
+
+def test_audit_metadata_backfills_the_title_and_head_commit(monkeypatch):
+    # The dashboard list and detail views read these columns; the audit start
+    # cannot fill them because it must not touch the provider.
+    recorded = {}
+
+    class GitProvider:
+        def get_head_commit_sha(self):
+            return "abc123"
+
+    class Reviewer:
+        pr_url = "https://github.com/a/b/pull/1"
+        git_provider = GitProvider()
+        vars = {"title": "Fix the thing"}
+
+    async def fake_metadata(request_id, pr_title="", commit_sha=""):
+        recorded.update(request_id=request_id, pr_title=pr_title, commit_sha=commit_sha)
+
+    monkeypatch.setattr(audit, "review_metadata", fake_metadata)
+    asyncio.run(pr_reviewer._audit_metadata("request-id", Reviewer()))
+
+    assert recorded == {"request_id": "request-id", "pr_title": "Fix the thing",
+                        "commit_sha": "abc123"}
+
+
+def test_audit_metadata_skips_a_provider_without_the_metadata(monkeypatch):
+    calls = []
+
+    class GitProvider:
+        def get_head_commit_sha(self):
+            raise AssertionError("provider does not expose a head commit")
+
+    class Reviewer:
+        pr_url = "https://gitlab.example/g/r/-/merge_requests/7"
+        git_provider = GitProvider()
+        vars = {}
+
+    async def fake_metadata(request_id, pr_title="", commit_sha=""):
+        calls.append(request_id)
+
+    monkeypatch.setattr(audit, "review_metadata", fake_metadata)
+    asyncio.run(pr_reviewer._audit_metadata("request-id", Reviewer()))
+    asyncio.run(pr_reviewer._audit_metadata("", Reviewer()))
+
+    assert calls == []
+
+
+def test_review_metadata_leaves_untouched_columns_alone(tmp_path):
+    storage = DashboardStorage(db_path=str(tmp_path / "metadata.db"))
+    storage.initialize()
+    request_id = storage.create_review(repo_name="a/b", pr_number=1, pr_url="u")
+
+    storage.set_review_metadata(request_id, pr_title="Fix the thing", commit_sha="abc123")
+    storage.set_review_metadata(request_id, commit_sha="def456")
+
+    row = storage.get_review_by_request_id(request_id)
+    assert row["pr_title"] == "Fix the thing"
+    assert row["commit_sha"] == "def456"
+    assert row["status"] == "RUNNING"

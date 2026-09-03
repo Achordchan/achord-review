@@ -223,6 +223,26 @@ async def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: st
         get_logger().debug(f"Dashboard audit (finished) skipped, error: {e}")
 
 
+async def _audit_metadata(request_id: str, reviewer: "PRReviewer") -> None:
+    """Backfill the audit row with metadata this run has already read.
+
+    Deliberately off the audit startup path (see _audit_started): the title and
+    head SHA come from provider state the review itself materialized, so the
+    dashboard history stops rendering every row without a title or commit.
+    """
+    if not request_id or not await _wait_for_audit_start(request_id):
+        return
+    try:
+        from pr_agent.dashboard.audit import review_metadata
+        title = (getattr(reviewer, "vars", None) or {}).get("title") or ""
+        commit_sha = reviewer.git_provider.get_head_commit_sha() or ""
+        await review_metadata(request_id, pr_title=title, commit_sha=commit_sha)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit (metadata) skipped, error: {e}")
+
+
 async def _audit_failed(request_id: str, error: Exception) -> None:
     if not request_id or not await _wait_for_audit_start(request_id):
         return
@@ -394,6 +414,7 @@ class PRReviewer:
             #     return None
 
             get_logger().info(f'Reviewing PR: {self.pr_url} ...')
+            await _audit_metadata(audit_request_id, self)
             relevant_configs = {'pr_reviewer': dict(get_settings().pr_reviewer),
                                 'config': dict(get_settings().config)}
             get_logger().debug("Relevant configs", artifacts=relevant_configs)
