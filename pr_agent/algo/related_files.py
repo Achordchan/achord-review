@@ -267,30 +267,59 @@ def _render(files: dict, max_total_lines: int, max_tokens: int = 0, count_tokens
     return assemble(blocks) if blocks else ""
 
 
-async def build_related_files(git_provider, ai_handler, model: str, diff: str,
-                              changed_paths: List[str], title: str = "",
-                              token_handler=None) -> str:
-    """Fetch the files this diff depends on; "" whenever that cannot be done safely."""
+def render_related_files(files: dict, model: str, diff: str, token_handler=None) -> str:
+    """Render collected files for one specific model.
+
+    Kept separate from collection because the budget belongs to the model that
+    is about to be called: a fallback with a smaller window must not inherit a
+    block sized for the primary, or the retry it exists to provide is spent on
+    the same overflow.
+    """
+    if not files:
+        return ""
+    budget = available_token_budget(
+        model, token_handler, diff, _int_setting("max_tokens", 12000, minimum=0))
+    if token_handler is not None and budget <= 0:
+        get_logger().info("No token budget left for related files; reviewing from the diff alone")
+        return ""
+    rendered = _render(
+        files, _int_setting("max_total_lines", 800, minimum=10),
+        max_tokens=budget,
+        count_tokens=getattr(token_handler, "count_tokens", None))
+    if rendered:
+        get_logger().info("Related files attached to the review",
+                          artifact={"files": list(files.keys())})
+    return rendered
+
+
+async def collect_related_files(git_provider, ai_handler, model: str, diff: str,
+                                changed_paths: List[str], title: str = "") -> dict:
+    """Pick and fetch the files this diff could break; {} when that is not possible.
+
+    This is the expensive half — a tree listing plus one model call — and its
+    result does not depend on which model will review, so a caller retrying
+    across fallback models should do this once.
+    """
     try:
         if not _bool_setting("enabled", True) or not diff:
-            return ""
+            return {}
         if not _provider_supports_tree(git_provider):
-            return ""
+            return {}
 
         max_files = _int_setting("max_files", 6, minimum=1)
         tree = _repo_tree(git_provider)
         if not tree:
-            return ""
+            return {}
 
         candidates = _rank_candidates(
             tree, changed_paths, _int_setting("max_candidate_paths", 600, minimum=1))
         if not candidates:
-            return ""
+            return {}
 
         selected = await _select_paths(ai_handler, model, diff, title, candidates, max_files)
         if not selected:
             get_logger().debug("Related-file retrieval selected no files")
-            return ""
+            return {}
 
         max_lines_per_file = _int_setting("max_lines_per_file", 400, minimum=1)
         files = {}
@@ -307,19 +336,15 @@ async def build_related_files(git_provider, ai_handler, model: str, diff: str,
                 lines = lines[:max_lines_per_file] + [TRUNCATION_MARKER]
             files[path] = "\n".join(lines)
 
-        budget = available_token_budget(
-            model, token_handler, diff, _int_setting("max_tokens", 12000, minimum=0))
-        if token_handler is not None and budget <= 0:
-            get_logger().info("No token budget left for related files; reviewing from the diff alone")
-            return ""
-        rendered = _render(
-            files, _int_setting("max_total_lines", 800, minimum=10),
-            max_tokens=budget,
-            count_tokens=getattr(token_handler, "count_tokens", None))
-        if rendered:
-            get_logger().info("Related files attached to the review",
-                              artifact={"files": list(files.keys())})
-        return rendered
+        return files
     except Exception as e:
         get_logger().warning(f"Related-file retrieval skipped, error: {e}")
-        return ""
+        return {}
+
+
+async def build_related_files(git_provider, ai_handler, model: str, diff: str,
+                              changed_paths: List[str], title: str = "",
+                              token_handler=None) -> str:
+    """Collect and render in one call, for callers that review with a single model."""
+    files = await collect_related_files(git_provider, ai_handler, model, diff, changed_paths, title)
+    return render_related_files(files, model, diff, token_handler)

@@ -237,3 +237,37 @@ class TestTokenBudget:
         monkeypatch.setattr("pr_agent.algo.utils.get_max_tokens", boom)
 
         assert related_files.available_token_budget("m", object(), "diff", 12000) == 0
+
+
+class TestPerModelRendering:
+    """Collection is shared across fallback attempts; the budget is not."""
+
+    def _counter(self):
+        class Handler:
+            prompt_tokens = 500
+
+            def count_tokens(self, text, force_accurate=False):
+                return len(text.splitlines()) * 10
+
+        return Handler()
+
+    def test_a_smaller_fallback_window_drops_context_the_primary_could_afford(self, monkeypatch):
+        windows = {"big": 20000, "small": 2000}
+        monkeypatch.setattr("pr_agent.algo.utils.get_max_tokens", lambda model: windows[model])
+        files = {"a.py": "\n".join(f"line {i}" for i in range(30))}
+
+        on_primary = related_files.render_related_files(files, "big", "diff", self._counter())
+        on_fallback = related_files.render_related_files(files, "small", "diff", self._counter())
+
+        assert "line 0" in on_primary
+        assert on_fallback == ""
+
+    @pytest.mark.asyncio
+    async def test_collection_returns_contents_not_a_rendered_block(self):
+        provider = FakeProvider(["a.py", "b.py"], {"b.py": "kept"})
+        handler = FakeHandler(_yaml("b.py"))
+
+        files = await related_files.collect_related_files(
+            provider, handler, "gpt-5", "diff", [])
+
+        assert files == {"b.py": "kept"}
