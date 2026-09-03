@@ -17,7 +17,7 @@ Settings → Developer settings → GitHub Apps → **New GitHub App**
 |---|---|
 | Name | `achord-review` (the bot appears as `achord-review[bot]`) |
 | Webhook URL | `https://review.achord.cn/api/v1/github_webhooks` |
-| Webhook secret | generate a random string; keep it for `config.toml` |
+| Webhook secret | generate a random string; keep it for `config/.secrets.toml` |
 
 Permissions (least privilege):
 
@@ -39,14 +39,23 @@ Then generate a private key (`.pem`, downloaded once), note the **App ID**, and
 ## 2. Configure
 
 ```bash
-cp config.toml.example config.toml
-chmod 600 config.toml
-$EDITOR config.toml      # fill in every REPLACE_WITH_* placeholder
+mkdir -p config
+cp config.toml.example config/.secrets.toml
+chmod 600 config/.secrets.toml
+$EDITOR config/.secrets.toml   # fill in every REPLACE_WITH_* placeholder
 ```
 
-`config.toml` is gitignored and mounted read-only into the container at
-`/app/pr_agent/settings_prod/.secrets.toml`, which `pr_agent/config_loader.py` loads.
+`config/.secrets.toml` is gitignored and the directory holding it is mounted into the
+container: the host `./config/` directory maps to `/app/pr_agent/settings_prod`,
+and the container loads `/app/pr_agent/settings_prod/.secrets.toml`. The panel's
+config editor backs up and atomically replaces the file inside that directory.
 Secrets never enter the image or the repository.
+
+Migrating from the earlier single-file layout (`./config.toml` on the host):
+
+```bash
+mkdir -p config && mv config.toml config/.secrets.toml && chmod 600 config/.secrets.toml
+```
 
 ## 3. Set up nginx and the certificate
 
@@ -71,6 +80,9 @@ docker compose up -d --build
 docker compose logs -f achord-review
 ```
 
+The SQLite database for the control panel lives in `./data/review.db` on the host
+(created on first start); back it up like any other state.
+
 ## 5. Verify
 
 1. GitHub App → Advanced → **Recent Deliveries**: the webhook should return 200.
@@ -79,6 +91,42 @@ docker compose logs -f achord-review
 3. Comment `@achord-review review` on that PR → the comment gets a 👀 reaction, then a re-review.
 4. Push a new commit → nothing happens on its own; mentioning the bot is what asks for the
    re-review. Turn `github_app.handle_push_trigger` back on to review every push instead.
+
+## 6. Control panel
+
+The web panel is served by the same process at `https://review.achord.cn/dashboard`
+(no extra container, port, or nginx server — the SPA is a static build inside the
+image and the API routes share the webhook process).
+
+- Set the login password in `config/.secrets.toml` under `[dashboard] admin_password`
+  (copy the section from `config.toml.example`). Leaving it empty disables the
+  panel: every login attempt is rejected with 503.
+- Login is rate-limited to 5 failures per IP per 15 minutes; the client IP is
+  derived from the trusted proxy hops only (tune with `DASHBOARD_TRUSTED_PROXY_HOPS`,
+  default 1 for the shipped nginx setup).
+- Cookie-authenticated writes require the exact external browser origin. The
+  shipped Compose file pins `DASHBOARD_EXTERNAL_ORIGIN=https://review.achord.cn`;
+  custom domains must change this value together with nginx.
+- Every review run is recorded to `./data/review.db`, which feeds the overview
+  stats, the review history, and the per-run detail pages. Config saves and ops
+  actions are written to the audit log. Active reviews refresh a durable
+  heartbeat every 60 seconds; only a RUNNING row with no heartbeat for 6 hours
+  is reconciled as interrupted.
+- The config page edits the mounted `config/.secrets.toml` live: each save is validated,
+  backed up (5 copies kept, comments preserved), applied to the running process, and —
+  when a restart-requiring field changed — can trigger a container restart when the
+  docker CLI + socket are available inside the container (not mounted by default;
+  without them the panel disables the action and restart happens on the host shell).
+  An explicitly enabled self-restart is queued as an after-response task, so the
+  browser acknowledgment and audit row are emitted before the container stops.
+- Some navigation entries are greyed out with a "Phase N" badge: those features
+  are planned but not shipped yet; their API routes answer 501 COMING_SOON.
+- The shipped image contains application files, not a writable Git checkout, so
+  code releases remain delegated to the host (`git pull --ff-only` followed by
+  `docker compose up -d --build`). The panel disables its update button by
+  default instead of advertising an operation that cannot work. Custom
+  deployments may expose it only by mounting a dedicated writable checkout and
+  setting `ACHORD_REVIEW_REPO_DIR` to that mount.
 
 ## Behaviour summary
 

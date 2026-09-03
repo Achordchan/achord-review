@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.background import BackgroundTasks
 from starlette.testclient import TestClient
-from starlette_context import request_cycle_context
+from starlette_context import context, request_cycle_context
 
 from pr_agent.config_loader import get_settings
 from pr_agent.identity_providers.identity_provider import Eligibility
@@ -333,6 +333,33 @@ async def test_github_automatic_feedback_continues_after_invalid_command(monkeyp
 
     assert commands == [["/review"]]
     assert repo_settings_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_github_push_commands_set_dashboard_trigger_metadata(monkeypatch):
+    settings = get_settings()
+    original_commands = settings.get("GITHUB_APP.PUSH_COMMANDS")
+    original_feedback = settings.get("GITHUB_APP.FEEDBACK_ON_DRAFT_PR")
+    original_auto = settings.get("CONFIG.IS_AUTO_COMMAND")
+    settings.set("GITHUB_APP.PUSH_COMMANDS", ["/review"])
+    settings.set("GITHUB_APP.FEEDBACK_ON_DRAFT_PR", False)
+    monkeypatch.setattr(github_app, "should_process_pr_logic", lambda body: True)
+    agent = RecordingAgent()
+    try:
+        with request_cycle_context({}):
+            await github_app._perform_auto_commands_github(
+                "push_commands", agent,
+                {"action": "synchronize", "pull_request": {"draft": False},
+                 "sender": {"login": "alice"}},
+                "https://api.github.com/repos/org/repo/pulls/1", {})
+            assert context["dashboard_sender"] == "alice"
+            assert context["dashboard_trigger_type"] == "push"
+    finally:
+        settings.set("GITHUB_APP.PUSH_COMMANDS", original_commands)
+        settings.set("GITHUB_APP.FEEDBACK_ON_DRAFT_PR", original_feedback)
+        settings.set("CONFIG.IS_AUTO_COMMAND", original_auto)
+
+    assert agent.commands == [["/review"]]
 
 
 @pytest.mark.asyncio

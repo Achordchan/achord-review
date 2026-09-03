@@ -3,6 +3,13 @@
 # The container binds to loopback only; the host's existing nginx terminates TLS and
 # reverse-proxies to it (see nginx-achord-review.conf). Do not publish 80/443 here:
 # nginx already owns those ports on the target host.
+#
+# Config layout: the host directory ./config is mounted over the container's
+# settings_prod directory. It must contain .secrets.toml. Migrating from the old
+# single-file layout (./config.toml on the host):
+#   mkdir -p config && mv config.toml config/.secrets.toml && chmod 600 config/.secrets.toml
+# The parent directory is mounted rather than the file itself so the dashboard
+# config editor can back up and atomically replace .secrets.toml.
 services:
   achord-review:
     build:
@@ -15,13 +22,24 @@ services:
     ports:
       - "127.0.0.1:33001:3000"
     volumes:
-      # All configuration and secrets live here. Never bake them into the image.
-      - ./config.toml:/app/pr_agent/settings_prod/.secrets.toml:ro
+      - ./config:/app/pr_agent/settings_prod
+      # Dashboard SQLite database (review history, audit logs); survives restarts.
+      - ./data:/app/data
     environment:
-      # gunicorn binds 0.0.0.0:3000 (see servers/gunicorn_config.py) and would otherwise scale
-      # workers to the CPU count. This host has 2 GB of RAM shared with the relay stack, so pin
-      # the documented minimum of 2 - enough that a worker busy on a review still answers health checks.
+      # Keep at least two workers (the gunicorn default) so a slow provider call
+      # cannot stall health checks and unrelated webhooks. Dashboard sessions
+      # and login lockouts are shared through SQLite; config changes are picked
+      # up by each worker on its next request.
       GUNICORN_WORKERS: "2"
+      # The published port is loopback-only behind the single documented nginx.
+      # Direct/custom deployments default to zero trusted hops and must opt in.
+      DASHBOARD_TRUSTED_PROXY_HOPS: "1"
+      # Exact public browser origin used by the CSRF fallback when Fetch
+      # Metadata headers are unavailable. Scheme and effective port matter.
+      DASHBOARD_EXTERNAL_ORIGIN: "https://review.achord.cn"
+      # Intentionally omit ACHORD_REVIEW_REPO_DIR: this image is not a checkout.
+      # Code releases are performed by the host deployment workflow. A custom
+      # deployment may opt in only with a deliberately mounted writable checkout.
     mem_limit: 900m
     logging:
       driver: json-file

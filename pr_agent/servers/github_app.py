@@ -13,7 +13,7 @@ from starlette_context import context
 from starlette_context.middleware import RawContextMiddleware
 
 from pr_agent.agent.pr_agent import PRAgent, command2class, prepare_command
-from pr_agent.config_loader import get_settings, global_settings
+from pr_agent.config_loader import get_settings, global_settings, global_settings_lock
 from pr_agent.git_providers import (get_git_provider,
                                     get_git_provider_with_context)
 from pr_agent.git_providers.git_provider import IncrementalPR
@@ -47,7 +47,8 @@ async def handle_github_webhooks(background_tasks: BackgroundTasks, request: Req
 
     installation_id = body.get("installation", {}).get("id")
     context["installation_id"] = installation_id
-    context["settings"] = copy.deepcopy(global_settings)
+    with global_settings_lock:
+        context["settings"] = copy.deepcopy(global_settings)
     context["git_provider"] = {}
     background_tasks.add_task(handle_request, body, event=request.headers.get("X-GitHub-Event", None))
     return {}
@@ -145,6 +146,13 @@ async def handle_comments_on_pr(body: Dict[str, Any],
     with get_logger().contextualize(**log_context):
         if get_identity_provider().verify_eligibility("github", sender_id, api_url) is not Eligibility.NOT_ELIGIBLE:
             get_logger().info(f"Processing comment on PR {api_url=}, comment_body={comment_body}")
+            # request-scoped metadata for the dashboard audit trail; absent in
+            # CLI runs, hence the guard
+            try:
+                context["dashboard_sender"] = sender
+                context["dashboard_trigger_type"] = "mention"
+            except Exception as e:
+                get_logger().debug(f"Dashboard mention metadata unavailable, error: {e}")
             await agent.handle_request(api_url, comment_body,
                         notify=lambda: provider.add_eyes_reaction(comment_id, disable_eyes=disable_eyes))
         else:
@@ -456,6 +464,14 @@ async def _perform_auto_commands_github(commands_conf: str, agent: PRAgent, body
         get_logger().info(f"New PR, but no auto commands configured")
         return
     get_settings().set("config.is_auto_command", True)
+    # request-scoped metadata for the dashboard audit trail (read back in
+    # PRReviewer._audit_started); the context object is request-local and
+    # absent in CLI runs, hence the guard
+    try:
+        context["dashboard_sender"] = body.get("sender", {}).get("login", "")
+        context["dashboard_trigger_type"] = "push" if commands_conf == "push_commands" else "pr_open"
+    except Exception as e:
+        get_logger().debug(f"Dashboard auto-command metadata unavailable, error: {e}")
     for command in commands:
         try:
             new_command = prepare_command(command)
@@ -477,6 +493,56 @@ if get_settings().github_app.override_deployment_type:
 middleware = [Middleware(RawContextMiddleware)]
 app = FastAPI(middleware=middleware)
 app.include_router(router)
+
+
+# Dashboard API + SPA. Both are best-effort: an import or mount failure keeps the
+# webhook service up, only the dashboard routes go missing.
+try:
+    from pr_agent.dashboard.config_engine import get_config_engine
+    from pr_agent.dashboard.storage import get_storage
+    from pr_agent.servers.dashboard_api import add_dashboard_security_headers, limit_dashboard_request_body
+    from pr_agent.servers.dashboard_api import router as dashboard_router
+
+    get_storage()  # initialize the SQLite file early so the first webhook write is cheap
+    app.include_router(dashboard_router)
+    dashboard_config_engine = get_config_engine()  # fail fast here rather than on the first config request
+
+    @app.middleware("http")
+    async def refresh_dashboard_config(request, call_next):
+        # Every gunicorn worker observes the shared config file before serving
+        # its next request. The stat check is cheap and reload failures retain
+        # the worker's last known-good settings instead of breaking webhooks.
+        dashboard_config_engine.reload_if_changed()
+        return await call_next(request)
+
+    # Registered after the config refresh so it wraps it: oversized bodies are
+    # refused before any of it runs, and before request-model parsing.
+    app.middleware("http")(limit_dashboard_request_body)
+    # Outermost, so even the rejections above leave with the anti-framing headers.
+    app.middleware("http")(add_dashboard_security_headers)
+
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    _dashboard_dist = os.path.join(base_path, "dashboard", "static")
+    if os.path.isdir(os.path.join(_dashboard_dist, "assets")) or \
+            os.path.isfile(os.path.join(_dashboard_dist, "index.html")):
+        app.mount("/dashboard/assets", StaticFiles(directory=os.path.join(_dashboard_dist, "assets")),
+                  name="dashboard_assets")
+
+        @app.get("/dashboard")
+        @app.get("/dashboard/{rest:path}")
+        async def dashboard_spa(rest: str = ""):
+            # Confine every served file to the static root: resolve the joined
+            # path and reject anything that escapes it (encoded traversal like
+            # /dashboard/..%2F..%2F lands here after percent-decoding).
+            target = os.path.realpath(os.path.join(_dashboard_dist, rest)) if rest else ""
+            if target and target.startswith(os.path.realpath(_dashboard_dist) + os.sep) \
+                    and os.path.isfile(target):
+                return FileResponse(target)
+            return FileResponse(os.path.join(_dashboard_dist, "index.html"))
+except Exception as _dashboard_error:  # pragma: no cover - defensive by design
+    get_logger().warning(f"Dashboard routes unavailable, error: {_dashboard_error}")
 
 
 def start():

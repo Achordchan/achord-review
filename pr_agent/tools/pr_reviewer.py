@@ -1,7 +1,10 @@
 import asyncio
 import copy
 import datetime
+import math
+import os
 import re
+import uuid
 from functools import partial
 from typing import List, Optional, Tuple
 
@@ -13,14 +16,15 @@ from pr_agent.algo.inline_comment_dedup import (
     InlineCommentStore,
     can_verify_inline_comment_publication,
     get_inline_comment_store,
-    key_issue_body_with_markers,
     key_issue_anchor_fingerprint,
+    key_issue_body_with_markers,
     key_issue_fingerprint,
     key_issue_location_fingerprint,
 )
 from pr_agent.algo.pr_processing import add_ai_metadata_to_diff_files, get_pr_diff, retry_with_fallback_models
 from pr_agent.algo.publish_lock import publish_lock
 from pr_agent.algo.repo_context import build_repo_context
+from pr_agent.algo.review_parser import recover_missing_review_wrapper
 from pr_agent.algo.run_details import get_run_details, init_run_details
 from pr_agent.algo.skills_loader import get_skills_context
 from pr_agent.algo.token_handler import TokenHandler
@@ -45,7 +49,28 @@ from pr_agent.servers.help import HelpMessage
 from pr_agent.tools.ticket_pr_compliance_check import extract_and_cache_pr_tickets
 
 MAX_REVIEW_COVERAGE_FILES = 50
+_AUDIT_TIMEOUT_MIN_SECONDS = 0.1
+_AUDIT_TIMEOUT_MAX_SECONDS = 30.0
+
+
+def _load_audit_start_timeout_seconds() -> float:
+    """Read the optional audit deadline without making reviewer import fragile."""
+    try:
+        timeout = float(os.environ.get("DASHBOARD_AUDIT_START_TIMEOUT_SECONDS", "2"))
+        if not math.isfinite(timeout):
+            raise ValueError("timeout must be finite")
+        return min(_AUDIT_TIMEOUT_MAX_SECONDS, max(_AUDIT_TIMEOUT_MIN_SECONDS, timeout))
+    except (TypeError, ValueError) as e:
+        get_logger().warning(
+            f"Invalid DASHBOARD_AUDIT_START_TIMEOUT_SECONDS; using 2 seconds, error: {e}")
+        return 2.0
+
+
+AUDIT_START_TIMEOUT_SECONDS = _load_audit_start_timeout_seconds()
+AUDIT_TERMINAL_TIMEOUT_SECONDS = AUDIT_START_TIMEOUT_SECONDS
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
+_AUDIT_BACKGROUND_TASKS: set[asyncio.Task] = set()
+_AUDIT_START_TASKS: dict[str, asyncio.Task] = {}
 
 
 VERDICT_REASON_PREFIX = "**Verdict:** "
@@ -55,6 +80,215 @@ VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
 # "the standing verdict was never read", as distinct from "no verdict was standing".
 # Only the former disables the concurrent-run guard in _publish_single_review.
 _VERDICT_SNAPSHOT_UNSET = object()
+
+
+async def _audit_started(reviewer: "PRReviewer") -> str:
+    """Open a dashboard audit record for this run; best-effort, never raises.
+
+    Trigger metadata comes from request-scoped context. Provider access stays
+    on the review's main path so an audit timeout never races provider calls.
+    The request ID is reserved before storage starts, allowing terminal writes
+    to serialize behind a late insert without losing the completed review.
+    """
+    from starlette_context import context as request_context
+
+    from pr_agent.dashboard.audit import review_started, run_audit_work
+
+    request_id = uuid.uuid4().hex
+
+    def _work() -> str:
+        sender, trigger_type = "", "manual"
+        try:
+            sender = request_context.get("dashboard_sender") or ""
+            trigger_type = request_context.get("dashboard_trigger_type") or "manual"
+        except Exception:
+            pass  # no request scope (CLI run) — keep the manual defaults
+        return review_started(
+            pr_url=reviewer.pr_url, sender=sender, trigger_type=trigger_type,
+            request_id=request_id) or ""
+
+    async def _close_cancelled_start() -> None:
+        try:
+            if await _wait_for_audit_start(request_id):
+                await _audit_failed(
+                    request_id, RuntimeError("review task cancelled during audit startup"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            get_logger().debug(f"Dashboard audit cancelled-start cleanup skipped, error: {e}")
+
+    work_task = asyncio.create_task(run_audit_work(_work))
+    _AUDIT_START_TASKS[request_id] = work_task
+    try:
+        started_id = await asyncio.wait_for(
+            asyncio.shield(work_task), timeout=AUDIT_START_TIMEOUT_SECONDS)
+        _AUDIT_START_TASKS.pop(request_id, None)
+        return request_id if started_id == request_id else ""
+    except TimeoutError:
+        get_logger().warning(
+            f"Dashboard audit start exceeded {AUDIT_START_TIMEOUT_SECONDS:g} seconds; continuing review")
+        return request_id
+    except asyncio.CancelledError:
+        _track_audit_task(asyncio.create_task(_close_cancelled_start()))
+        raise
+    except Exception as e:
+        _AUDIT_START_TASKS.pop(request_id, None)
+        get_logger().debug(f"Dashboard audit start skipped, error: {e}")
+        return ""
+
+
+def _track_audit_task(task: asyncio.Task) -> None:
+    """Keep a detached audit write alive until the event loop completes it."""
+    _AUDIT_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_AUDIT_BACKGROUND_TASKS.discard)
+
+
+async def _wait_for_audit_start(request_id: str, timeout_seconds: Optional[float] = None) -> bool:
+    """Serialize a write behind a start that exceeded its foreground deadline.
+
+    The pending task stays registered until it actually finishes: a caller that
+    gives up — cancelled, or out of time — must leave the insert discoverable,
+    or the cancellation path writes FAILED before the row exists and the late
+    insert leaves a stale RUNNING review behind. `timeout_seconds` bounds the
+    wait for callers on the review's own path, which must never block on
+    storage; terminal writes still wait as long as it takes.
+    """
+    start_task = _AUDIT_START_TASKS.get(request_id)
+    if start_task is None:
+        return True
+    try:
+        if timeout_seconds is None:
+            started_id = await asyncio.shield(start_task)
+        else:
+            started_id = await asyncio.wait_for(
+                asyncio.shield(start_task), timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        raise  # leave the task registered for the cancellation path
+    except TimeoutError:
+        get_logger().debug(
+            f"Dashboard audit start still pending after {timeout_seconds:g} seconds; "
+            "continuing without it")
+        return False
+    except Exception as e:
+        _AUDIT_START_TASKS.pop(request_id, None)
+        get_logger().debug(f"Dashboard audit start did not complete, error: {e}")
+        return False
+    _AUDIT_START_TASKS.pop(request_id, None)
+    return started_id == request_id
+
+
+async def _await_bounded_audit(coro, what: str = "terminal") -> None:
+    """Bound an audit write's foreground cost and reconcile a late one in the background.
+
+    Every audit write the review awaits goes through here: a stalled storage
+    volume must cost the review its bounded window and no more.
+    """
+    task = asyncio.create_task(coro)
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(task), timeout=AUDIT_TERMINAL_TIMEOUT_SECONDS)
+    except TimeoutError:
+        _track_audit_task(task)
+        get_logger().warning(
+            f"Dashboard {what} audit exceeded {AUDIT_TERMINAL_TIMEOUT_SECONDS:g} seconds; continuing")
+    except asyncio.CancelledError:
+        _track_audit_task(task)
+        raise
+
+
+def _start_audit_heartbeat(request_id: str) -> Optional[asyncio.Task]:
+    """Start durable liveness updates after the RUNNING record exists."""
+    if not request_id:
+        return None
+    try:
+        from pr_agent.dashboard.audit import review_heartbeat_loop
+        return asyncio.create_task(review_heartbeat_loop(request_id))
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit heartbeat not started, error: {e}")
+        return None
+
+
+async def _stop_audit_heartbeat(task: Optional[asyncio.Task]) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await asyncio.gather(task)
+    except asyncio.CancelledError:
+        pass  # expected after cancelling the heartbeat task owned by this review
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit heartbeat stop failed, error: {e}")
+
+
+def _audit_verdict(reviewer: "PRReviewer", review_data: Optional[dict]) -> tuple:
+    """Best-effort (verdict, reason) for the audit record; "" when unavailable."""
+    try:
+        if review_data:
+            return reviewer._determine_review_verdict(review_data)
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit could not determine verdict, error: {e}")
+    return "", ""
+
+
+async def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: str,
+                          prediction: Optional[str]) -> None:
+    if not request_id or not await _wait_for_audit_start(request_id):
+        return
+    try:
+        from pr_agent.dashboard.audit import review_finished
+        review_data = reviewer.review_data
+        issues = []
+        if review_data:
+            issues = (review_data.get("review") or {}).get("key_issues_to_review") or []
+        verdict, reason = _audit_verdict(reviewer, review_data)
+        await review_finished(request_id, verdict=verdict, verdict_reason=reason,
+                              markdown_output=pr_review, raw_prediction=prediction, issues=issues)
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit (finished) skipped, error: {e}")
+
+
+async def _audit_metadata(request_id: str, reviewer: "PRReviewer") -> None:
+    """Backfill the audit row with metadata this run has already read.
+
+    Deliberately off the audit startup path (see _audit_started): the title and
+    head SHA come from provider state the review itself materialized, so the
+    dashboard history stops rendering every row without a title or commit.
+    """
+    if not request_id or not await _wait_for_audit_start(
+            request_id, timeout_seconds=AUDIT_START_TIMEOUT_SECONDS):
+        return
+    try:
+        from pr_agent.dashboard.audit import review_metadata
+        title = (getattr(reviewer, "vars", None) or {}).get("title") or ""
+        commit_sha = reviewer.git_provider.get_head_commit_sha() or ""
+        await _await_bounded_audit(
+            review_metadata(request_id, pr_title=title, commit_sha=commit_sha),
+            what="metadata")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit (metadata) skipped, error: {e}")
+
+
+async def _audit_failed(request_id: str, error: Exception) -> None:
+    if not request_id or not await _wait_for_audit_start(request_id):
+        return
+    try:
+        from pr_agent.dashboard.audit import review_failed
+        await review_failed(request_id, str(error))
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit (failed) skipped, error: {e}")
+
+
+async def _audit_skipped(request_id: str, reason: str) -> None:
+    """Close out a RUNNING record for a run that exited before publishing."""
+    if not request_id or not await _wait_for_audit_start(request_id):
+        return
+    try:
+        from pr_agent.dashboard.audit import review_skipped
+        await review_skipped(request_id, reason)
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit (skipped) skipped, error: {e}")
 
 
 def _verdict_is_newer(standing, snapshot) -> bool:
@@ -176,15 +410,29 @@ class PRReviewer:
         init_run_details()
         progress_response = None
         review_failed = False
+        audit_request_id = ""
+        audit_heartbeat_task = None
+        terminal_audit_started = False
+
+        async def _persist_terminal(coro) -> None:
+            nonlocal terminal_audit_started
+            terminal_audit_started = True
+            await _await_bounded_audit(coro)
+
         try:
+            audit_request_id = await _audit_started(self)
+            audit_heartbeat_task = _start_audit_heartbeat(audit_request_id)
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
+                await _persist_terminal(_audit_skipped(audit_request_id, "PR has no files"))
                 return None
 
             if self.incremental.is_incremental:
                 can_run = self._can_run_incremental_review()
                 # If the gate disabled incremental (e.g., commits_range is None), fall through to full review.
                 if not can_run and self.incremental.is_incremental:
+                    await _persist_terminal(
+                        _audit_skipped(audit_request_id, "incremental review gate closed"))
                     return None
 
             # if isinstance(self.args, list) and self.args and self.args[0] == 'auto_approve':
@@ -193,6 +441,7 @@ class PRReviewer:
             #     return None
 
             get_logger().info(f'Reviewing PR: {self.pr_url} ...')
+            await _audit_metadata(audit_request_id, self)
             relevant_configs = {'pr_reviewer': dict(get_settings().pr_reviewer),
                                 'config': dict(get_settings().config)}
             get_logger().debug("Relevant configs", artifacts=relevant_configs)
@@ -212,6 +461,8 @@ class PRReviewer:
                 if get_settings().config.publish_output:
                     self.git_provider.publish_comment(f"Incremental Review Skipped\n"
                                     f"No files were changed since the [previous PR Review]({previous_review_url})")
+                await _persist_terminal(
+                    _audit_skipped(audit_request_id, "incremental review: no new files"))
                 return None
 
             if get_settings().config.publish_output and not get_settings().config.get('is_auto_command', False):
@@ -226,9 +477,13 @@ class PRReviewer:
 
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
+                await _persist_terminal(
+                    _audit_skipped(audit_request_id, "model returned no prediction"))
                 return None
 
             pr_review = self._prepare_pr_review()
+            if not pr_review or not pr_review.strip():
+                raise ValueError("No usable review report was generated")
             get_logger().debug(f"PR output", artifact=pr_review)
 
             if self._single_review_submission_enabled() and get_settings().config.publish_output:
@@ -236,6 +491,8 @@ class PRReviewer:
                 # worker that blocks there stops answering webhooks. In a thread the wait
                 # can be long enough to be worth having.
                 await asyncio.to_thread(self._publish_single_review, pr_review, verdict_at_start)
+                await _persist_terminal(
+                    _audit_finished(self, audit_request_id, pr_review, self.prediction))
                 return
 
             should_publish = get_settings().config.publish_output and self._should_publish_review_no_suggestions(pr_review)
@@ -246,6 +503,8 @@ class PRReviewer:
                 get_logger().info(reason)
                 get_settings().data = {"artifact": pr_review}
                 self._submit_review_verdict()
+                await _persist_terminal(
+                    _audit_finished(self, audit_request_id, pr_review, self.prediction))
                 return
 
             # publish the review
@@ -274,12 +533,22 @@ class PRReviewer:
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
 
             self._submit_review_verdict()
+            await _persist_terminal(
+                _audit_finished(self, audit_request_id, pr_review, self.prediction))
+        except asyncio.CancelledError:
+            if not terminal_audit_started:
+                await _persist_terminal(
+                    _audit_failed(audit_request_id, RuntimeError("review task cancelled")))
+            raise
         except Exception as e:
             review_failed = True
             get_logger().error(f"Failed to review PR: {e}")
+            if not terminal_audit_started:
+                await _persist_terminal(_audit_failed(audit_request_id, e))
             if get_settings().config.get("propagate_tool_errors", False):
                 raise
         finally:
+            await _stop_audit_heartbeat(audit_heartbeat_task)
             if progress_response is not None:
                 try:
                     self.git_provider.remove_comment(progress_response)
@@ -535,12 +804,16 @@ class PRReviewer:
                          keys_fix_yaml=["ticket_compliance_check", "estimated_effort_to_review_[1-5]:", "security_concerns:", "key_issues_to_review:",
                                         "relevant_file:", "relevant_line:", "suggestion:"],
                          first_key=first_key, last_key=last_key)
-        github_action_output(data, 'review')
+        data, recovered_wrapper = recover_missing_review_wrapper(
+            data, require_severity=get_settings().pr_reviewer.get("enable_review_verdict", False))
+        if recovered_wrapper:
+            get_logger().warning("Recovered review response with a missing top-level 'review' wrapper")
 
-        if 'review' not in data:
-            get_logger().exception("Failed to parse review data", artifact={"data": data})
+        if not isinstance(data, dict) or not isinstance(data.get("review"), dict):
+            get_logger().error("Failed to parse review data", artifact={"data": data})
             return ""
 
+        github_action_output(data, 'review')
         self.review_data = data
 
         structured_publisher = getattr(self.git_provider, "publish_structured_review", None)

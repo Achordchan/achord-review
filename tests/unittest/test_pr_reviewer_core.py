@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -641,6 +642,195 @@ async def test_run_removes_its_progress_comment_when_review_generation_fails(
 
 
 @pytest.mark.asyncio
+async def test_run_records_an_empty_review_report_as_failed(monkeypatch):
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    progress_comment = MagicMock()
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = ["app.py"]
+    git_provider.publish_comment.return_value = progress_comment
+    reviewer = _make_reviewer(git_provider)
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    reviewer.prediction = None
+    reviewer._prepare_pr_review = lambda: ""
+
+    async def fake_retry(prepare_fn, model_type=None):
+        reviewer.prediction = "malformed prediction"
+
+    audit_failed = AsyncMock()
+    audit_finished = AsyncMock()
+    audit_supported = hasattr(pr_reviewer_module, "_audit_started")
+    monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "retry_with_fallback_models", fake_retry)
+    if audit_supported:
+        monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
+        monkeypatch.setattr(pr_reviewer_module, "_audit_failed", audit_failed)
+        monkeypatch.setattr(pr_reviewer_module, "_audit_finished", audit_finished)
+
+    settings = get_settings()
+    original = {
+        "publish_output": settings.config.publish_output,
+        "is_auto_command": settings.config.get("is_auto_command", False),
+    }
+    try:
+        settings.config.publish_output = True
+        settings.config.is_auto_command = False
+
+        await reviewer.run()
+    finally:
+        settings.config.publish_output = original["publish_output"]
+        settings.config.is_auto_command = original["is_auto_command"]
+
+    if audit_supported:
+        error = audit_failed.await_args.args[1]
+        assert isinstance(error, ValueError)
+        assert str(error) == "No usable review report was generated"
+        audit_finished.assert_not_awaited()
+    assert git_provider.publish_comment.call_args_list == [
+        (("Preparing review...",), {"is_temporary": True}),
+        (("Failed to review PR",), {}),
+    ]
+    git_provider.remove_comment.assert_called_once_with(progress_comment)
+    git_provider.remove_initial_comment.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_audits_cancellation_then_reraises(monkeypatch):
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = ["app.py"]
+    reviewer = _make_reviewer(git_provider)
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    audit_failed = AsyncMock()
+
+    monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
+    monkeypatch.setattr(pr_reviewer_module, "_audit_failed", audit_failed)
+    monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr(
+        pr_reviewer_module, "retry_with_fallback_models",
+        AsyncMock(side_effect=asyncio.CancelledError()))
+
+    settings = get_settings()
+    original_publish_output = settings.config.publish_output
+    try:
+        settings.config.publish_output = False
+        with pytest.raises(asyncio.CancelledError):
+            await reviewer.run()
+    finally:
+        settings.config.publish_output = original_publish_output
+
+    error = audit_failed.await_args.args[1]
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "review task cancelled"
+    git_provider.publish_comment.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_completion_does_not_start_competing_failure(monkeypatch):
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    terminal_started = asyncio.Event()
+    release_terminal = asyncio.Event()
+    terminal_finished = asyncio.Event()
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = ["app.py"]
+    reviewer = _make_reviewer(git_provider)
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    reviewer.prediction = None
+    reviewer.review_data = {"review": {}}
+    reviewer._prepare_pr_review = lambda: "completed review"
+    reviewer._submit_review_verdict = MagicMock()
+    audit_failed = AsyncMock()
+
+    async def fake_retry(prepare_fn, model_type=None):
+        reviewer.prediction = "prediction"
+
+    async def delayed_finished(*args, **kwargs):
+        terminal_started.set()
+        await release_terminal.wait()
+        terminal_finished.set()
+
+    monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
+    monkeypatch.setattr(pr_reviewer_module, "_start_audit_heartbeat", lambda request_id: None)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_finished", delayed_finished)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_failed", audit_failed)
+    monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "retry_with_fallback_models", fake_retry)
+
+    settings = get_settings()
+    original_publish_output = settings.config.publish_output
+    try:
+        settings.config.publish_output = False
+        task = asyncio.create_task(reviewer.run())
+        await terminal_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.gather(task)
+        audit_failed.assert_not_awaited()
+
+        release_terminal.set()
+        await asyncio.wait_for(terminal_finished.wait(), 1)
+    finally:
+        settings.config.publish_output = original_publish_output
+
+
+@pytest.mark.asyncio
+async def test_terminal_audit_cancellation_propagates_before_late_write_finishes():
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+    completed = []
+
+    async def terminal_write():
+        started.set()
+        await release.wait()
+        completed.append(True)
+        finished.set()
+
+    task = asyncio.create_task(pr_reviewer_module._await_bounded_audit(terminal_write()))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.shield(task), 0.2)
+    assert completed == []
+
+    release.set()
+    await asyncio.wait_for(finished.wait(), 1)
+    assert completed == [True]
+
+
+@pytest.mark.asyncio
+async def test_terminal_audit_timeout_detaches_and_finishes_late_write(monkeypatch):
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def terminal_write():
+        started.set()
+        await release.wait()
+        finished.set()
+
+    monkeypatch.setattr(pr_reviewer_module, "AUDIT_TERMINAL_TIMEOUT_SECONDS", 0.01)
+    task = asyncio.create_task(pr_reviewer_module._await_bounded_audit(terminal_write()))
+    await started.wait()
+
+    await asyncio.wait_for(task, 0.2)
+    assert not finished.is_set()
+
+    release.set()
+    await asyncio.wait_for(finished.wait(), 1)
+
+
+@pytest.mark.asyncio
 async def test_run_publishes_failure_result_when_progress_comment_has_no_handle(monkeypatch):
     from pr_agent.tools import pr_reviewer as pr_reviewer_module
 
@@ -905,6 +1095,34 @@ def test_prepare_review_publishes_provider_neutral_structured_data(monkeypatch):
     # (assert_called_once_with cannot catch this: dict equality ignores key order.)
     published = git_provider.publish_structured_review.call_args[0][0]
     assert list(published["review"].keys()) == ["key_issues_to_review", "security_concerns"]
+
+
+def test_prepare_review_recovers_model_output_missing_only_the_review_wrapper(monkeypatch):
+    git_provider = MagicMock()
+    git_provider.is_supported.return_value = False
+    git_provider.get_diff_files.return_value = []
+    reviewer = _make_prediction_reviewer(git_provider)
+    reviewer.prediction = """key_issues_to_review:
+  - relevant_file: pr_agent/dashboard/ops.py
+    issue_header: Enforce the probe timeout
+    severity: P2
+    issue_content: The configured timeout is accepted but not enforced.
+    start_line: 143
+security_concerns: No
+"""
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.set_review_labels = MagicMock()
+    monkeypatch.setattr(
+        "pr_agent.tools.pr_reviewer.convert_to_markdown_v2",
+        lambda *args, **kwargs: "## Review",
+    )
+
+    result = reviewer._prepare_pr_review()
+
+    assert result == "## Review"
+    assert reviewer.review_data["review"]["key_issues_to_review"][0]["severity"] == "P2"
+    assert reviewer.review_data["review"]["key_issues_to_review"][0]["end_line"] == 143
+    git_provider.publish_structured_review.assert_called_once()
 
 
 def test_can_run_incremental_review_skips_auto_mode_without_new_commit():
@@ -1218,3 +1436,40 @@ def test_answer_mode_prefers_the_newest_question_and_answer(monkeypatch):
 
     assert reviewer.vars["question_str"] == "Questions to better understand the PR:\n- Current question?"
     assert reviewer.vars["answer_str"] == "/answer Current answer."
+
+
+@pytest.mark.asyncio
+async def test_run_backfills_the_audit_metadata_on_the_review_path(monkeypatch):
+    # The audit row is inserted without a title or commit on purpose; the run
+    # itself has to fill them, or the dashboard history shows neither.
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = ["app.py"]
+    reviewer = _make_reviewer(git_provider)
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    reviewer.prediction = None
+    reviewer._prepare_pr_review = lambda: ""
+
+    async def fake_retry(prepare_fn, model_type=None):
+        reviewer.prediction = "malformed prediction"
+
+    audit_metadata = AsyncMock()
+    monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "retry_with_fallback_models", fake_retry)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
+    monkeypatch.setattr(pr_reviewer_module, "_start_audit_heartbeat", lambda request_id: None)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_failed", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "_audit_finished", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "_audit_metadata", audit_metadata)
+
+    settings = get_settings()
+    original_publish_output = settings.config.publish_output
+    try:
+        settings.config.publish_output = False
+        await reviewer.run()
+    finally:
+        settings.config.publish_output = original_publish_output
+
+    audit_metadata.assert_awaited_once_with("request-id", reviewer)

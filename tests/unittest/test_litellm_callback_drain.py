@@ -1726,7 +1726,7 @@ def test_external_cancellation_during_worker_cleanup_cancels_pending_callbacks(
             "litellm.utils",
             "_client_async_logging_helper",
         )
-        producer_task = asyncio.create_task(producer())
+        producer_task = None
 
         class Worker:
             _worker_task = None
@@ -1738,6 +1738,12 @@ def test_external_cancellation_during_worker_cleanup_cancels_pending_callbacks(
                 await asyncio.Event().wait()
 
         original_cancel_and_reap = litellm_helpers._cancel_and_reap_tasks
+        original_wait = asyncio.wait
+
+        async def do_not_consume_deadline_waiting_for_worker(tasks, timeout):
+            if any(task.get_coro().__name__ == "run_worker_flush" for task in tasks):
+                return set(), set(tasks)
+            return await original_wait(tasks, timeout=timeout)
 
         async def interruptible_cancel_and_reap(tasks, timeout, *, protect_from_cancellation=False):
             if not protect_from_cancellation and any(
@@ -1756,19 +1762,27 @@ def test_external_cancellation_during_worker_cleanup_cancels_pending_callbacks(
 
         monkeypatch.setattr(litellm_helpers, "_get_global_logging_worker", lambda: Worker())
         monkeypatch.setattr(litellm_helpers, "_cancel_and_reap_tasks", interruptible_cancel_and_reap)
+        monkeypatch.setattr(litellm_helpers.asyncio, "wait", do_not_consume_deadline_waiting_for_worker)
         monkeypatch.setattr(litellm, "callbacks", [_CountingLogger()])
 
-        drain_task = asyncio.create_task(drain_litellm_callbacks(timeout=0.1))
+        drain_task = asyncio.create_task(drain_litellm_callbacks(timeout=1))
         try:
             await asyncio.wait_for(worker_cleanup_started.wait(), timeout=1)
+            producer_task = asyncio.create_task(producer())
+            await asyncio.sleep(0)
             drain_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await drain_task
             await asyncio.wait_for(producer_cancelled.wait(), timeout=1)
         finally:
             drain_task.cancel()
-            producer_task.cancel()
-            await asyncio.gather(drain_task, producer_task, return_exceptions=True)
+            if producer_task is not None:
+                producer_task.cancel()
+            await asyncio.gather(
+                drain_task,
+                *((producer_task,) if producer_task is not None else ()),
+                return_exceptions=True,
+            )
 
     asyncio.run(run())
 
