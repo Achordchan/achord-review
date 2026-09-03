@@ -347,11 +347,19 @@ def probe_github_app(timeout_seconds: float = 30) -> Dict[str, Any]:
                 }
             finally:
                 try:
-                    requests.delete(
+                    revocation = requests.delete(
                         "https://api.github.com/installation/token",
                         timeout=TOKEN_REVOCATION_TIMEOUT_SECONDS, headers=installation_headers)
+                    # GitHub answers 204; anything else means the repository-access
+                    # token is still live for up to an hour, so say so out loud
+                    # rather than letting a successful probe imply it was revoked.
+                    status = getattr(revocation, "status_code", None)
+                    if status != 204:
+                        get_logger().warning(
+                            f"GitHub probe token revocation returned {status}; the temporary "
+                            f"installation token stays valid until it expires")
                 except Exception as e:
-                    get_logger().debug(f"GitHub probe token revocation skipped, error: {e}")
+                    get_logger().warning(f"GitHub probe token revocation failed, error: {e}")
         return {
             "ok": False,
             "app_id": app_id,

@@ -334,7 +334,8 @@ def test_github_probe_mints_and_validates_installation_token(monkeypatch):
         lambda url, **kwargs: Response(201, {"token": "installation-token"}))
     monkeypatch.setattr(
         requests, "delete",
-        lambda url, **kwargs: requested.append(("DELETE", url, kwargs["headers"]["Authorization"])))
+        lambda url, **kwargs: requested.append(
+            ("DELETE", url, kwargs["headers"]["Authorization"])) or Response(204, None))
 
     result = ops.probe_github_app()
 
@@ -502,10 +503,68 @@ def test_github_probe_revokes_its_token_even_with_the_deadline_spent(monkeypatch
         lambda url, **kwargs: Response(201, {"token": "installation-token"}))
     monkeypatch.setattr(
         requests, "delete",
-        lambda url, **kwargs: deletes.append((url, kwargs["timeout"])))
+        lambda url, **kwargs: deletes.append((url, kwargs["timeout"])) or Response(204, None))
 
     result = ops.probe_github_app(timeout_seconds=10)
 
     assert result["ok"] is True
     assert deletes == [("https://api.github.com/installation/token",
                         ops.TOKEN_REVOCATION_TIMEOUT_SECONDS)]
+
+
+def test_github_probe_reports_a_rejected_token_revocation(monkeypatch):
+    # A 403/429/500 leaves the repository-access token live for up to an hour,
+    # so a probe that reports success must not stay silent about it.
+    import jwt
+    import requests
+
+    class FakeSettings:
+        def get(self, key, default=None):
+            return {
+                "github.app_id": "123",
+                "github.private_key": "private-key",
+            }.get(key, default)
+
+    class Response:
+        headers = {}
+
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class RecordingLogger:
+        def __init__(self, warnings):
+            self.warnings = warnings
+
+        def warning(self, message):
+            self.warnings.append(message)
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    warnings = []
+    import pr_agent.config_loader as config_loader
+    monkeypatch.setattr(config_loader, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(jwt, "encode", lambda *args, **kwargs: "app-jwt")
+    monkeypatch.setattr(ops, "get_logger", lambda: RecordingLogger(warnings))
+
+    def fake_get(url, **kwargs):
+        if url.endswith("/app"):
+            return Response(200, {"name": "achord-review"})
+        if "/app/installations" in url:
+            return Response(200, [{"id": 1, "suspended_at": None}])
+        return Response(200, {"total_count": 3})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(
+        requests, "post",
+        lambda url, **kwargs: Response(201, {"token": "installation-token"}))
+    monkeypatch.setattr(requests, "delete", lambda url, **kwargs: Response(403, None))
+
+    result = ops.probe_github_app(timeout_seconds=10)
+
+    assert result["ok"] is True
+    assert any("403" in message for message in warnings)
