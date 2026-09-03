@@ -421,3 +421,47 @@ def test_github_probe_skips_installations_without_repository_access(monkeypatch)
     assert result["ok"] is False
     assert result["installation_count"] == 2
     assert "no accessible repositories" in result["error"]
+
+
+def test_github_probe_enforces_one_deadline_across_installations(monkeypatch):
+    import jwt
+    import requests
+
+    class FakeSettings:
+        def get(self, key, default=None):
+            return {
+                "github.app_id": "123",
+                "github.private_key": "private-key",
+            }.get(key, default)
+
+    class Response:
+        headers = {}
+
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    import pr_agent.config_loader as config_loader
+    monkeypatch.setattr(config_loader, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(jwt, "encode", lambda *args, **kwargs: "app-jwt")
+    clock = {"now": 0.0}
+    posts = []
+
+    def fake_get(url, **kwargs):
+        if url.endswith("/app"):
+            return Response(200, {"name": "achord-review"})
+        clock["now"] = 2.0
+        return Response(200, [{"id": 1, "suspended_at": None}])
+
+    monkeypatch.setattr(ops.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: posts.append(args) or None)
+
+    result = ops.probe_github_app(timeout_seconds=1)
+
+    assert result["ok"] is False
+    assert result["error"] == "GitHub App probe exceeded its 1s deadline"
+    assert posts == []

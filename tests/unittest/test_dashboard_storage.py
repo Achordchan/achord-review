@@ -548,8 +548,9 @@ class TestStoragePermissions:
         assert stat.S_IMODE(os.stat(f"{storage.db_path}-wal").st_mode) == 0o600
         assert stat.S_IMODE(os.stat(f"{storage.db_path}-shm").st_mode) == 0o600
 
-    def test_existing_data_directory_is_secured_before_sqlite_connect(self, tmp_path, monkeypatch):
-        directory = tmp_path / "dashboard-data"
+    def test_existing_parent_is_preserved_while_database_is_secured_before_connect(
+            self, tmp_path, monkeypatch):
+        directory = tmp_path / "shared-parent"
         directory.mkdir(mode=0o755)
         db_path = directory / "review.db"
         observed_modes = []
@@ -566,7 +567,8 @@ class TestStoragePermissions:
         DashboardStorage(db_path=str(db_path)).initialize()
 
         assert observed_modes
-        assert all(modes == (0o700, 0o600) for modes in observed_modes)
+        assert all(modes == (0o755, 0o600) for modes in observed_modes)
+        assert stat.S_IMODE(os.stat(directory).st_mode) == 0o755
 
     def test_vanished_sqlite_sidecar_does_not_fail_permission_protection(self, storage, monkeypatch):
         real_chmod = os.chmod

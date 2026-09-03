@@ -244,6 +244,11 @@ class TestWrite:
         ok, errors = engine.write({"model": "   "})
         assert not ok and errors == ["model must not be empty"]
 
+    def test_model_identifier_is_trimmed_before_persistence(self, engine):
+        ok, errors = engine.write({"model": "  openai/gpt-new  "})
+        assert ok, errors
+        assert engine.read()["values"]["model"] == "openai/gpt-new"
+
     @pytest.mark.parametrize(
         "value", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
     def test_reasoning_effort_accepts_every_adapter_value(self, engine, value):

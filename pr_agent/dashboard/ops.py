@@ -254,7 +254,7 @@ def _get_probe_ai_handler():
     return LiteLLMAIHandler()
 
 
-def probe_github_app() -> Dict[str, Any]:
+def probe_github_app(timeout_seconds: float = 30) -> Dict[str, Any]:
     """Validate the App JWT, an active installation, and repository access."""
     from pr_agent.config_loader import get_settings
     settings = get_settings()
@@ -262,6 +262,15 @@ def probe_github_app() -> Dict[str, Any]:
     private_key = str(settings.get("github.private_key", "")).strip()
     if not app_id or not private_key:
         return {"ok": False, "error": "github.app_id / github.private_key are not configured"}
+    timeout_seconds = max(0.0, float(timeout_seconds))
+    deadline = time.monotonic() + timeout_seconds
+
+    def request_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"GitHub App probe exceeded its {timeout_seconds:g}s deadline")
+        return min(15.0, remaining)
+
     try:
         import jwt
         now = int(time.time())
@@ -271,7 +280,7 @@ def probe_github_app() -> Dict[str, Any]:
         app_headers = {"Authorization": f"Bearer {app_token}",
                        "Accept": "application/vnd.github+json"}
         app_response = requests.get(
-            "https://api.github.com/app", timeout=15, headers=app_headers)
+            "https://api.github.com/app", timeout=request_timeout(), headers=app_headers)
         if app_response.status_code != 200:
             return {"ok": False, "app_id": app_id,
                     "error": f"GitHub App API returned {app_response.status_code}"}
@@ -279,7 +288,7 @@ def probe_github_app() -> Dict[str, Any]:
         installations_url = "https://api.github.com/app/installations?per_page=100"
         while installations_url:
             installations_response = requests.get(
-                installations_url, timeout=15, headers=app_headers)
+                installations_url, timeout=request_timeout(), headers=app_headers)
             if installations_response.status_code != 200:
                 return {"ok": False, "app_id": app_id,
                         "error": f"GitHub installations API returned {installations_response.status_code}"}
@@ -296,7 +305,7 @@ def probe_github_app() -> Dict[str, Any]:
             installation_id = int(installation["id"])
             token_response = requests.post(
                 f"https://api.github.com/app/installations/{installation_id}/access_tokens",
-                timeout=15, headers=app_headers)
+                timeout=request_timeout(), headers=app_headers)
             if token_response.status_code != 201:
                 probe_errors.append(
                     f"installation {installation_id} token API returned {token_response.status_code}")
@@ -312,7 +321,7 @@ def probe_github_app() -> Dict[str, Any]:
             try:
                 repositories_response = requests.get(
                     "https://api.github.com/installation/repositories?per_page=1",
-                    timeout=15, headers=installation_headers)
+                    timeout=request_timeout(), headers=installation_headers)
                 if repositories_response.status_code != 200:
                     probe_errors.append(
                         f"installation {installation_id} repository access returned "
@@ -333,7 +342,7 @@ def probe_github_app() -> Dict[str, Any]:
                 try:
                     requests.delete(
                         "https://api.github.com/installation/token",
-                        timeout=15, headers=installation_headers)
+                        timeout=request_timeout(), headers=installation_headers)
                 except Exception as e:
                     get_logger().debug(f"GitHub probe token revocation skipped, error: {e}")
         return {

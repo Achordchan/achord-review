@@ -82,9 +82,11 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
             if not isinstance(value, str):
                 errors.append(f"{name} must be a string")
                 continue
-            if name == "model" and not value.strip():
-                errors.append("model must not be empty")
-                continue
+            if name == "model":
+                value = value.strip()
+                if not value:
+                    errors.append("model must not be empty")
+                    continue
             if name == "reasoning_effort":
                 value = value.strip().lower()
                 if value and value not in REASONING_EFFORTS:

@@ -183,8 +183,10 @@ class DashboardStorage:
     def initialize(self) -> None:
         directory = os.path.dirname(self.db_path)
         if directory:
+            directory_created = not os.path.exists(directory)
             os.makedirs(directory, mode=0o700, exist_ok=True)
-            os.chmod(directory, 0o700)
+            if directory_created:
+                os.chmod(directory, 0o700)
         with self._write_lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
             # Serialize cross-worker schema inspection and migrations. Without
@@ -228,9 +230,6 @@ class DashboardStorage:
 
     def _prepare_storage_path(self) -> None:
         """Create/secure the database before SQLite can open it or make sidecars."""
-        directory = os.path.dirname(self.db_path)
-        if directory:
-            os.chmod(directory, 0o700)
         flags = os.O_RDWR | os.O_CREAT
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
