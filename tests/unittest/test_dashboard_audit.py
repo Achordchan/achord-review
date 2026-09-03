@@ -462,3 +462,43 @@ def test_completed_audit_start_is_retired_after_the_wait():
             pr_reviewer._AUDIT_START_TASKS.pop("request-id", None)
 
     asyncio.run(scenario())
+
+
+def test_audit_storage_work_stays_off_the_shared_executor(monkeypatch):
+    # A hung /app/data volume must not consume the loop's default pool, which
+    # review publication and the dashboard's own queries also use.
+    threads = []
+
+    class RecordingStorage:
+        def skip_review(self, request_id, reason, **fields):
+            threads.append(threading.current_thread().name)
+
+    monkeypatch.setattr(audit, "_run_audit", lambda: RecordingStorage())
+    monkeypatch.setattr(audit, "_run_payload_fields", dict)
+
+    async def scenario():
+        await audit.review_skipped("request-id", "no files")
+        default_pool = await asyncio.to_thread(lambda: threading.current_thread().name)
+        return default_pool
+
+    default_pool = asyncio.run(scenario())
+
+    assert threads and all(name.startswith("dashboard-audit") for name in threads)
+    assert not default_pool.startswith("dashboard-audit")
+
+
+def test_audit_start_runs_on_the_dedicated_executor(monkeypatch):
+    threads = []
+
+    class Reviewer:
+        pr_url = "https://github.com/a/b/pull/1"
+        git_provider = None
+
+    def fake_started(**kwargs):
+        threads.append(threading.current_thread().name)
+        return kwargs["request_id"]
+
+    monkeypatch.setattr(audit, "review_started", fake_started)
+    asyncio.run(pr_reviewer._audit_started(Reviewer()))
+
+    assert threads and threads[0].startswith("dashboard-audit")

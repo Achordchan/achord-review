@@ -92,7 +92,7 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
     """
     from starlette_context import context as request_context
 
-    from pr_agent.dashboard.audit import review_started
+    from pr_agent.dashboard.audit import review_started, run_audit_work
 
     request_id = uuid.uuid4().hex
 
@@ -117,7 +117,7 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
         except Exception as e:
             get_logger().debug(f"Dashboard audit cancelled-start cleanup skipped, error: {e}")
 
-    work_task = asyncio.create_task(asyncio.to_thread(_work))
+    work_task = asyncio.create_task(run_audit_work(_work))
     _AUDIT_START_TASKS[request_id] = work_task
     try:
         started_id = await asyncio.wait_for(

@@ -2,18 +2,36 @@
 
 Called from PRReviewer.run() at the start and on every terminal path. Every
 function here is fail-safe: any storage error is logged and swallowed, the
-review flow itself is never disturbed. Writes run off the event loop via
-asyncio.to_thread; the reviewer gives terminal writes a bounded foreground
-window and keeps delayed writes tracked for asynchronous reconciliation.
+review flow itself is never disturbed. Writes run off the event loop on a
+dedicated pool (see run_audit_work); the reviewer gives terminal writes a
+bounded foreground window and keeps delayed writes tracked for asynchronous
+reconciliation.
 """
 
 import asyncio
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional
 from urllib.parse import unquote, urlsplit
 
 from pr_agent.algo.run_details import get_run_details
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
+
+# Audit storage work gets its own small pool. A stalled /app/data volume hangs
+# a thread at the syscall level, past every timeout the storage layer can set,
+# and those threads never come back. On the event loop's shared executor they
+# would accumulate until review publication and the dashboard's own queries —
+# every other asyncio.to_thread caller — stalled with them. Exhausting this
+# pool degrades dashboard auditing and nothing else.
+AUDIT_EXECUTOR_WORKERS = 4
+_audit_executor = ThreadPoolExecutor(
+    max_workers=AUDIT_EXECUTOR_WORKERS, thread_name_prefix="dashboard-audit")
+
+
+async def run_audit_work(work: Callable):
+    """Run one blocking audit storage call off the event loop, off the shared pool."""
+    return await asyncio.get_running_loop().run_in_executor(_audit_executor, work)
+
 
 _VALID_SEVERITIES = {"P0", "P1", "P2", "P3"}
 _MAX_SQLITE_INTEGER = 2 ** 63 - 1
@@ -157,7 +175,7 @@ async def review_finished(request_id: str, verdict: str = "", verdict_reason: st
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_finished) failed, error: {e}")
 
-    await asyncio.to_thread(_work)
+    await run_audit_work(_work)
 
 
 async def review_failed(request_id: str, error_message: str) -> None:
@@ -174,7 +192,7 @@ async def review_failed(request_id: str, error_message: str) -> None:
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_failed) failed, error: {e}")
 
-    await asyncio.to_thread(_work)
+    await run_audit_work(_work)
 
 
 async def review_skipped(request_id: str, reason: str) -> None:
@@ -196,7 +214,7 @@ async def review_skipped(request_id: str, reason: str) -> None:
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_skipped) failed, error: {e}")
 
-    await asyncio.to_thread(_work)
+    await run_audit_work(_work)
 
 
 async def review_metadata(request_id: str, pr_title: str = "", commit_sha: str = "") -> None:
@@ -219,7 +237,7 @@ async def review_metadata(request_id: str, pr_title: str = "", commit_sha: str =
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_metadata) failed, error: {e}")
 
-    await asyncio.to_thread(_work)
+    await run_audit_work(_work)
 
 
 async def review_heartbeat(request_id: str) -> None:
@@ -235,7 +253,7 @@ async def review_heartbeat(request_id: str) -> None:
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_heartbeat) failed, error: {e}")
 
-    await asyncio.to_thread(_work)
+    await run_audit_work(_work)
 
 
 async def review_heartbeat_loop(request_id: str, interval_seconds: Optional[float] = None) -> None:
