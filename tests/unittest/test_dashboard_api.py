@@ -41,6 +41,7 @@ def client(storage, monkeypatch):
     from fastapi import FastAPI
 
     app = FastAPI()
+    app.middleware("http")(dashboard_api.limit_dashboard_request_body)
     app.include_router(dashboard_api.router)
     return TestClient(app)
 
@@ -60,6 +61,49 @@ def _auth_header(client):
 
 
 class TestAuth:
+    def test_oversized_login_body_is_rejected_before_model_parsing(self, client):
+        resp = client.post(
+            "/api/v1/dashboard/auth/login",
+            content=b'{"password":"' + b"x" * dashboard_api.MAX_DASHBOARD_REQUEST_BYTES + b'"}',
+            headers={"Content-Type": "application/json"})
+
+        assert resp.status_code == 413
+        assert resp.json()["code"] == "REQUEST_TOO_LARGE"
+
+    def test_actual_body_size_is_limited_when_content_length_is_underreported(self, client):
+        resp = client.post(
+            "/api/v1/dashboard/auth/login",
+            content=b'{"password":"' + b"x" * dashboard_api.MAX_DASHBOARD_REQUEST_BYTES + b'"}',
+            headers={"Content-Type": "application/json", "Content-Length": "1"})
+
+        assert resp.status_code == 413
+        assert resp.json()["code"] == "REQUEST_TOO_LARGE"
+
+    def test_webhook_routes_keep_accepting_bodies_above_the_dashboard_limit(self):
+        # The limiter guards only the dashboard prefix; GitHub delivers webhook
+        # payloads far larger than 64 KiB and must stay unaffected.
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.middleware("http")(dashboard_api.limit_dashboard_request_body)
+
+        @app.post("/api/v1/github_webhooks")
+        async def _webhook(payload: dict):
+            return {"size": len(payload["diff"])}
+
+        oversized = "x" * (dashboard_api.MAX_DASHBOARD_REQUEST_BYTES * 2)
+        resp = TestClient(app).post("/api/v1/github_webhooks", json={"diff": oversized})
+
+        assert resp.status_code == 200
+        assert resp.json()["size"] == len(oversized)
+
+    def test_dashboard_body_within_the_limit_reaches_the_endpoint_intact(self, client):
+        # The limiter buffers the stream itself, so the happy path must still
+        # hand the untouched body to the request model.
+        resp = client.post("/api/v1/dashboard/auth/login", json={"password": "test-pass-123"})
+
+        assert resp.status_code == 200, resp.text
+
     def test_environment_password_snapshot_identifies_source_without_derived_hash(self, monkeypatch):
         monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "first-password")
         monkeypatch.setenv("DASHBOARD__ADMIN_PASSWORD", "fallback-password")

@@ -41,6 +41,7 @@ SESSION_TTL_SECONDS = 7 * 24 * 3600
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 15 * 60
 MAX_SQLITE_INTEGER = 2 ** 63 - 1
+MAX_DASHBOARD_REQUEST_BYTES = 64 * 1024
 # Number of trusted proxy hops in front of this service. The deployment sits
 # behind exactly one nginx; only headers appended by those hops are consumed,
 # so clients cannot rotate their X-Forwarded-For to evade the login lockout.
@@ -55,6 +56,44 @@ _password_sync_state = {
     "db_path": "", "password": None, "generation": None, "signature": None,
 }
 _password_sync_lock = threading.Lock()
+
+
+async def limit_dashboard_request_body(request: Request, call_next):
+    """Reject large dashboard writes before FastAPI parses request models."""
+    if (not request.url.path.startswith("/api/v1/dashboard")
+            or request.method not in {"POST", "PUT", "PATCH"}):
+        return await call_next(request)
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            parsed_length = int(content_length)
+            if parsed_length < 0:
+                raise ValueError("content length must not be negative")
+            if parsed_length > MAX_DASHBOARD_REQUEST_BYTES:
+                return _request_too_large()
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "code": "INVALID_CONTENT_LENGTH",
+                         "message": "请求长度无效"})
+
+    chunks = []
+    total_bytes = 0
+    async for chunk in request.stream():
+        total_bytes += len(chunk)
+        if total_bytes > MAX_DASHBOARD_REQUEST_BYTES:
+            return _request_too_large()
+        chunks.append(chunk)
+    request._body = b"".join(chunks)
+    return await call_next(request)
+
+
+def _request_too_large() -> JSONResponse:
+    return JSONResponse(
+        status_code=413,
+        content={"success": False, "code": "REQUEST_TOO_LARGE",
+                 "message": "请求内容超过 64 KiB 限制"})
 
 
 def _storage_call(method_name: str, *args, **kwargs):

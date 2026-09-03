@@ -500,6 +500,7 @@ app.include_router(router)
 try:
     from pr_agent.dashboard.config_engine import get_config_engine
     from pr_agent.dashboard.storage import get_storage
+    from pr_agent.servers.dashboard_api import limit_dashboard_request_body
     from pr_agent.servers.dashboard_api import router as dashboard_router
 
     get_storage()  # initialize the SQLite file early so the first webhook write is cheap
@@ -513,6 +514,10 @@ try:
         # the worker's last known-good settings instead of breaking webhooks.
         dashboard_config_engine.reload_if_changed()
         return await call_next(request)
+
+    # Registered last so it wraps every other dashboard middleware: oversized
+    # bodies are refused before any of them, and before request-model parsing.
+    app.middleware("http")(limit_dashboard_request_body)
 
     from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
