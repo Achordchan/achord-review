@@ -43,6 +43,8 @@ MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 15 * 60
 MAX_SQLITE_INTEGER = 2 ** 63 - 1
 MAX_DASHBOARD_REQUEST_BYTES = 64 * 1024
+# Everything the panel serves: the JSON API and the SPA bundle under /dashboard.
+DASHBOARD_PATH_PREFIXES = ("/api/v1/dashboard", "/dashboard")
 # Number of trusted proxy hops in front of this service. The deployment sits
 # behind exactly one nginx; only headers appended by those hops are consumed,
 # so clients cannot rotate their X-Forwarded-For to evade the login lockout.
@@ -57,6 +59,21 @@ _password_sync_state = {
     "db_path": "", "password": None, "generation": None, "signature": None,
 }
 _password_sync_lock = threading.Lock()
+
+
+async def add_dashboard_security_headers(request: Request, call_next):
+    """Forbid framing of the dashboard and its API.
+
+    The session cookie is SameSite=Lax and the CSRF check only compares
+    origins, so a frame hosted on any sibling subdomain would issue fully
+    authenticated requests: a single tricked click could restart the
+    container or pull git. Nothing legitimately embeds the panel.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith(DASHBOARD_PATH_PREFIXES):
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["X-Frame-Options"] = "DENY"
+    return response
 
 
 async def limit_dashboard_request_body(request: Request, call_next):

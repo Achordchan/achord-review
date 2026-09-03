@@ -42,6 +42,7 @@ def client(storage, monkeypatch):
 
     app = FastAPI()
     app.middleware("http")(dashboard_api.limit_dashboard_request_body)
+    app.middleware("http")(dashboard_api.add_dashboard_security_headers)
     app.include_router(dashboard_api.router)
     return TestClient(app)
 
@@ -78,6 +79,41 @@ class TestAuth:
 
         assert resp.status_code == 413
         assert resp.json()["code"] == "REQUEST_TOO_LARGE"
+
+    def test_dashboard_responses_forbid_framing(self, client):
+        # SameSite=Lax cookies ride along inside a frame hosted on a sibling
+        # subdomain, and its clicks would pass the same-origin CSRF check.
+        authenticated = client.get("/api/v1/dashboard/stats/overview", headers=_auth_header(client))
+        unauthenticated = client.get("/api/v1/dashboard/stats/overview")
+
+        for resp in (authenticated, unauthenticated):
+            assert resp.headers["content-security-policy"] == "frame-ancestors 'none'"
+            assert resp.headers["x-frame-options"] == "DENY"
+
+    def test_oversized_rejection_still_carries_the_anti_framing_headers(self, client):
+        resp = client.post(
+            "/api/v1/dashboard/auth/login",
+            content=b'{"password":"' + b"x" * dashboard_api.MAX_DASHBOARD_REQUEST_BYTES + b'"}',
+            headers={"Content-Type": "application/json"})
+
+        assert resp.status_code == 413
+        assert resp.headers["x-frame-options"] == "DENY"
+
+    def test_non_dashboard_routes_keep_their_own_headers(self):
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.middleware("http")(dashboard_api.add_dashboard_security_headers)
+
+        @app.get("/api/v1/github_webhooks")
+        async def _webhook():
+            return {"ok": True}
+
+        resp = TestClient(app).get("/api/v1/github_webhooks")
+
+        assert resp.status_code == 200
+        assert "x-frame-options" not in resp.headers
+        assert "content-security-policy" not in resp.headers
 
     def test_webhook_routes_keep_accepting_bodies_above_the_dashboard_limit(self):
         # The limiter guards only the dashboard prefix; GitHub delivers webhook
