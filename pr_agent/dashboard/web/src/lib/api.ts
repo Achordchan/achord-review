@@ -1,10 +1,12 @@
 export class ApiError extends Error {
   status: number
   code?: string
-  constructor(status: number, message: string, code?: string) {
+  data?: unknown
+  constructor(status: number, message: string, code?: string, data?: unknown) {
     super(message)
     this.status = status
     this.code = code
+    this.data = data
   }
 }
 
@@ -46,7 +48,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       (body as { message?: string; detail?: string }).message ??
       (body as { detail?: string }).detail ??
       `请求失败 (${response.status})`
-    throw new ApiError(response.status, detail, (body as { code?: string }).code)
+    throw new ApiError(
+      response.status,
+      detail,
+      (body as { code?: string }).code,
+      (body as { data?: unknown }).data,
+    )
   }
   return (body as { data: T }).data ?? body
 }

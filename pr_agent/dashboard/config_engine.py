@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import tomlkit
 
+from pr_agent.algo.utils import ReasoningEffort
 from pr_agent.log import get_logger
 
 MAX_BACKUPS = 5
@@ -46,6 +47,7 @@ INT_FIELDS = {
     "num_max_findings": ("pr_reviewer", "num_max_findings", 1, 30),
 }
 SEVERITIES = {"P0", "P1", "P2", "P3"}
+REASONING_EFFORTS = {effort.value for effort in ReasoningEffort}
 
 
 def find_config_path() -> Optional[str]:
@@ -83,6 +85,13 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
             if name == "model" and not value.strip():
                 errors.append("model must not be empty")
                 continue
+            if name == "reasoning_effort":
+                value = value.strip().lower()
+                if value and value not in REASONING_EFFORTS:
+                    errors.append(
+                        "reasoning_effort must be one of: "
+                        + ", ".join(sorted(REASONING_EFFORTS)))
+                    continue
             clean[name] = value
         elif name in INT_FIELDS:
             low, high = INT_FIELDS[name][2], INT_FIELDS[name][3]

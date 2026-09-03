@@ -17,6 +17,7 @@ def engine(tmp_path, monkeypatch):
         '[pr_reviewer]\nnum_max_findings = 10\nverdict_blocking_severities = ["P0"]\n\n'
         '[ignore]\nglob = ["dist/**"]\n\n[github]\napp_id = "123"\n',
         encoding="utf-8")
+
     class IsolatedSettings:
         def __init__(self):
             self.values = {}
@@ -242,6 +243,23 @@ class TestWrite:
         assert not ok
         ok, errors = engine.write({"model": "   "})
         assert not ok and errors == ["model must not be empty"]
+
+    @pytest.mark.parametrize(
+        "value", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+    def test_reasoning_effort_accepts_every_adapter_value(self, engine, value):
+        ok, errors = engine.write({"reasoning_effort": value})
+        assert ok, errors
+        assert engine.read()["values"]["reasoning_effort"] == value
+
+    def test_reasoning_effort_normalizes_input_and_rejects_unknown_value(self, engine):
+        ok, errors = engine.write({"reasoning_effort": "  XHIGH  "})
+        assert ok, errors
+        assert engine.read()["values"]["reasoning_effort"] == "xhigh"
+
+        ok, errors = engine.write({"reasoning_effort": "hgh"})
+        assert ok is False
+        assert errors == [
+            "reasoning_effort must be one of: high, low, max, medium, minimal, none, xhigh"]
 
     @pytest.mark.parametrize("value", [True, False, 60.9, float("inf"), float("-inf"), "60.0"])
     def test_integer_fields_reject_lossy_or_non_finite_values(self, engine, value):

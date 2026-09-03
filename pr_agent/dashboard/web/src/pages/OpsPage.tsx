@@ -8,6 +8,16 @@ import { ConfirmDialog } from '../components/Dialogs'
 import { useToast } from '../components/Toast'
 import { formatDateTime } from '../lib/format'
 
+function isOpsResult(value: unknown): value is OpsResult {
+  if (!value || typeof value !== 'object') return false
+  const result = value as Partial<OpsResult>
+  return typeof result.started === 'boolean'
+    && typeof result.completed === 'boolean'
+    && (result.exit_code === null || typeof result.exit_code === 'number')
+    && Array.isArray(result.output)
+    && result.output.every((line) => typeof line === 'string')
+}
+
 function ProbeRow({ name, result, loading }: { name: string; result?: Record<string, unknown>; loading?: boolean }) {
   const ok = result?.ok
   return (
@@ -52,6 +62,7 @@ export default function OpsPage() {
 
   const runAction = async (action: 'restart' | 'pull') => {
     setConfirmAction(null)
+    setTask(null)
     try {
       const body = action === 'restart'
         ? await api.post<OpsResult>('/api/v1/dashboard/ops/restart')
@@ -64,7 +75,14 @@ export default function OpsPage() {
         await queryClient.invalidateQueries({ queryKey: ['ops-logs'] })
       }
     } catch (error) {
-      toast.error('指令未下发', error instanceof ApiError ? error.message : '请检查运行环境与服务状态')
+      const failedTask = error instanceof ApiError && isOpsResult(error.data) && error.data.started
+        ? error.data
+        : null
+      setTask(failedTask)
+      toast.error(
+        failedTask ? '操作执行失败' : '指令未下发',
+        error instanceof ApiError ? error.message : '请检查运行环境与服务状态',
+      )
     }
   }
 
@@ -134,7 +152,7 @@ export default function OpsPage() {
                 title="任务输出"
                 description={task.completed ? `已结束（exit code ${task.exit_code ?? '?'}）` : '指令已下发'}
               />
-              <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-all px-5 py-4 font-mono text-xs leading-relaxed text-muted">
+              <pre className={`max-h-60 overflow-auto whitespace-pre-wrap break-all px-5 py-4 font-mono text-xs leading-relaxed ${task.exit_code !== null && task.exit_code !== 0 ? 'text-bad' : 'text-muted'}`}>
                 {task.output.join('\n') || '（暂无输出）'}
               </pre>
             </Card>

@@ -166,10 +166,10 @@ export default function ConfigPage() {
             <Field label="模型" hint="如 openai/gpt-5.6-sol">
               <input className={inputClass} value={values.model ?? ''} onChange={(e) => set('model', e.target.value)} />
             </Field>
-            <Field label="Reasoning Effort" hint="GPT-5 系列的思考强度档位：low / medium / high / xhigh">
+            <Field label="推理强度" hint="支持 none / minimal / low / medium / high / xhigh / max">
               <select className={inputClass} value={values.reasoning_effort ?? ''} onChange={(e) => set('reasoning_effort', e.target.value)}>
                 <option value="">默认</option>
-                {['low', 'medium', 'high', 'xhigh'].map((v) => <option key={v} value={v}>{v}</option>)}
+                {['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((v) => <option key={v} value={v}>{v}</option>)}
               </select>
             </Field>
             <div className="grid grid-cols-2 gap-4">
