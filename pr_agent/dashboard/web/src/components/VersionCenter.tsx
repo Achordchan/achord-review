@@ -215,16 +215,18 @@ export function VersionCenter({ onClose, version }: {
                 )}
                 <button
                   onClick={() => void runRestart()}
-                  disabled={!restartAvailable || phase === 'updating'}
-                  title={restartAvailable ? '' : capabilitiesQuery.data?.restart.reason}
+                  disabled={!restartAvailable || phase === 'updating' || depsChanged}
+                  title={depsChanged
+                    ? '依赖有变更，重启会因缺少新依赖导致导入失败并进入重启循环，请在宿主机重建镜像'
+                    : (restartAvailable ? '' : capabilitiesQuery.data?.restart.reason)}
                   className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-semibold transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
-                    phase === 'updated'
+                    phase === 'updated' && !depsChanged
                       ? 'bg-accent-strong text-white hover:bg-accent'
                       : 'border border-line text-text hover:bg-surface-2'
                   }`}
                 >
                   <RefreshCw size={14} />
-                  {phase === 'updated' ? '重启以生效' : '重启'}
+                  {depsChanged ? '需宿主机重建' : phase === 'updated' ? '重启以生效' : '重启'}
                 </button>
               </div>
             </div>
