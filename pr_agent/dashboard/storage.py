@@ -551,10 +551,11 @@ class DashboardStorage:
 
     def create_review(self, repo_name: str, pr_number: int, pr_url: str, command: str = "/review",
                       pr_title: str = "", sender: str = "", trigger_type: str = "manual",
-                      commit_sha: str = "", model: str = "", reasoning_effort: str = "") -> str:
+                      commit_sha: str = "", model: str = "", reasoning_effort: str = "",
+                      request_id: str = "") -> str:
         """Insert a RUNNING record and return its request_id, or "" on failure."""
         self.reconcile_stale_reviews(timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
-        request_id = uuid.uuid4().hex
+        request_id = request_id or uuid.uuid4().hex
         now = _utcnow()
         inserted = self._write(
             "INSERT INTO reviews (request_id, repo_name, pr_number, pr_title, pr_url, commit_sha,"

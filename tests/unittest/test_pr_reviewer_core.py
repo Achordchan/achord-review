@@ -729,26 +729,55 @@ async def test_run_audits_cancellation_then_reraises(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_terminal_audit_finishes_before_cancellation_propagates():
+async def test_terminal_audit_cancellation_propagates_before_late_write_finishes():
     from pr_agent.tools import pr_reviewer as pr_reviewer_module
 
     started = asyncio.Event()
     release = asyncio.Event()
+    finished = asyncio.Event()
     completed = []
 
     async def terminal_write():
         started.set()
         await release.wait()
         completed.append(True)
+        finished.set()
 
     task = asyncio.create_task(pr_reviewer_module._await_terminal_audit(terminal_write()))
     await started.wait()
     task.cancel()
-    release.set()
 
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.gather(task)
+        await asyncio.wait_for(asyncio.shield(task), 0.2)
+    assert completed == []
+
+    release.set()
+    await asyncio.wait_for(finished.wait(), 1)
     assert completed == [True]
+
+
+@pytest.mark.asyncio
+async def test_terminal_audit_timeout_detaches_and_finishes_late_write(monkeypatch):
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def terminal_write():
+        started.set()
+        await release.wait()
+        finished.set()
+
+    monkeypatch.setattr(pr_reviewer_module, "AUDIT_TERMINAL_TIMEOUT_SECONDS", 0.01)
+    task = asyncio.create_task(pr_reviewer_module._await_terminal_audit(terminal_write()))
+    await started.wait()
+
+    await asyncio.wait_for(task, 0.2)
+    assert not finished.is_set()
+
+    release.set()
+    await asyncio.wait_for(finished.wait(), 1)
 
 
 @pytest.mark.asyncio

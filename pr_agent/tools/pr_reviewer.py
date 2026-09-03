@@ -4,7 +4,7 @@ import datetime
 import math
 import os
 import re
-import threading
+import uuid
 from functools import partial
 from typing import List, Optional, Tuple
 
@@ -49,6 +49,8 @@ from pr_agent.servers.help import HelpMessage
 from pr_agent.tools.ticket_pr_compliance_check import extract_and_cache_pr_tickets
 
 MAX_REVIEW_COVERAGE_FILES = 50
+_AUDIT_TIMEOUT_MIN_SECONDS = 0.1
+_AUDIT_TIMEOUT_MAX_SECONDS = 30.0
 
 
 def _load_audit_start_timeout_seconds() -> float:
@@ -57,7 +59,7 @@ def _load_audit_start_timeout_seconds() -> float:
         timeout = float(os.environ.get("DASHBOARD_AUDIT_START_TIMEOUT_SECONDS", "2"))
         if not math.isfinite(timeout):
             raise ValueError("timeout must be finite")
-        return max(0.1, timeout)
+        return min(_AUDIT_TIMEOUT_MAX_SECONDS, max(_AUDIT_TIMEOUT_MIN_SECONDS, timeout))
     except (TypeError, ValueError) as e:
         get_logger().warning(
             f"Invalid DASHBOARD_AUDIT_START_TIMEOUT_SECONDS; using 2 seconds, error: {e}")
@@ -65,8 +67,10 @@ def _load_audit_start_timeout_seconds() -> float:
 
 
 AUDIT_START_TIMEOUT_SECONDS = _load_audit_start_timeout_seconds()
+AUDIT_TERMINAL_TIMEOUT_SECONDS = AUDIT_START_TIMEOUT_SECONDS
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
-_AUDIT_CLEANUP_TASKS: set[asyncio.Task] = set()
+_AUDIT_BACKGROUND_TASKS: set[asyncio.Task] = set()
+_AUDIT_START_TASKS: dict[str, asyncio.Task] = {}
 
 
 VERDICT_REASON_PREFIX = "**Verdict:** "
@@ -81,16 +85,16 @@ _VERDICT_SNAPSHOT_UNSET = object()
 async def _audit_started(reviewer: "PRReviewer") -> str:
     """Open a dashboard audit record for this run; best-effort, never raises.
 
-    Populates trigger metadata from the request-scoped starlette context
-    (dashboard_sender / dashboard_trigger_type, written by github_app.py on
-    the mention and auto-command paths) and the PR object, so webhook
-    reviews don't land in the dashboard as anonymous manual runs.
+    Trigger metadata comes from request-scoped context. Provider access stays
+    on the review's main path so an audit timeout never races provider calls.
+    The request ID is reserved before storage starts, allowing terminal writes
+    to serialize behind a late insert without losing the completed review.
     """
     from starlette_context import context as request_context
 
     from pr_agent.dashboard.audit import review_started
 
-    abandoned = threading.Event()
+    request_id = uuid.uuid4().hex
 
     def _work() -> str:
         sender, trigger_type = "", "manual"
@@ -99,90 +103,72 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
             trigger_type = request_context.get("dashboard_trigger_type") or "manual"
         except Exception:
             pass  # no request scope (CLI run) — keep the manual defaults
-        title, sha, repo_name, pr_number = "", "", "", 0
-        provider = reviewer.git_provider
-        try:
-            pr = getattr(provider, "pr", None)
-            title = (
-                pr.get("title", "") if isinstance(pr, dict)
-                else getattr(pr, "title", "")
-            ) or ""
-        except Exception as e:
-            get_logger().debug(f"Dashboard audit could not read PR title, error: {e}")
-        try:
-            sha = provider.get_head_commit_sha() or ""
-        except Exception as e:
-            get_logger().debug(f"Dashboard audit could not read head SHA, error: {e}")
-        try:
-            repo = getattr(provider, "repo", "")
-            if isinstance(repo, str):
-                repo_name = repo
-            if not repo_name:
-                project = getattr(provider, "id_project", "")
-                if project:
-                    repo_name = str(project)
-            if not repo_name:
-                workspace = getattr(provider, "workspace_slug", "")
-                repo_slug = getattr(provider, "repo_slug", "")
-                if workspace and repo_slug:
-                    repo_name = f"{workspace}/{repo_slug}"
-        except Exception as e:
-            get_logger().debug(f"Dashboard audit could not read repository metadata, error: {e}")
-        try:
-            pr_number = int(
-                getattr(provider, "pr_num", 0)
-                or getattr(provider, "id_mr", 0)
-                or 0)
-        except Exception as e:
-            get_logger().debug(f"Dashboard audit could not read PR number, error: {e}")
-        if abandoned.is_set():
-            return ""
         return review_started(
             pr_url=reviewer.pr_url, sender=sender, trigger_type=trigger_type,
-            commit_sha=sha, pr_title=title, repo_name=repo_name,
-            pr_number=pr_number) or ""
+            request_id=request_id) or ""
 
-    async def _close_late_record(reason: str) -> None:
+    async def _close_cancelled_start() -> None:
         try:
-            request_id = await asyncio.shield(work_task)
-            if request_id:
-                await _audit_failed(request_id, RuntimeError(reason))
+            if await _wait_for_audit_start(request_id):
+                await _audit_failed(
+                    request_id, RuntimeError("review task cancelled during audit startup"))
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            get_logger().debug(f"Dashboard audit late-record cleanup skipped, error: {e}")
-
-    def _schedule_late_cleanup(reason: str) -> None:
-        cleanup_task = asyncio.create_task(_close_late_record(reason))
-        _AUDIT_CLEANUP_TASKS.add(cleanup_task)
-        cleanup_task.add_done_callback(_AUDIT_CLEANUP_TASKS.discard)
+            get_logger().debug(f"Dashboard audit cancelled-start cleanup skipped, error: {e}")
 
     work_task = asyncio.create_task(asyncio.to_thread(_work))
+    _AUDIT_START_TASKS[request_id] = work_task
     try:
-        return await asyncio.wait_for(
+        started_id = await asyncio.wait_for(
             asyncio.shield(work_task), timeout=AUDIT_START_TIMEOUT_SECONDS)
+        _AUDIT_START_TASKS.pop(request_id, None)
+        return request_id if started_id == request_id else ""
     except TimeoutError:
-        abandoned.set()
-        _schedule_late_cleanup("dashboard audit start timed out")
         get_logger().warning(
             f"Dashboard audit start exceeded {AUDIT_START_TIMEOUT_SECONDS:g} seconds; continuing review")
-        return ""
+        return request_id
     except asyncio.CancelledError:
-        abandoned.set()
-        _schedule_late_cleanup("review task cancelled during audit startup")
+        _track_audit_task(asyncio.create_task(_close_cancelled_start()))
         raise
     except Exception as e:
+        _AUDIT_START_TASKS.pop(request_id, None)
         get_logger().debug(f"Dashboard audit start skipped, error: {e}")
         return ""
 
 
+def _track_audit_task(task: asyncio.Task) -> None:
+    """Keep a detached audit write alive until the event loop completes it."""
+    _AUDIT_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_AUDIT_BACKGROUND_TASKS.discard)
+
+
+async def _wait_for_audit_start(request_id: str) -> bool:
+    """Serialize a terminal write behind a start that exceeded its foreground deadline."""
+    start_task = _AUDIT_START_TASKS.pop(request_id, None)
+    if start_task is None:
+        return True
+    try:
+        return await asyncio.shield(start_task) == request_id
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit start did not complete, error: {e}")
+        return False
+
+
 async def _await_terminal_audit(coro) -> None:
-    """Finish an in-flight terminal write before propagating cancellation."""
+    """Bound terminal audit latency and reconcile a late write in the background."""
     task = asyncio.create_task(coro)
     try:
-        await asyncio.shield(task)
+        await asyncio.wait_for(
+            asyncio.shield(task), timeout=AUDIT_TERMINAL_TIMEOUT_SECONDS)
+    except TimeoutError:
+        _track_audit_task(task)
+        get_logger().warning(
+            f"Dashboard terminal audit exceeded {AUDIT_TERMINAL_TIMEOUT_SECONDS:g} seconds; continuing")
     except asyncio.CancelledError:
-        await asyncio.shield(task)
+        _track_audit_task(task)
         raise
 
 
@@ -222,6 +208,8 @@ def _audit_verdict(reviewer: "PRReviewer", review_data: Optional[dict]) -> tuple
 
 async def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: str,
                           prediction: Optional[str]) -> None:
+    if not request_id or not await _wait_for_audit_start(request_id):
+        return
     try:
         from pr_agent.dashboard.audit import review_finished
         review_data = reviewer.review_data
@@ -236,6 +224,8 @@ async def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: st
 
 
 async def _audit_failed(request_id: str, error: Exception) -> None:
+    if not request_id or not await _wait_for_audit_start(request_id):
+        return
     try:
         from pr_agent.dashboard.audit import review_failed
         await review_failed(request_id, str(error))
@@ -245,6 +235,8 @@ async def _audit_failed(request_id: str, error: Exception) -> None:
 
 async def _audit_skipped(request_id: str, reason: str) -> None:
     """Close out a RUNNING record for a run that exited before publishing."""
+    if not request_id or not await _wait_for_audit_start(request_id):
+        return
     try:
         from pr_agent.dashboard.audit import review_skipped
         await review_skipped(request_id, reason)
@@ -489,13 +481,13 @@ class PRReviewer:
             await _await_terminal_audit(
                 _audit_finished(self, audit_request_id, pr_review, self.prediction))
         except asyncio.CancelledError:
-            await asyncio.shield(
+            await _await_terminal_audit(
                 _audit_failed(audit_request_id, RuntimeError("review task cancelled")))
             raise
         except Exception as e:
             review_failed = True
             get_logger().error(f"Failed to review PR: {e}")
-            await _audit_failed(audit_request_id, e)
+            await _await_terminal_audit(_audit_failed(audit_request_id, e))
             if get_settings().config.get("propagate_tool_errors", False):
                 raise
         finally:

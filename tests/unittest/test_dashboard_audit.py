@@ -23,6 +23,24 @@ def test_audit_start_timeout_preserves_supported_lower_bound(monkeypatch):
     assert pr_reviewer._load_audit_start_timeout_seconds() == 0.1
 
 
+def test_audit_start_timeout_has_a_hard_upper_bound(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_AUDIT_START_TIMEOUT_SECONDS", "999")
+
+    assert pr_reviewer._load_audit_start_timeout_seconds() == 30.0
+
+
+def test_started_audit_preserves_a_reserved_request_id(tmp_path, monkeypatch):
+    storage = DashboardStorage(db_path=str(tmp_path / "audit.db"))
+    storage.initialize()
+    monkeypatch.setattr(audit, "_run_audit", lambda: storage)
+
+    request_id = audit.review_started(
+        "https://github.com/a/b/pull/1", request_id="reserved-request-id")
+
+    assert request_id == "reserved-request-id"
+    assert storage.get_review_by_request_id(request_id)["status"] == "RUNNING"
+
+
 def test_terminal_audit_write_is_complete_before_await_returns(tmp_path, monkeypatch):
     storage = DashboardStorage(db_path=str(tmp_path / "audit.db"))
     storage.initialize()
@@ -148,25 +166,24 @@ def test_initial_audit_write_runs_off_event_loop(monkeypatch):
     def fake_started(**kwargs):
         called["storage_thread"] = threading.get_ident()
         called["kwargs"] = kwargs
-        return "request-id"
+        return kwargs["request_id"]
 
     monkeypatch.setattr(audit, "review_started", fake_started)
     request_id = asyncio.run(pr_reviewer._audit_started(Reviewer()))
 
-    assert request_id == "request-id"
-    assert called["metadata_thread"] != main_thread
+    assert request_id == called["kwargs"]["request_id"]
+    assert "metadata_thread" not in called
     assert called["storage_thread"] != main_thread
-    assert called["kwargs"]["repo_name"] == "group/subgroup/repo"
-    assert called["kwargs"]["pr_number"] == 42
+    assert called["kwargs"]["pr_url"] == "https://github.com/a/b/pull/1"
 
 
-def test_metadata_fields_are_extracted_independently(monkeypatch):
+def test_audit_start_does_not_access_provider_metadata(monkeypatch):
     captured = {}
 
     class BrokenPR:
         @property
         def title(self):
-            raise RuntimeError("provider title unavailable")
+            raise AssertionError("audit startup must not access provider title")
 
     class GitProvider:
         pr = BrokenPR()
@@ -174,7 +191,7 @@ def test_metadata_fields_are_extracted_independently(monkeypatch):
         id_mr = 77
 
         def get_head_commit_sha(self):
-            return "sha-after-title-error"
+            raise AssertionError("audit startup must not access provider SHA")
 
     class Reviewer:
         pr_url = "https://gitlab.example/group/subgroup/repo/-/merge_requests/77"
@@ -182,56 +199,22 @@ def test_metadata_fields_are_extracted_independently(monkeypatch):
 
     def fake_started(**kwargs):
         captured.update(kwargs)
-        return "request-id"
+        return kwargs["request_id"]
 
     monkeypatch.setattr(audit, "review_started", fake_started)
 
-    assert asyncio.run(pr_reviewer._audit_started(Reviewer())) == "request-id"
-    assert captured["pr_title"] == ""
-    assert captured["commit_sha"] == "sha-after-title-error"
-    assert captured["repo_name"] == "group/subgroup/repo"
-    assert captured["pr_number"] == 77
+    request_id = asyncio.run(pr_reviewer._audit_started(Reviewer()))
+    assert request_id == captured["request_id"]
+    assert captured["pr_url"] == Reviewer.pr_url
+    assert "pr_title" not in captured
+    assert "commit_sha" not in captured
 
 
-def test_audit_start_timeout_abandons_slow_metadata_without_late_running_row(monkeypatch):
-    metadata_started = threading.Event()
-    release_metadata = threading.Event()
-    metadata_finished = threading.Event()
-    started_records = []
-
-    class GitProvider:
-        pr = {"title": "Title"}
-
-        def get_head_commit_sha(self):
-            metadata_started.set()
-            assert release_metadata.wait(timeout=2)
-            metadata_finished.set()
-            return "late-sha"
-
-    class Reviewer:
-        pr_url = "https://github.com/a/b/pull/1"
-        git_provider = GitProvider()
-
-    monkeypatch.setattr(pr_reviewer, "AUDIT_START_TIMEOUT_SECONDS", 0.01)
-    monkeypatch.setattr(
-        audit, "review_started", lambda **kwargs: started_records.append(kwargs) or "late-id")
-
-    async def scenario():
-        task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
-        assert await asyncio.to_thread(metadata_started.wait, 1)
-        assert await task == ""
-        release_metadata.set()
-        assert await asyncio.to_thread(metadata_finished.wait, 1)
-        await asyncio.sleep(0)
-
-    asyncio.run(scenario())
-    assert started_records == []
-
-
-def test_audit_start_timeout_returns_while_storage_stalls_and_closes_late_record(monkeypatch):
+def test_audit_start_timeout_preserves_id_and_serializes_terminal_write(monkeypatch):
     storage_started = threading.Event()
     release_storage = threading.Event()
-    closed = {}
+    terminal = {}
+    reserved = {}
 
     class Reviewer:
         pr_url = "https://github.com/a/b/pull/1"
@@ -240,32 +223,40 @@ def test_audit_start_timeout_returns_while_storage_stalls_and_closes_late_record
     def delayed_started(**kwargs):
         storage_started.set()
         assert release_storage.wait(timeout=2)
-        return "late-request-id"
+        return kwargs["request_id"]
 
     async def scenario():
-        record_closed = asyncio.Event()
+        terminal_written = asyncio.Event()
 
-        async def fake_failed(request_id, error):
-            closed["request_id"] = request_id
-            closed["error"] = str(error)
-            record_closed.set()
+        async def fake_skipped(request_id, reason):
+            terminal["request_id"] = request_id
+            terminal["reason"] = reason
+            terminal_written.set()
 
         monkeypatch.setattr(pr_reviewer, "AUDIT_START_TIMEOUT_SECONDS", 0.01)
         monkeypatch.setattr(audit, "review_started", delayed_started)
-        monkeypatch.setattr(pr_reviewer, "_audit_failed", fake_failed)
+        monkeypatch.setattr(audit, "review_skipped", fake_skipped)
 
-        task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
+        start_task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
         assert await asyncio.to_thread(storage_started.wait, 1)
-        assert await asyncio.wait_for(task, 0.2) == ""
-        assert closed == {}
+        request_id = await asyncio.wait_for(start_task, 0.2)
+        assert request_id
+        reserved["request_id"] = request_id
+
+        terminal_task = asyncio.create_task(
+            pr_reviewer._audit_skipped(request_id, "review completed after slow audit start"))
+        await asyncio.sleep(0)
+        assert terminal == {}
+        assert not terminal_task.done()
 
         release_storage.set()
-        await asyncio.wait_for(record_closed.wait(), 1)
+        await asyncio.wait_for(terminal_written.wait(), 1)
+        await terminal_task
 
     asyncio.run(scenario())
-    assert closed == {
-        "request_id": "late-request-id",
-        "error": "dashboard audit start timed out",
+    assert terminal == {
+        "request_id": reserved["request_id"],
+        "reason": "review completed after slow audit start",
     }
 
 
@@ -281,7 +272,7 @@ def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
     def delayed_started(**kwargs):
         started.set()
         assert release.wait(timeout=2)
-        return "late-request-id"
+        return kwargs["request_id"]
 
     async def scenario():
         record_closed = asyncio.Event()
@@ -305,7 +296,5 @@ def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
         await asyncio.wait_for(record_closed.wait(), 1)
 
     asyncio.run(scenario())
-    assert closed == {
-        "request_id": "late-request-id",
-        "error": "review task cancelled during audit startup",
-    }
+    assert closed["request_id"]
+    assert closed["error"] == "review task cancelled during audit startup"
