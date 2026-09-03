@@ -104,6 +104,7 @@ class TestSeverityPrompt:
         template = get_settings().pr_review_prompt.system
         variables = {
             "extra_instructions": "", "repo_context": "", "skills_context": "",
+            "related_files": "",
             "require_can_be_split_review": False, "related_tickets": "",
             "require_estimate_contribution_time_cost": False, "require_score": False,
             "require_tests": True, "question_str": "", "require_security_review": True,

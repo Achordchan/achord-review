@@ -585,6 +585,7 @@ def test_github_provider_reads_from_default_branch_when_requested():
                 "extra_instructions": "",
                 "repo_context": render_instruction_files({"AGENTS.md": "Repo purpose"}),
                 "skills_context": "",
+                "related_files": "",
                 "require_can_be_split_review": False,
                 "related_tickets": "",
                 "require_estimate_contribution_time_cost": False,

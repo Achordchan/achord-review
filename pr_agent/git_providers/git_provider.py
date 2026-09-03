@@ -397,6 +397,16 @@ class GitProvider(ABC):
     def get_repo_file_content(self, file_path: str, from_default_branch: bool = False):
         return ""
 
+    def get_repo_tree(self, from_default_branch: bool = False) -> list:
+        """Repository-relative paths of the files on the PR's base branch.
+
+        Returns [] when the provider cannot enumerate the repository, which callers
+        treat as "no retrieval available" rather than as an empty repository. Like
+        get_repo_file_content this reads the base side on purpose: content from the
+        PR head is attacker-controlled on a fork.
+        """
+        return []
+
     def get_workspace_name(self):
         return ""
 

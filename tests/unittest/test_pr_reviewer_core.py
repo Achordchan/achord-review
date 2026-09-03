@@ -29,6 +29,8 @@ def _make_prediction_reviewer(git_provider=None):
     reviewer.remaining_files_list = []
     reviewer.incremental = SimpleNamespace(is_incremental=False)
     reviewer.prediction = None
+    reviewer.related_files = {}
+    reviewer.vars = {}
     return reviewer
 
 
@@ -1473,3 +1475,37 @@ async def test_run_backfills_the_audit_metadata_on_the_review_path(monkeypatch):
         settings.config.publish_output = original_publish_output
 
     audit_metadata.assert_awaited_once_with("request-id", reviewer)
+
+
+def test_changed_paths_exclude_the_pre_rename_path():
+    # The base tree still carries the old path; offering it as "unchanged
+    # context" would feed the review content this PR actually removes.
+    reviewer = _make_reviewer()
+    reviewer.git_provider.get_diff_files.return_value = [
+        SimpleNamespace(filename="new/name.py", old_filename="old/name.py"),
+        SimpleNamespace(filename="kept.py", old_filename=None),
+    ]
+
+    assert reviewer._changed_paths() == ["new/name.py", "old/name.py", "kept.py"]
+
+
+def test_changed_paths_report_failure_rather_than_an_empty_exclusion_list():
+    # An empty list would let the base version of a modified file be attached as
+    # unchanged context; None tells the caller to skip retrieval entirely.
+    reviewer = _make_reviewer()
+    reviewer.git_provider.get_diff_files.side_effect = RuntimeError("provider down")
+
+    assert reviewer._changed_paths() is None
+
+
+def test_changed_paths_use_the_populated_rename_field():
+    # get_diff_files returns FilePatchInfo, whose old_filename already carries
+    # GitHub's previous_filename. Both names are read so a provider that returns
+    # a raw file object (previous_filename) is covered too.
+    reviewer = _make_reviewer()
+    from pr_agent.algo.types import FilePatchInfo
+    reviewer.git_provider.get_diff_files.return_value = [
+        FilePatchInfo("", "", "", "new/name.py", old_filename="old/name.py"),
+    ]
+
+    assert reviewer._changed_paths() == ["new/name.py", "old/name.py"]

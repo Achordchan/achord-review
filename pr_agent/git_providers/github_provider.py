@@ -1174,6 +1174,37 @@ class GithubProvider(GitProvider):
                 return ""
             raise
 
+    def get_repo_tree(self, from_default_branch: bool = False) -> list:
+        """Every blob path on the PR base ref, for related-file retrieval.
+
+        Mirrors get_repo_file_content's ref choice: the base side is what the PR
+        merges into and, unlike the head, is not attacker-controlled on a fork.
+        A truncated tree is returned as far as it goes — retrieval degrades to
+        the paths it did see rather than failing the review.
+        """
+        try:
+            ref = None
+            if not from_default_branch:
+                base = getattr(getattr(self, "pr", None), "base", None)
+                ref = getattr(base, "sha", None) or getattr(base, "ref", None)
+            if not ref:
+                ref = self.repo_obj.default_branch
+            tree = self.repo_obj.get_git_tree(ref, recursive=True)
+            if getattr(tree, "raw_data", {}).get("truncated"):
+                get_logger().warning(
+                    "Repository tree is truncated; related-file retrieval sees only part of the repo",
+                    artifact={"ref": ref})
+            # Regular files only. A symlink is a blob too, and a safe-looking name
+            # pointing at a tracked secret would walk straight past a path denylist.
+            return [element.path for element in tree.tree
+                    if getattr(element, "type", "") == "blob"
+                    and getattr(element, "mode", "") in ("100644", "100755")
+                    and getattr(element, "path", "")]
+        except GithubException as e:
+            if e.status == 404:
+                return []
+            raise
+
     def get_workspace_name(self):
         return self.repo.split('/')[0]
 

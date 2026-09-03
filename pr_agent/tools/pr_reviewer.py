@@ -23,6 +23,7 @@ from pr_agent.algo.inline_comment_dedup import (
 )
 from pr_agent.algo.pr_processing import add_ai_metadata_to_diff_files, get_pr_diff, retry_with_fallback_models
 from pr_agent.algo.publish_lock import publish_lock
+from pr_agent.algo.related_files import collect_related_files, render_related_files
 from pr_agent.algo.repo_context import build_repo_context
 from pr_agent.algo.review_parser import recover_missing_review_wrapper
 from pr_agent.algo.run_details import get_run_details, init_run_details
@@ -343,6 +344,7 @@ class PRReviewer:
         self.patches_diff = None
         self.remaining_files_list = []
         self.prediction = None
+        self.related_files = None
         self.review_data = None
         self.deferred_review_comments = []
         # Findings the model raised again that were already posted on an earlier review and
@@ -381,6 +383,7 @@ class PRReviewer:
             "extra_instructions": get_settings().pr_reviewer.extra_instructions,
             "skills_context": get_skills_context(),
             "repo_context": build_repo_context(self.git_provider),
+            "related_files": "",  # filled in once the diff is known (see _prepare_prediction)
             "commit_messages_str": self.git_provider.get_commit_messages(),
             "custom_labels": "",
             "enable_custom_labels": get_settings().config.enable_custom_labels,
@@ -747,6 +750,35 @@ class PRReviewer:
         if not self.git_provider.submit_review_verdict(event, f"Automated review: {reason}."):
             get_logger().info(f"Review verdict {event} was not submitted")
 
+    def _changed_paths(self) -> Optional[list]:
+        """Paths this PR touches, or None when they cannot be determined.
+
+        These paths are what retrieval excludes from its candidates, so an
+        incomplete list is not a degraded answer — it lets the base version of a
+        file this PR modifies be attached as "unchanged" context, and the review
+        then reasons about content the diff has already replaced. None tells the
+        caller to skip retrieval instead.
+
+        A rename touches two paths: the base tree still carries the old one, so
+        without it the pre-rename file could be attached the same way.
+        """
+        paths = []
+        try:
+            # get_diff_files() returns FilePatchInfo, whose old_filename already
+            # carries GitHub's previous_filename (see GithubProvider.get_diff_files).
+            # previous_filename is read too so a provider that hands back a raw file
+            # object — rather than a FilePatchInfo — is still covered.
+            for file in (self.git_provider.get_diff_files() or []):
+                for attribute in ("filename", "old_filename", "previous_filename"):
+                    path = getattr(file, attribute, "")
+                    if path and path not in paths:
+                        paths.append(path)
+        except Exception as e:
+            get_logger().warning(
+                f"Skipping related-file retrieval: changed paths are unknown, error: {e}")
+            return None
+        return paths
+
     async def _prepare_prediction(self, model: str) -> None:
         output = get_pr_diff(self.git_provider,
                              self.token_handler,
@@ -762,6 +794,19 @@ class PRReviewer:
 
         if self.patches_diff:
             get_logger().debug(f"PR diff", diff=self.patches_diff)
+            # Collection runs once per review — it costs a tree listing and a
+            # model call, and its result does not depend on which model reviews.
+            # Rendering runs per attempt: a fallback model may have a smaller
+            # window, and inheriting a block sized for the primary would spend
+            # the retry on the same overflow it exists to escape.
+            if self.related_files is None:
+                changed_paths = self._changed_paths()
+                self.related_files = {} if changed_paths is None else await collect_related_files(
+                    self.git_provider, self.ai_handler, model, self.patches_diff,
+                    changed_paths, title=self.vars.get("title", ""),
+                    token_handler=self.token_handler)
+            self.vars["related_files"] = render_related_files(
+                self.related_files, model, self.patches_diff, self.token_handler)
             self.prediction = await self._get_prediction(model)
         else:
             get_logger().warning(f"Empty diff for PR: {self.pr_url}")
