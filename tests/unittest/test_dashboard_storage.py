@@ -410,6 +410,15 @@ class TestSharedAuthState:
         other.revoke_session("token-hash")
         assert not storage.session_is_valid("token-hash", now=1_000_000_000)
 
+    def test_batch_revocation_requires_an_existing_session(self, storage):
+        assert storage.sync_admin_password("shared-password")
+        assert storage.revoke_sessions([]) is False
+        assert storage.revoke_sessions(["missing-session"]) is False
+
+        assert storage.create_session("token-hash", 4_000_000_000)
+        assert storage.revoke_sessions(["missing-session", "token-hash"]) is True
+        assert not storage.session_is_valid("token-hash", now=1_000_000_000)
+
     def test_login_attempts_are_shared_and_bounded(self, storage):
         other = DashboardStorage(db_path=storage.db_path)
         for i in range(20):

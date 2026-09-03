@@ -138,10 +138,22 @@ class TestAuth:
 
     def test_logout_reports_revocation_failure(self, client, storage, monkeypatch):
         auth = _auth_header(client)
-        monkeypatch.setattr(storage, "revoke_session", lambda token_hash: False)
+        monkeypatch.setattr(storage, "revoke_sessions", lambda token_hashes: False)
         resp = client.post(
             "/api/v1/dashboard/auth/logout",
             headers={**auth, "Sec-Fetch-Site": "same-origin"})
+        assert resp.status_code == 503
+        assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 200
+
+    def test_logout_rejects_unavailable_password_without_reviving_session(
+            self, client, monkeypatch):
+        auth = _auth_header(client)
+        monkeypatch.setattr(dashboard_api, "_admin_password", lambda: "")
+
+        resp = client.post(
+            "/api/v1/dashboard/auth/logout",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"})
+
         assert resp.status_code == 503
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 200
 

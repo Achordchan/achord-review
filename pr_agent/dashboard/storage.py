@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from pr_agent.log import get_logger
 
@@ -348,6 +348,23 @@ class DashboardStorage:
 
         return self._transaction(_revoke, "session revocation")
 
+    def revoke_sessions(self, token_hashes: Iterable[str]) -> bool:
+        """Atomically revoke presented sessions and require one existing match."""
+        unique_hashes = tuple(dict.fromkeys(token_hash for token_hash in token_hashes if token_hash))
+        if not unique_hashes:
+            return False
+        revoked = False
+
+        def _revoke(conn: sqlite3.Connection) -> None:
+            nonlocal revoked
+            previous_changes = conn.total_changes
+            conn.executemany(
+                "DELETE FROM dashboard_sessions WHERE token_hash = ?",
+                ((token_hash,) for token_hash in unique_hashes))
+            revoked = conn.total_changes > previous_changes
+
+        return self._transaction(_revoke, "session revocation") and revoked
+
     def sync_admin_password(self, password: str) -> bool:
         """Persist password generation and purge sessions on every observed rotation."""
         def _sync(conn: sqlite3.Connection) -> None:
@@ -442,6 +459,7 @@ class DashboardStorage:
         with self._stale_cleanup_lock:
             if not force and now - self._last_stale_cleanup < STALE_CLEANUP_INTERVAL_SECONDS:
                 return
+
             def _reconcile(conn: sqlite3.Connection) -> None:
                 self._maintain_review_rows(conn)
 

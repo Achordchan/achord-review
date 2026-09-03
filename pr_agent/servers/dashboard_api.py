@@ -289,6 +289,8 @@ async def auth_logout(request: Request, response: Response,
     # and the bearer token are both real sessions in shared storage, and a scripted
     # client logging out via the bearer path must lose access immediately
     password = await asyncio.to_thread(_admin_password)
+    if not password:
+        raise HTTPException(status_code=503, detail="会话吊销失败，请稍后重试")
     token_hashes = set()
     if dashboard_session and (token_hash := _session_hash(dashboard_session, password)):
         token_hashes.add(token_hash)
@@ -296,11 +298,8 @@ async def auth_logout(request: Request, response: Response,
     if auth.startswith("Bearer ") and (token_hash := _session_hash(auth[7:].strip(), password)):
         token_hashes.add(token_hash)
 
-    def _revoke_sessions() -> bool:
-        storage = get_storage()
-        return all(storage.revoke_session(token_hash) for token_hash in token_hashes)
-
-    if not await asyncio.to_thread(_revoke_sessions):
+    if not token_hashes or not await asyncio.to_thread(
+            _storage_call, "revoke_sessions", token_hashes):
         raise HTTPException(status_code=503, detail="会话吊销失败，请稍后重试")
     response.delete_cookie(SESSION_COOKIE, path="/")
     return _ok(message="已退出登录")
