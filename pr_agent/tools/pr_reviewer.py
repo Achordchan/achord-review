@@ -23,6 +23,7 @@ from pr_agent.algo.inline_comment_dedup import (
 )
 from pr_agent.algo.pr_processing import add_ai_metadata_to_diff_files, get_pr_diff, retry_with_fallback_models
 from pr_agent.algo.publish_lock import publish_lock
+from pr_agent.algo.related_files import build_related_files
 from pr_agent.algo.repo_context import build_repo_context
 from pr_agent.algo.review_parser import recover_missing_review_wrapper
 from pr_agent.algo.run_details import get_run_details, init_run_details
@@ -343,6 +344,7 @@ class PRReviewer:
         self.patches_diff = None
         self.remaining_files_list = []
         self.prediction = None
+        self.related_files_context = None
         self.review_data = None
         self.deferred_review_comments = []
         # Findings the model raised again that were already posted on an earlier review and
@@ -381,6 +383,7 @@ class PRReviewer:
             "extra_instructions": get_settings().pr_reviewer.extra_instructions,
             "skills_context": get_skills_context(),
             "repo_context": build_repo_context(self.git_provider),
+            "related_files": "",  # filled in once the diff is known (see _prepare_prediction)
             "commit_messages_str": self.git_provider.get_commit_messages(),
             "custom_labels": "",
             "enable_custom_labels": get_settings().config.enable_custom_labels,
@@ -747,6 +750,15 @@ class PRReviewer:
         if not self.git_provider.submit_review_verdict(event, f"Automated review: {reason}."):
             get_logger().info(f"Review verdict {event} was not submitted")
 
+    def _changed_paths(self) -> list:
+        """Paths this PR touches; they are excluded from the retrieval candidates."""
+        try:
+            return [file.filename for file in (self.git_provider.get_diff_files() or [])
+                    if getattr(file, "filename", "")]
+        except Exception as e:
+            get_logger().debug(f"Could not list changed paths for retrieval, error: {e}")
+            return []
+
     async def _prepare_prediction(self, model: str) -> None:
         output = get_pr_diff(self.git_provider,
                              self.token_handler,
@@ -762,6 +774,15 @@ class PRReviewer:
 
         if self.patches_diff:
             get_logger().debug(f"PR diff", diff=self.patches_diff)
+            # Retrieval runs once per review, not once per fallback model: the
+            # selection pass costs a model call, and a fallback retry re-enters
+            # this method with the same diff.
+            if self.related_files_context is None:
+                self.related_files_context = await build_related_files(
+                    self.git_provider, self.ai_handler, model, self.patches_diff,
+                    self._changed_paths(), title=self.vars.get("title", ""),
+                    token_handler=self.token_handler)
+            self.vars["related_files"] = self.related_files_context
             self.prediction = await self._get_prediction(model)
         else:
             get_logger().warning(f"Empty diff for PR: {self.pr_url}")

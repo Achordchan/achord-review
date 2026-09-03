@@ -29,6 +29,8 @@ def _make_prediction_reviewer(git_provider=None):
     reviewer.remaining_files_list = []
     reviewer.incremental = SimpleNamespace(is_incremental=False)
     reviewer.prediction = None
+    reviewer.related_files_context = ""
+    reviewer.vars = {}
     return reviewer
 
 
