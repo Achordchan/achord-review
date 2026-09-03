@@ -539,6 +539,7 @@ max_files = 6 # Upper bound on files attached to a single review
 max_lines_per_file = 400 # Longer files are truncated, not skipped
 max_total_lines = 800 # Ceiling across all attached files
 max_tokens = 12000 # Hard token ceiling; context is trimmed before it can squeeze out the diff
+max_file_bytes = 409600 # Skip a related file larger than this before scanning or tokenizing it (guards single-line/minified files)
 max_candidate_paths = 600 # Paths offered to the selection pass, ranked nearest-to-the-change
 # first. This list is the selection prompt's main cost driver (~8 tokens per path), so raise it
 # only for repositories whose related files sit far from the change.

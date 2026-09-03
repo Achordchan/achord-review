@@ -467,6 +467,7 @@ async def collect_related_files(git_provider, ai_handler, model: str, diff: str,
             return {}
 
         max_lines_per_file = _int_setting("max_lines_per_file", 400, minimum=1)
+        max_file_bytes = _int_setting("max_file_bytes", 400 * 1024, minimum=1)
         files = {}
         for path in selected:
             if is_sensitive_path(path):
@@ -479,6 +480,14 @@ async def collect_related_files(git_provider, ai_handler, model: str, diff: str,
                 content = git_provider.get_repo_file_content(path) or ""
             except Exception as e:
                 get_logger().debug(f"Related file unavailable: {path}, error: {e}")
+                continue
+            # Size gate first: max_lines_per_file does not bound a minified JSON or
+            # generated file that is one enormous line, and everything below —
+            # the credential scan, splitlines/join, tokenizing — would run on the
+            # whole thing before it could be dropped.
+            if len(content) > max_file_bytes:
+                get_logger().debug(
+                    f"Related file exceeds the byte cap; skipping: {path} ({len(content)} chars)")
                 continue
             if not content.strip():
                 continue

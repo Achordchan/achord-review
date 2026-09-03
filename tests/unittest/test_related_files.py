@@ -441,3 +441,39 @@ class TestPromptSafePaths:
 
         assert 'path="a"b.py"' not in rendered
         assert "&quot;" in rendered
+
+
+class TestByteCap:
+    @pytest.mark.asyncio
+    async def test_a_giant_single_line_file_is_skipped_before_it_is_processed(self, monkeypatch):
+        # max_lines_per_file cannot see this: it is one line. The byte gate must
+        # drop it before the credential scan and tokenizing run on the whole blob.
+        get_settings().related_files.max_file_bytes = 1000
+        huge = "x" * 50_000
+        provider = FakeProvider(["big.json", "small.py"],
+                                {"big.json": huge, "small.py": "kept = 1"})
+        handler = FakeHandler(_yaml("big.json", "small.py"))
+
+        scanned = []
+        real_scan = related_files.contains_credential_material
+        monkeypatch.setattr(related_files, "contains_credential_material",
+                            lambda c: scanned.append(len(c)) or real_scan(c))
+
+        rendered = await related_files.build_related_files(
+            provider, handler, "gpt-5", "diff", [])
+
+        assert "small.py" in rendered
+        assert "big.json" not in rendered
+        # the oversized blob never reached the credential scan
+        assert all(size <= 1000 for size in scanned)
+
+    @pytest.mark.asyncio
+    async def test_a_file_within_the_byte_cap_is_kept(self):
+        get_settings().related_files.max_file_bytes = 400 * 1024
+        provider = FakeProvider(["ok.py"], {"ok.py": "def f():\n    return 1"})
+        handler = FakeHandler(_yaml("ok.py"))
+
+        rendered = await related_files.build_related_files(
+            provider, handler, "gpt-5", "diff", [])
+
+        assert "def f()" in rendered
