@@ -455,3 +455,57 @@ def test_github_probe_enforces_one_deadline_across_installations(monkeypatch):
     assert result["ok"] is False
     assert result["error"] == "GitHub App probe exceeded its 1s deadline"
     assert posts == []
+
+
+def test_github_probe_revokes_its_token_even_with_the_deadline_spent(monkeypatch):
+    # Revocation used to reuse the probe's remaining budget, so a probe that
+    # spent it left the temporary installation token live until it expired.
+    import jwt
+    import requests
+
+    class FakeSettings:
+        def get(self, key, default=None):
+            return {
+                "github.app_id": "123",
+                "github.private_key": "private-key",
+            }.get(key, default)
+
+    class Response:
+        headers = {}
+
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    import pr_agent.config_loader as config_loader
+    monkeypatch.setattr(config_loader, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(jwt, "encode", lambda *args, **kwargs: "app-jwt")
+    clock = {"now": 0.0}
+    deletes = []
+
+    def fake_get(url, **kwargs):
+        if url.endswith("/app"):
+            return Response(200, {"name": "achord-review"})
+        if "/app/installations" in url:
+            return Response(200, [{"id": 1, "suspended_at": None}])
+        # The repository check consumes everything that was left of the budget.
+        clock["now"] = 30.0
+        return Response(200, {"total_count": 3})
+
+    monkeypatch.setattr(ops.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(
+        requests, "post",
+        lambda url, **kwargs: Response(201, {"token": "installation-token"}))
+    monkeypatch.setattr(
+        requests, "delete",
+        lambda url, **kwargs: deletes.append((url, kwargs["timeout"])))
+
+    result = ops.probe_github_app(timeout_seconds=10)
+
+    assert result["ok"] is True
+    assert deletes == [("https://api.github.com/installation/token",
+                        ops.TOKEN_REVOCATION_TIMEOUT_SECONDS)]

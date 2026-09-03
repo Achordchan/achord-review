@@ -26,6 +26,9 @@ GIT_PULL_TIMEOUT_SECONDS = 120
 GIT_PREFLIGHT_TIMEOUT_SECONDS = 5
 DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 5
 RESTART_COMMAND_TIMEOUT_SECONDS = 45
+# Revoking a probe's installation token must not depend on whatever is left of
+# the probe deadline: an unrevoked token stays valid for an hour.
+TOKEN_REVOCATION_TIMEOUT_SECONDS = 5
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 OPS_LOCK_PATH = os.environ.get("DASHBOARD_OPS_LOCK_PATH", "/app/data/dashboard-ops.lock")
@@ -346,7 +349,7 @@ def probe_github_app(timeout_seconds: float = 30) -> Dict[str, Any]:
                 try:
                     requests.delete(
                         "https://api.github.com/installation/token",
-                        timeout=request_timeout(), headers=installation_headers)
+                        timeout=TOKEN_REVOCATION_TIMEOUT_SECONDS, headers=installation_headers)
                 except Exception as e:
                     get_logger().debug(f"GitHub probe token revocation skipped, error: {e}")
         return {
