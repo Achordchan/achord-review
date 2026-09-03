@@ -9,6 +9,7 @@ reconciliation.
 """
 
 import asyncio
+import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
 from urllib.parse import unquote, urlsplit
@@ -29,8 +30,16 @@ _audit_executor = ThreadPoolExecutor(
 
 
 async def run_audit_work(work: Callable):
-    """Run one blocking audit storage call off the event loop, off the shared pool."""
-    return await asyncio.get_running_loop().run_in_executor(_audit_executor, work)
+    """Run one blocking audit storage call off the event loop, off the shared pool.
+
+    The context is copied across exactly as asyncio.to_thread does it:
+    run_in_executor alone would drop it, and the worker reads the request scope
+    for the review's sender and trigger type — and for the request-scoped
+    settings behind get_settings().
+    """
+    context = contextvars.copy_context()
+    return await asyncio.get_running_loop().run_in_executor(
+        _audit_executor, lambda: context.run(work))
 
 
 _VALID_SEVERITIES = {"P0", "P1", "P2", "P3"}

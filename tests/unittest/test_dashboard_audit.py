@@ -502,3 +502,32 @@ def test_audit_start_runs_on_the_dedicated_executor(monkeypatch):
     asyncio.run(pr_reviewer._audit_started(Reviewer()))
 
     assert threads and threads[0].startswith("dashboard-audit")
+
+
+def test_audit_worker_sees_the_request_scope(monkeypatch):
+    # run_in_executor drops contextvars where asyncio.to_thread copied them:
+    # the worker reads the request scope for sender/trigger and for the
+    # request-scoped settings behind get_settings().
+    from starlette_context import request_cycle_context
+
+    captured = {}
+
+    class Reviewer:
+        pr_url = "https://github.com/a/b/pull/1"
+        git_provider = None
+
+    def fake_started(**kwargs):
+        captured.update(kwargs)
+        return kwargs["request_id"]
+
+    monkeypatch.setattr(audit, "review_started", fake_started)
+
+    async def scenario():
+        with request_cycle_context({"dashboard_sender": "octocat",
+                                    "dashboard_trigger_type": "mention"}):
+            await pr_reviewer._audit_started(Reviewer())
+
+    asyncio.run(scenario())
+
+    assert captured["sender"] == "octocat"
+    assert captured["trigger_type"] == "mention"
