@@ -5,12 +5,15 @@ RUN apt update && apt install --no-install-recommends -y git curl && apt-get cle
 WORKDIR /app
 ADD pyproject.toml .
 ADD requirements.txt .
+# Bake the Dockerfile into the fingerprint dir too, at the same relative path the
+# checkout uses (docker/Dockerfile), so a base-image/system-package change is
+# detected as needing a rebuild.
+ADD docker/Dockerfile /app/.deps-baked/docker/Dockerfile
 ADD docs docs
-# Keep a copy of the dependency-defining files the image was built from, so the
-# dashboard can compare them against a mounted checkout and refuse an in-place
-# restart when a pulled update needs packages this image does not carry.
+# Keep a copy of the dependency-/build-defining files the image was built from, so
+# the dashboard can compare them against a mounted checkout and refuse an in-place
+# restart when a pulled update needs packages or a base image this image lacks.
 RUN pip install --no-cache-dir . \
-    && mkdir -p /app/.deps-baked \
     && cp pyproject.toml requirements.txt /app/.deps-baked/ \
     && rm pyproject.toml requirements.txt
 ENV PYTHONPATH=/app

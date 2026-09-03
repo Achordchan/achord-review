@@ -778,3 +778,32 @@ def test_prepare_restart_is_blocked_when_a_rebuild_is_required(monkeypatch):
     assert ticket is None
     assert "重启已被阻止" in result["output"][0]
     assert unexpected == []
+
+
+def test_rebuild_required_flags_removal_of_all_dependency_files(monkeypatch, tmp_path):
+    baked = tmp_path / "baked"
+    checkout = tmp_path / "checkout"
+    (baked / "docker").mkdir(parents=True)
+    (baked / "requirements.txt").write_text("requests==1\n")
+    (baked / "pyproject.toml").write_text("[project]\n")
+    (baked / "docker" / "Dockerfile").write_text("FROM python:3.12\n")
+    checkout.mkdir()  # exists, but every tracked dependency file is gone
+    monkeypatch.setattr(ops, "REPO_DIR", str(checkout))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+
+    # A present-but-empty checkout is a definite change, not inconclusive.
+    assert ops.rebuild_required() is True
+
+
+def test_rebuild_required_detects_a_dockerfile_change(monkeypatch, tmp_path):
+    baked = tmp_path / "baked"
+    checkout = tmp_path / "checkout"
+    for base, dockerfile in ((baked, "FROM python:3.12\n"), (checkout, "FROM python:3.13\n")):
+        (base / "docker").mkdir(parents=True)
+        (base / "requirements.txt").write_text("requests==1\n")
+        (base / "pyproject.toml").write_text("[project]\n")
+        (base / "docker" / "Dockerfile").write_text(dockerfile)
+    monkeypatch.setattr(ops, "REPO_DIR", str(checkout))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+
+    assert ops.rebuild_required() is True

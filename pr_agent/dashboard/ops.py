@@ -34,7 +34,7 @@ SELF_RESTART_ENABLED = os.environ.get("ACHORD_REVIEW_SELF_RESTART", "").strip().
 # install packages — so when a mounted checkout's dependencies diverge from the
 # running image's, an in-place restart would boot code against stale deps and, under
 # `restart: unless-stopped`, loop. We compare fingerprints to detect and block that.
-DEPS_FILES = ("requirements.txt", "pyproject.toml")
+DEPS_FILES = ("requirements.txt", "pyproject.toml", "docker/Dockerfile")
 DEPS_BAKED_DIR = os.environ.get("ACHORD_DEPS_BAKED_DIR", "/app/.deps-baked")
 GIT_PULL_TIMEOUT_SECONDS = 120
 GIT_FETCH_TIMEOUT_SECONDS = 45
@@ -279,14 +279,18 @@ def git_pull_capability() -> Dict[str, Any]:
 
 
 def _compute_deps_fingerprint(base_dir: str) -> Optional[str]:
-    """Hash the dependency-defining files under base_dir, or None if unreadable.
+    """Hash the dependency-/build-defining files under base_dir.
 
-    A missing file is folded into the hash as an explicit marker, so adding or
-    removing one still changes the fingerprint; an unreadable directory yields
-    None so the caller treats the comparison as inconclusive rather than divergent.
+    Returns None only when the comparison is genuinely inconclusive — the base
+    directory is absent/unreadable, or a tracked file exists but cannot be read.
+    A directory that exists but is missing every tracked file still yields a real
+    digest (of the missing markers), so removing or relocating them all reads as a
+    definite change rather than an inconclusive one. A missing file is folded into
+    the hash as an explicit marker, so adding or removing one shifts the digest.
     """
+    if not os.path.isdir(base_dir):
+        return None
     digest = hashlib.sha256()
-    saw_a_file = False
     for name in DEPS_FILES:
         path = os.path.join(base_dir, name)
         try:
@@ -296,13 +300,12 @@ def _compute_deps_fingerprint(base_dir: str) -> Optional[str]:
             digest.update(b"\0")
             digest.update(content)
             digest.update(b"\0")
-            saw_a_file = True
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             digest.update(name.encode("utf-8"))
             digest.update(b"\0<missing>\0")
         except OSError:
             return None
-    return digest.hexdigest() if saw_a_file else None
+    return digest.hexdigest()
 
 
 def rebuild_required() -> bool:
