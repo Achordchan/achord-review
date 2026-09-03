@@ -159,7 +159,7 @@ async def _create_session(verified_password: str) -> str:
     token = secrets.token_urlsafe(32)
 
     def _create() -> str:
-        current_password, current_signature = _admin_password_snapshot()
+        current_password, _ = _admin_password_snapshot()
         if not hmac.compare_digest(
                 verified_password.encode("utf-8"), current_password.encode("utf-8")):
             return "password_changed"
@@ -168,10 +168,9 @@ async def _create_session(verified_password: str) -> str:
             token_hash,
             int(time.time()) + SESSION_TTL_SECONDS,
             current_password)
-        after_password, after_signature = _admin_password_snapshot()
-        if (current_signature != after_signature
-                or not hmac.compare_digest(
-                    current_password.encode("utf-8"), after_password.encode("utf-8"))):
+        after_password, _ = _admin_password_snapshot()
+        if not hmac.compare_digest(
+                current_password.encode("utf-8"), after_password.encode("utf-8")):
             get_storage().revoke_session(token_hash)
             return "password_changed"
         return "created" if created else "storage_error"
@@ -196,10 +195,11 @@ def _session_valid(token: Optional[str]) -> bool:
     token_hash = _session_hash(token, password)
     valid = bool(token_hash and get_storage().session_is_valid(token_hash))
     after_password, after_signature = _admin_password_snapshot()
-    if (signature != after_signature
-            or not hmac.compare_digest(password.encode("utf-8"), after_password.encode("utf-8"))):
+    if not hmac.compare_digest(password.encode("utf-8"), after_password.encode("utf-8")):
         _sync_admin_password(after_password, after_signature)
         return False
+    if signature != after_signature and not _sync_admin_password(after_password, after_signature):
+        raise DashboardStorageReadError("dashboard authentication state is unavailable")
     return valid
 
 

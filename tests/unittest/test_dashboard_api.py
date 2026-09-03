@@ -239,6 +239,31 @@ class TestAuth:
 
         assert dashboard_api._session_valid(token) is False
 
+    def test_session_survives_unrelated_config_signature_change(self, client, monkeypatch):
+        signature = {"value": (1,)}
+        monkeypatch.setattr(
+            dashboard_api, "_admin_password_snapshot",
+            lambda: ("password-a", signature["value"]))
+        token = __import__("asyncio").run(dashboard_api._create_session("password-a"))
+
+        signature["value"] = (2,)
+
+        assert dashboard_api._session_valid(token) is True
+
+    def test_session_creation_ignores_unrelated_signature_change(self, client, monkeypatch):
+        signature = {"value": 0}
+
+        def changing_snapshot():
+            signature["value"] += 1
+            return "password-a", (signature["value"],)
+
+        monkeypatch.setattr(dashboard_api, "_admin_password_snapshot", changing_snapshot)
+
+        token = __import__("asyncio").run(dashboard_api._create_session("password-a"))
+
+        assert token
+        assert dashboard_api._session_valid(token) is True
+
 
 class TestClientIp:
     def test_trusted_hops_read_rightmost_entries(self, client, monkeypatch):

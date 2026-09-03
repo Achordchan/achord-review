@@ -8,33 +8,66 @@ graceful worker shutdown cannot leave a completed run permanently RUNNING.
 """
 
 import asyncio
-import re
 from typing import Optional
+from urllib.parse import unquote, urlsplit
 
 from pr_agent.algo.run_details import get_run_details
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
-_PR_URL_RE = re.compile(r"(?:pull|pull-requests|merge_requests)/(\d+)")
 _VALID_SEVERITIES = {"P0", "P1", "P2", "P3"}
 _MAX_SQLITE_INTEGER = 2 ** 63 - 1
 
 
 def _parse_pr_url(pr_url: str) -> tuple:
     """Extract (repo_full_name, pr_number) from a provider PR URL, best effort."""
-    number = None
-    match = _PR_URL_RE.search(pr_url or "")
-    if match:
-        number = int(match.group(1))
-    repo = ""
     try:
-        # https://github.com/<owner>/<repo>/pull/13
-        parts = pr_url.split("://", 1)[-1].split("/", 1)[1].rstrip("/").split("/")
-        if len(parts) >= 2:
-            repo = f"{parts[0]}/{parts[1]}"
+        parsed_url = urlsplit(pr_url or "")
+        parts = [unquote(part) for part in parsed_url.path.split("/") if part]
+        markers = {"pullrequest", "pull-requests", "merge_requests", "pull", "pulls"}
+        marker_index = next(
+            (index for index in range(len(parts) - 2, -1, -1)
+             if parts[index] in markers and parts[index + 1].isdigit()),
+            -1,
+        )
+        if marker_index < 0:
+            return "", 0
+        marker = parts[marker_index]
+        number = int(parts[marker_index + 1])
+        prefix = parts[:marker_index]
+
+        if marker == "merge_requests":
+            if prefix and prefix[-1] == "-":
+                prefix = prefix[:-1]
+            configured_gitlab = urlsplit(str(get_settings().get("gitlab.url", "") or ""))
+            configured_prefix = [unquote(part) for part in configured_gitlab.path.split("/") if part]
+            same_gitlab_origin = (
+                parsed_url.scheme.lower() == configured_gitlab.scheme.lower()
+                and parsed_url.netloc.lower() == configured_gitlab.netloc.lower()
+            )
+            if same_gitlab_origin and configured_prefix and prefix[:len(configured_prefix)] == configured_prefix:
+                prefix = prefix[len(configured_prefix):]
+            if len(prefix) == 2 and prefix[0] == "projects" and prefix[1].isdigit():
+                return prefix[1], number
+            return "/".join(prefix), number
+
+        if marker == "pullrequest" and len(prefix) >= 3 and prefix[-2] == "_git":
+            return f"{prefix[-3]}/{prefix[-1]}", number
+
+        if marker == "pull-requests":
+            if len(prefix) >= 2 and prefix[-2] == "repositories":
+                return prefix[-1], number
+            if len(prefix) >= 4 and prefix[-2] == "repos" and prefix[-4] in {"projects", "users"}:
+                workspace = f"~{prefix[-3]}" if prefix[-4] == "users" else prefix[-3]
+                return f"{workspace}/{prefix[-1]}", number
+
+        if len(prefix) >= 3 and prefix[-3] == "repos":
+            return "/".join(prefix[-2:]), number
+        if len(prefix) >= 2:
+            return "/".join(prefix[-2:]), number
     except Exception as e:  # noqa: BLE001 — any odd URL shape falls back to ("", 0)
         get_logger().debug(f"Dashboard audit could not parse PR URL, error: {e}")
-    return repo, number or 0
+    return "", 0
 
 
 def _run_payload_fields() -> dict:

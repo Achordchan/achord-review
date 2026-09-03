@@ -41,6 +41,37 @@ def test_started_audit_preserves_a_reserved_request_id(tmp_path, monkeypatch):
     assert storage.get_review_by_request_id(request_id)["status"] == "RUNNING"
 
 
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://github.com/owner/repo/pull/1", ("owner/repo", 1)),
+    ("https://api.github.com/repos/owner/repo/pulls/2", ("owner/repo", 2)),
+    ("https://gitea.example/owner/repo/pulls/3", ("owner/repo", 3)),
+    ("https://gitlab.example/group/subgroup/repo/-/merge_requests/4",
+     ("group/subgroup/repo", 4)),
+    ("https://gitlab.example/projects/123/-/merge_requests/5", ("123", 5)),
+    ("https://bitbucket.org/workspace/repo/pull-requests/6", ("workspace/repo", 6)),
+    ("https://stash.example/projects/PROJ/repos/repo/pull-requests/7", ("PROJ/repo", 7)),
+    ("https://stash.example/users/alice/repos/repo/pull-requests/8", ("~alice/repo", 8)),
+    ("https://dev.azure.com/org/Dev%20Project/_git/repo%20name/pullrequest/9",
+     ("Dev Project/repo name", 9)),
+    ("https://us-east-1.console.aws.amazon.com/codesuite/codecommit/repositories/repo/pull-requests/10",
+     ("repo", 10)),
+])
+def test_audit_pr_url_parser_supports_provider_specific_paths(url, expected):
+    assert audit._parse_pr_url(url) == expected
+
+
+def test_audit_pr_url_parser_strips_configured_gitlab_subpath(monkeypatch):
+    settings = audit.get_settings()
+    previous_url = settings.gitlab.url
+    try:
+        settings.gitlab.url = "https://gitlab.example/gitlab"
+
+        assert audit._parse_pr_url(
+            "https://gitlab.example/gitlab/group/repo/-/merge_requests/11") == ("group/repo", 11)
+    finally:
+        settings.gitlab.url = previous_url
+
+
 def test_terminal_audit_write_is_complete_before_await_returns(tmp_path, monkeypatch):
     storage = DashboardStorage(db_path=str(tmp_path / "audit.db"))
     storage.initialize()
