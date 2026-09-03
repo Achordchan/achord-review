@@ -251,7 +251,7 @@ def test_audit_start_timeout_preserves_id_and_serializes_terminal_write(monkeypa
 
         release_storage.set()
         await asyncio.wait_for(terminal_written.wait(), 1)
-        await terminal_task
+        assert await terminal_task is None
 
     asyncio.run(scenario())
     assert terminal == {
