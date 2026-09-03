@@ -72,10 +72,13 @@ export default function ConfigPage() {
         restart_started: boolean
         restart_output: string[]
         hot_reload_pending: boolean
+        auth_sync_warning: string
         reload_warning: string
         persistence_warning: string
       }>('/api/v1/dashboard/config', payload)
-      if (body.hot_reload_pending && !body.restart_started) {
+      if (body.auth_sync_warning) {
+        toast.error('配置已保存，但认证状态同步失败', body.auth_sync_warning)
+      } else if (body.hot_reload_pending && !body.restart_started) {
         toast.error('配置已保存，但尚未热生效', body.reload_warning || '请重启服务后生效')
       } else if (body.persistence_warning) {
         const restartNote = body.restart_started ? '；重启指令已下发，完成状态待确认' : ''

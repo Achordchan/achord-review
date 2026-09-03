@@ -729,6 +729,56 @@ async def test_run_audits_cancellation_then_reraises(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancellation_during_completion_does_not_start_competing_failure(monkeypatch):
+    from pr_agent.tools import pr_reviewer as pr_reviewer_module
+
+    terminal_started = asyncio.Event()
+    release_terminal = asyncio.Event()
+    terminal_finished = asyncio.Event()
+    git_provider = MagicMock()
+    git_provider.get_files.return_value = ["app.py"]
+    reviewer = _make_reviewer(git_provider)
+    reviewer.incremental = SimpleNamespace(is_incremental=False)
+    reviewer.vars = {}
+    reviewer.prediction = None
+    reviewer.review_data = {"review": {}}
+    reviewer._prepare_pr_review = lambda: "completed review"
+    reviewer._submit_review_verdict = MagicMock()
+    audit_failed = AsyncMock()
+
+    async def fake_retry(prepare_fn, model_type=None):
+        reviewer.prediction = "prediction"
+
+    async def delayed_finished(*args, **kwargs):
+        terminal_started.set()
+        await release_terminal.wait()
+        terminal_finished.set()
+
+    monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
+    monkeypatch.setattr(pr_reviewer_module, "_start_audit_heartbeat", lambda request_id: None)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_finished", delayed_finished)
+    monkeypatch.setattr(pr_reviewer_module, "_audit_failed", audit_failed)
+    monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
+    monkeypatch.setattr(pr_reviewer_module, "retry_with_fallback_models", fake_retry)
+
+    settings = get_settings()
+    original_publish_output = settings.config.publish_output
+    try:
+        settings.config.publish_output = False
+        task = asyncio.create_task(reviewer.run())
+        await terminal_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        audit_failed.assert_not_awaited()
+
+        release_terminal.set()
+        await asyncio.wait_for(terminal_finished.wait(), 1)
+    finally:
+        settings.config.publish_output = original_publish_output
+
+
+@pytest.mark.asyncio
 async def test_terminal_audit_cancellation_propagates_before_late_write_finishes():
     from pr_agent.tools import pr_reviewer as pr_reviewer_module
 

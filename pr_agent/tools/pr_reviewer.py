@@ -365,19 +365,26 @@ class PRReviewer:
         review_failed = False
         audit_request_id = ""
         audit_heartbeat_task = None
+        terminal_audit_started = False
+
+        async def _persist_terminal(coro) -> None:
+            nonlocal terminal_audit_started
+            terminal_audit_started = True
+            await _await_terminal_audit(coro)
+
         try:
             audit_request_id = await _audit_started(self)
             audit_heartbeat_task = _start_audit_heartbeat(audit_request_id)
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
-                await _await_terminal_audit(_audit_skipped(audit_request_id, "PR has no files"))
+                await _persist_terminal(_audit_skipped(audit_request_id, "PR has no files"))
                 return None
 
             if self.incremental.is_incremental:
                 can_run = self._can_run_incremental_review()
                 # If the gate disabled incremental (e.g., commits_range is None), fall through to full review.
                 if not can_run and self.incremental.is_incremental:
-                    await _await_terminal_audit(
+                    await _persist_terminal(
                         _audit_skipped(audit_request_id, "incremental review gate closed"))
                     return None
 
@@ -406,7 +413,7 @@ class PRReviewer:
                 if get_settings().config.publish_output:
                     self.git_provider.publish_comment(f"Incremental Review Skipped\n"
                                     f"No files were changed since the [previous PR Review]({previous_review_url})")
-                await _await_terminal_audit(
+                await _persist_terminal(
                     _audit_skipped(audit_request_id, "incremental review: no new files"))
                 return None
 
@@ -422,7 +429,7 @@ class PRReviewer:
 
             await retry_with_fallback_models(self._prepare_prediction, model_type=ModelType.REGULAR)
             if not self.prediction:
-                await _await_terminal_audit(
+                await _persist_terminal(
                     _audit_skipped(audit_request_id, "model returned no prediction"))
                 return None
 
@@ -436,7 +443,7 @@ class PRReviewer:
                 # worker that blocks there stops answering webhooks. In a thread the wait
                 # can be long enough to be worth having.
                 await asyncio.to_thread(self._publish_single_review, pr_review, verdict_at_start)
-                await _await_terminal_audit(
+                await _persist_terminal(
                     _audit_finished(self, audit_request_id, pr_review, self.prediction))
                 return
 
@@ -448,7 +455,7 @@ class PRReviewer:
                 get_logger().info(reason)
                 get_settings().data = {"artifact": pr_review}
                 self._submit_review_verdict()
-                await _await_terminal_audit(
+                await _persist_terminal(
                     _audit_finished(self, audit_request_id, pr_review, self.prediction))
                 return
 
@@ -478,16 +485,18 @@ class PRReviewer:
                 self.git_provider.publish_comment(pr_review, **review_thread_kwargs)
 
             self._submit_review_verdict()
-            await _await_terminal_audit(
+            await _persist_terminal(
                 _audit_finished(self, audit_request_id, pr_review, self.prediction))
         except asyncio.CancelledError:
-            await _await_terminal_audit(
-                _audit_failed(audit_request_id, RuntimeError("review task cancelled")))
+            if not terminal_audit_started:
+                await _persist_terminal(
+                    _audit_failed(audit_request_id, RuntimeError("review task cancelled")))
             raise
         except Exception as e:
             review_failed = True
             get_logger().error(f"Failed to review PR: {e}")
-            await _await_terminal_audit(_audit_failed(audit_request_id, e))
+            if not terminal_audit_started:
+                await _persist_terminal(_audit_failed(audit_request_id, e))
             if get_settings().config.get("propagate_tool_errors", False):
                 raise
         finally:
