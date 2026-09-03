@@ -1475,3 +1475,22 @@ async def test_run_backfills_the_audit_metadata_on_the_review_path(monkeypatch):
         settings.config.publish_output = original_publish_output
 
     audit_metadata.assert_awaited_once_with("request-id", reviewer)
+
+
+def test_changed_paths_exclude_the_pre_rename_path():
+    # The base tree still carries the old path; offering it as "unchanged
+    # context" would feed the review content this PR actually removes.
+    reviewer = _make_reviewer()
+    reviewer.git_provider.get_diff_files.return_value = [
+        SimpleNamespace(filename="new/name.py", old_filename="old/name.py"),
+        SimpleNamespace(filename="kept.py", old_filename=None),
+    ]
+
+    assert reviewer._changed_paths() == ["new/name.py", "old/name.py", "kept.py"]
+
+
+def test_changed_paths_degrade_when_the_provider_cannot_list_files():
+    reviewer = _make_reviewer()
+    reviewer.git_provider.get_diff_files.side_effect = RuntimeError("provider down")
+
+    assert reviewer._changed_paths() == []

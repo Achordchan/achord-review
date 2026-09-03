@@ -172,21 +172,68 @@ class TestBuild:
 
 
 class TestTokenBudget:
-    def test_context_over_budget_is_trimmed_not_passed_through(self):
+    def test_a_block_that_does_not_fit_is_dropped_whole(self):
+        # A cut block would leave an open fence, and the review schema printed
+        # after it would be read as file content.
         class Counter:
             def count_tokens(self, text, force_accurate=False):
                 return len(text.splitlines())
 
-        rendered = "\n".join(["<related_files>"] + [f"line {i}" for i in range(200)])
+        rendered = related_files._render(
+            {"small.py": "one\ntwo", "huge.py": "\n".join(str(i) for i in range(500))},
+            max_total_lines=500, max_tokens=30, count_tokens=Counter().count_tokens)
 
-        trimmed = related_files._trim_to_token_budget(rendered, Counter(), 50)
+        assert rendered.count("<file ") == rendered.count("</file>")
+        assert rendered.count("`````") % 2 == 0
+        assert rendered.endswith("</related_files>")
+        assert "small.py" in rendered
 
-        assert len(trimmed.splitlines()) <= 52
-        assert trimmed.endswith("</related_files>")
-
-    def test_a_broken_counter_drops_the_context_rather_than_risking_the_diff(self):
-        class Broken:
+    def test_the_complete_result_including_the_closing_tag_is_under_budget(self):
+        class Counter:
             def count_tokens(self, text, force_accurate=False):
-                raise RuntimeError("no encoder")
+                return len(text.splitlines())
 
-        assert related_files._trim_to_token_budget("x", Broken(), 10) == ""
+        rendered = related_files._render(
+            {f"f{i}.py": "x\ny\nz" for i in range(20)},
+            max_total_lines=500, max_tokens=25, count_tokens=Counter().count_tokens)
+
+        assert len(rendered.splitlines()) <= 25
+
+    def test_a_broken_counter_attaches_nothing_rather_than_risking_the_diff(self):
+        def broken(text, force_accurate=False):
+            raise RuntimeError("no encoder")
+
+        assert related_files._render({"a.py": "x"}, 500, max_tokens=10, count_tokens=broken) == ""
+
+    def test_budget_is_what_the_model_window_has_left_after_the_diff(self, monkeypatch):
+        class Handler:
+            prompt_tokens = 1000
+
+            def count_tokens(self, text, force_accurate=False):
+                return 4000
+
+        monkeypatch.setattr("pr_agent.algo.utils.get_max_tokens", lambda model: 10000)
+
+        # 10000 - 1000 prompt - 4000 diff - 1500 output buffer = 3500
+        assert related_files.available_token_budget("m", Handler(), "diff", 12000) == 3500
+        # never more than the configured ceiling
+        assert related_files.available_token_budget("m", Handler(), "diff", 500) == 500
+
+    def test_an_exhausted_window_yields_no_budget(self, monkeypatch):
+        class Handler:
+            prompt_tokens = 9000
+
+            def count_tokens(self, text, force_accurate=False):
+                return 4000
+
+        monkeypatch.setattr("pr_agent.algo.utils.get_max_tokens", lambda model: 10000)
+
+        assert related_files.available_token_budget("m", Handler(), "diff", 12000) == 0
+
+    def test_an_unknown_window_yields_no_budget(self, monkeypatch):
+        def boom(model):
+            raise KeyError(model)
+
+        monkeypatch.setattr("pr_agent.algo.utils.get_max_tokens", boom)
+
+        assert related_files.available_token_budget("m", object(), "diff", 12000) == 0

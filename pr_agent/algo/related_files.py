@@ -31,6 +31,7 @@ from pr_agent.log import get_logger
 
 TREE_CACHE_ATTRIBUTE = "_related_files_tree_cache"
 FENCE = "`````"
+TRUNCATION_MARKER = "...(truncated)..."
 
 CONTEXT_INTRO = (
     "The files below are NOT part of this PR's diff. They are read-only reference, included so "
@@ -163,7 +164,7 @@ def _parse_selection(response: str, candidates: List[str], max_files: int) -> Li
 
 async def _select_paths(ai_handler, model: str, diff: str, title: str,
                         candidates: List[str], max_files: int) -> List[str]:
-    from jinja2 import Environment, StrictUndefined
+    from jinja2 import Environment, StrictUndefined, select_autoescape
 
     variables = {
         "title": title,
@@ -171,7 +172,9 @@ async def _select_paths(ai_handler, model: str, diff: str, title: str,
         "candidate_files": "\n".join(candidates),
         "max_files": max_files,
     }
-    environment = Environment(undefined=StrictUndefined)
+    # Prompt text, not markup: escaping would corrupt it. Mirrors pr_line_questions.
+    environment = Environment(undefined=StrictUndefined,
+                              autoescape=select_autoescape(default_for_string=False))
     settings = get_settings().pr_related_files_prompt
     system_prompt = environment.from_string(settings.system).render(variables)
     user_prompt = environment.from_string(settings.user).render(variables)
@@ -182,6 +185,30 @@ async def _select_paths(ai_handler, model: str, diff: str, title: str,
     return _parse_selection(response, candidates, max_files)
 
 
+def available_token_budget(model: str, token_handler, diff: str, configured_max: int) -> int:
+    """Tokens left for related context after the diff has taken its share.
+
+    get_pr_diff sizes the diff against the model limit before retrieval runs, so
+    a fixed ceiling here can still push the request over that limit — and the
+    diff, not the context, is what the review cannot do without. An unknown
+    budget means attach nothing.
+    """
+    if configured_max <= 0 or token_handler is None:
+        return 0
+    try:
+        from pr_agent.algo.pr_processing import OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD
+        from pr_agent.algo.utils import get_max_tokens
+
+        remaining = (get_max_tokens(model)
+                     - token_handler.prompt_tokens
+                     - token_handler.count_tokens(diff)
+                     - OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD)
+        return max(0, min(configured_max, int(remaining)))
+    except Exception as e:
+        get_logger().warning(f"Could not size the related-files budget; skipping context, error: {e}")
+        return 0
+
+
 def _fence_for(content: str) -> str:
     fence = FENCE
     while fence in content:
@@ -189,52 +216,55 @@ def _fence_for(content: str) -> str:
     return fence
 
 
-def _render(files: dict, max_total_lines: int) -> str:
+def _render(files: dict, max_total_lines: int, max_tokens: int = 0, count_tokens=None) -> str:
+    """Assemble the context one whole file block at a time.
+
+    Every candidate result is measured complete, closing tag included, and a
+    block that does not fit is dropped rather than cut: a half-written block
+    would leave an open fence, and the review schema that follows would be read
+    as file content.
+    """
     if not files:
         return ""
-    parts = [CONTEXT_INTRO, "<related_files>"]
-    # CONTEXT_INTRO is several lines: count real lines, not list entries.
-    used = sum(part.count("\n") + 1 for part in parts) + 1  # +1 for the closing tag
+
+    header = [CONTEXT_INTRO, "<related_files>"]
+    closing = "</related_files>"
+
+    def assemble(blocks: list) -> str:
+        return "\n".join(header + [line for block in blocks for line in block] + [closing])
+
+    def fits(text: str) -> bool:
+        if len(text.splitlines()) > max_total_lines:
+            return False
+        if max_tokens and count_tokens is not None:
+            try:
+                return count_tokens(text) <= max_tokens
+            except Exception as e:
+                get_logger().warning(f"Related-files token check failed, error: {e}")
+                return False
+        return True
+
+    blocks = []
     for path, content in files.items():
         lines = content.splitlines()
         fence = _fence_for(content)
-        block_overhead = 4  # opening tag, fence, closing fence, closing tag
-        if used + block_overhead >= max_total_lines:
+        block = [f'<file path="{path}">', fence, *lines, fence, "</file>"]
+        if fits(assemble(blocks + [block])):
+            blocks.append(block)
+            continue
+
+        # Try the same block with its content shortened; drop it if even that
+        # does not fit, and stop — later files are lower priority than this one.
+        room = max_total_lines - len(assemble(blocks).splitlines()) - 5
+        if room <= 1:
             break
-        room = max_total_lines - used - block_overhead
-        if len(lines) > room:
-            # the marker occupies one of the remaining lines
-            lines = lines[:max(0, room - 1)] + ["...(truncated)..."]
-        parts.extend([f'<file path="{path}">', fence, "\n".join(lines), fence, "</file>"])
-        used += len(lines) + block_overhead
-    parts.append("</related_files>")
-    return "\n".join(parts)
+        shortened = lines[:room - 1] + [TRUNCATION_MARKER]
+        block = [f'<file path="{path}">', fence, *shortened, fence, "</file>"]
+        if fits(assemble(blocks + [block])):
+            blocks.append(block)
+        break
 
-
-def _trim_to_token_budget(rendered: str, token_handler, max_tokens: int) -> str:
-    """Keep the attached context inside its own token budget.
-
-    The diff's budget was already settled by get_pr_diff before retrieval ran, so
-    context that overruns would push the request past the model limit — the one
-    outcome worse than having no context, since it costs the reviewer the diff.
-    """
-    if not rendered or token_handler is None or max_tokens <= 0:
-        return rendered
-    try:
-        if token_handler.count_tokens(rendered) <= max_tokens:
-            return rendered
-        lines = rendered.splitlines()
-        while lines and token_handler.count_tokens("\n".join(lines)) > max_tokens:
-            # Drop from the end: whole trailing files go before the earlier,
-            # higher-ranked ones the model asked for first.
-            del lines[-max(1, len(lines) // 20):]
-        if not lines:
-            return ""
-        return "\n".join(lines + ["...(related files truncated to fit the token budget)...",
-                                   "</related_files>"])
-    except Exception as e:
-        get_logger().warning(f"Related-file budget check failed; dropping context, error: {e}")
-        return ""
+    return assemble(blocks) if blocks else ""
 
 
 async def build_related_files(git_provider, ai_handler, model: str, diff: str,
@@ -274,12 +304,18 @@ async def build_related_files(git_provider, ai_handler, model: str, diff: str,
                 continue
             lines = content.splitlines()
             if len(lines) > max_lines_per_file:
-                lines = lines[:max_lines_per_file] + ["...(truncated)..."]
+                lines = lines[:max_lines_per_file] + [TRUNCATION_MARKER]
             files[path] = "\n".join(lines)
 
-        rendered = _render(files, _int_setting("max_total_lines", 800, minimum=10))
-        rendered = _trim_to_token_budget(
-            rendered, token_handler, _int_setting("max_tokens", 12000, minimum=0))
+        budget = available_token_budget(
+            model, token_handler, diff, _int_setting("max_tokens", 12000, minimum=0))
+        if token_handler is not None and budget <= 0:
+            get_logger().info("No token budget left for related files; reviewing from the diff alone")
+            return ""
+        rendered = _render(
+            files, _int_setting("max_total_lines", 800, minimum=10),
+            max_tokens=budget,
+            count_tokens=getattr(token_handler, "count_tokens", None))
         if rendered:
             get_logger().info("Related files attached to the review",
                               artifact={"files": list(files.keys())})

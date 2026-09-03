@@ -751,13 +751,22 @@ class PRReviewer:
             get_logger().info(f"Review verdict {event} was not submitted")
 
     def _changed_paths(self) -> list:
-        """Paths this PR touches; they are excluded from the retrieval candidates."""
+        """Paths this PR touches; they are excluded from the retrieval candidates.
+
+        A rename touches two paths: the base tree still carries the old one, so
+        without it the pre-rename file could be attached as unchanged context and
+        the review would reason about content this PR removes.
+        """
+        paths = []
         try:
-            return [file.filename for file in (self.git_provider.get_diff_files() or [])
-                    if getattr(file, "filename", "")]
+            for file in (self.git_provider.get_diff_files() or []):
+                for attribute in ("filename", "old_filename"):
+                    path = getattr(file, attribute, "")
+                    if path and path not in paths:
+                        paths.append(path)
         except Exception as e:
             get_logger().debug(f"Could not list changed paths for retrieval, error: {e}")
-            return []
+        return paths
 
     async def _prepare_prediction(self, model: str) -> None:
         output = get_pr_diff(self.git_provider,
