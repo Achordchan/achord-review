@@ -177,8 +177,12 @@ async def _wait_for_audit_start(request_id: str, timeout_seconds: Optional[float
     return started_id == request_id
 
 
-async def _await_terminal_audit(coro) -> None:
-    """Bound terminal audit latency and reconcile a late write in the background."""
+async def _await_bounded_audit(coro, what: str = "terminal") -> None:
+    """Bound an audit write's foreground cost and reconcile a late one in the background.
+
+    Every audit write the review awaits goes through here: a stalled storage
+    volume must cost the review its bounded window and no more.
+    """
     task = asyncio.create_task(coro)
     try:
         await asyncio.wait_for(
@@ -186,7 +190,7 @@ async def _await_terminal_audit(coro) -> None:
     except TimeoutError:
         _track_audit_task(task)
         get_logger().warning(
-            f"Dashboard terminal audit exceeded {AUDIT_TERMINAL_TIMEOUT_SECONDS:g} seconds; continuing")
+            f"Dashboard {what} audit exceeded {AUDIT_TERMINAL_TIMEOUT_SECONDS:g} seconds; continuing")
     except asyncio.CancelledError:
         _track_audit_task(task)
         raise
@@ -257,7 +261,9 @@ async def _audit_metadata(request_id: str, reviewer: "PRReviewer") -> None:
         from pr_agent.dashboard.audit import review_metadata
         title = (getattr(reviewer, "vars", None) or {}).get("title") or ""
         commit_sha = reviewer.git_provider.get_head_commit_sha() or ""
-        await review_metadata(request_id, pr_title=title, commit_sha=commit_sha)
+        await _await_bounded_audit(
+            review_metadata(request_id, pr_title=title, commit_sha=commit_sha),
+            what="metadata")
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -411,7 +417,7 @@ class PRReviewer:
         async def _persist_terminal(coro) -> None:
             nonlocal terminal_audit_started
             terminal_audit_started = True
-            await _await_terminal_audit(coro)
+            await _await_bounded_audit(coro)
 
         try:
             audit_request_id = await _audit_started(self)

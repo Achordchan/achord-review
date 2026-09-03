@@ -531,3 +531,31 @@ def test_audit_worker_sees_the_request_scope(monkeypatch):
 
     assert captured["sender"] == "octocat"
     assert captured["trigger_type"] == "mention"
+
+
+def test_stalled_metadata_write_does_not_hold_up_the_review(monkeypatch):
+    # The backfill sits on the review's own path, before model generation: a
+    # stalled volume must cost it the bounded window and no more.
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    class Reviewer:
+        pr_url = "https://github.com/a/b/pull/1"
+        git_provider = type("GitProvider", (), {"get_head_commit_sha": lambda self: "abc123"})()
+        vars = {"title": "Fix the thing"}
+
+    async def stalled_metadata(request_id, pr_title="", commit_sha=""):
+        await release.wait()
+        finished.set()
+
+    monkeypatch.setattr(audit, "review_metadata", stalled_metadata)
+    monkeypatch.setattr(pr_reviewer, "AUDIT_TERMINAL_TIMEOUT_SECONDS", 0.01)
+
+    async def scenario():
+        await asyncio.wait_for(pr_reviewer._audit_metadata("request-id", Reviewer()), timeout=5)
+        # the review moved on; the write is still tracked and completes later
+        assert not finished.is_set()
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=5)
+
+    asyncio.run(scenario())

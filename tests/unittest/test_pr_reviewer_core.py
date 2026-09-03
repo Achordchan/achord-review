@@ -793,7 +793,7 @@ async def test_terminal_audit_cancellation_propagates_before_late_write_finishes
         completed.append(True)
         finished.set()
 
-    task = asyncio.create_task(pr_reviewer_module._await_terminal_audit(terminal_write()))
+    task = asyncio.create_task(pr_reviewer_module._await_bounded_audit(terminal_write()))
     await started.wait()
     task.cancel()
 
@@ -820,7 +820,7 @@ async def test_terminal_audit_timeout_detaches_and_finishes_late_write(monkeypat
         finished.set()
 
     monkeypatch.setattr(pr_reviewer_module, "AUDIT_TERMINAL_TIMEOUT_SECONDS", 0.01)
-    task = asyncio.create_task(pr_reviewer_module._await_terminal_audit(terminal_write()))
+    task = asyncio.create_task(pr_reviewer_module._await_bounded_audit(terminal_write()))
     await started.wait()
 
     await asyncio.wait_for(task, 0.2)
