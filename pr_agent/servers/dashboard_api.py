@@ -40,6 +40,7 @@ SESSION_COOKIE = "dashboard_session"
 SESSION_TTL_SECONDS = 7 * 24 * 3600
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 15 * 60
+MAX_SQLITE_INTEGER = 2 ** 63 - 1
 # Number of trusted proxy hops in front of this service. The deployment sits
 # behind exactly one nginx; only headers appended by those hops are consumed,
 # so clients cannot rotate their X-Forwarded-For to evade the login lockout.
@@ -234,8 +235,10 @@ def _session_valid(token: Optional[str]) -> bool:
         if not hmac.compare_digest(password.encode("utf-8"), after_password.encode("utf-8")):
             _sync_admin_password(after_password, after_signature)
             return False
-        if signature != after_signature and not _sync_admin_password(after_password, after_signature):
-            raise DashboardStorageReadError("dashboard authentication state is unavailable")
+        if signature != after_signature:
+            if not _sync_admin_password(after_password, after_signature):
+                raise DashboardStorageReadError("dashboard authentication state is unavailable")
+            return False
         return valid
 
 
@@ -542,6 +545,8 @@ async def list_reviews(request: Request, dashboard_session: Optional[str] = Cook
 async def review_detail(review_id: int, request: Request,
                         dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
+    if not 1 <= review_id <= MAX_SQLITE_INTEGER:
+        raise HTTPException(status_code=404, detail="Review not found")
     detail = await _dashboard_storage_read("get_review_detail", review_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="审查记录不存在")

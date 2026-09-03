@@ -271,6 +271,26 @@ class TestAuth:
 
         assert dashboard_api._session_valid(token) is False
 
+    def test_session_rejects_request_that_triggers_mid_validation_revocation(
+            self, client, storage, monkeypatch):
+        signature = {"value": (1,)}
+        monkeypatch.setattr(
+            dashboard_api, "_admin_password_snapshot",
+            lambda: ("password-a", signature["value"]))
+        token = __import__("asyncio").run(dashboard_api._create_session("password-a"))
+        original_session_is_valid = storage.session_is_valid
+
+        def replace_config_after_validation(*args, **kwargs):
+            valid = original_session_is_valid(*args, **kwargs)
+            signature["value"] = (3,)
+            return valid
+
+        monkeypatch.setattr(storage, "session_is_valid", replace_config_after_validation)
+
+        assert dashboard_api._session_valid(token) is False
+        assert original_session_is_valid(
+            dashboard_api._session_hash(token, "password-a")) is False
+
 
 class TestClientIp:
     def test_trusted_hops_read_rightmost_entries(self, client, monkeypatch):
@@ -683,6 +703,20 @@ class TestProtectedRoutes:
 
         resp = client.get("/api/v1/dashboard/reviews/99999", headers=auth)
         assert resp.status_code == 404
+
+    @pytest.mark.parametrize("review_id", [-1, 2 ** 63, 2 ** 80])
+    def test_review_detail_rejects_ids_outside_sqlite_range(
+            self, client, storage, monkeypatch, review_id):
+        auth = _auth_header(client)
+        queried = []
+        monkeypatch.setattr(
+            storage, "get_review_detail",
+            lambda value: queried.append(value) or None)
+
+        resp = client.get(f"/api/v1/dashboard/reviews/{review_id}", headers=auth)
+
+        assert resp.status_code == 404
+        assert queried == []
 
     def test_stats_overview(self, client, storage):
         request_id = storage.create_review(repo_name="a/b", pr_number=1, pr_url="u")
