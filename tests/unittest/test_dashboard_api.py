@@ -96,6 +96,24 @@ class TestAuth:
             "/api/v1/dashboard/auth/login", json={"password": "管理员-安全口令"})
         assert resp.status_code == 200
 
+    def test_login_accepts_supported_password_longer_than_256_characters(
+            self, client, monkeypatch):
+        password = "p" * 300
+        monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", password)
+
+        resp = client.post("/api/v1/dashboard/auth/login", json={"password": password})
+
+        assert resp.status_code == 200
+
+    def test_login_reports_oversized_configured_password(self, client, monkeypatch):
+        monkeypatch.setenv(
+            "DASHBOARD_ADMIN_PASSWORD", "p" * (dashboard_api.MAX_ADMIN_PASSWORD_LENGTH + 1))
+
+        resp = client.post("/api/v1/dashboard/auth/login", json={"password": "anything"})
+
+        assert resp.status_code == 503
+        assert "must not exceed" in resp.json()["detail"]
+
     def test_login_rejects_password_rotated_during_request(self, client, storage, monkeypatch):
         password = {"value": "old-password"}
         monkeypatch.setattr(

@@ -36,12 +36,19 @@ def test_finished_audit_normalizes_valid_severity_before_storage(tmp_path, monke
 
     asyncio.run(audit.review_finished(
         request_id,
-        issues=[{"severity": "p1", "issue_header": "lowercase finding"}],
+        issues=[{
+            "severity": "p1",
+            "issue_header": "lowercase finding",
+            "start_line": str(2 ** 80),
+            "end_line": -1,
+        }],
     ))
 
     row = storage.get_review_by_request_id(request_id)
     detail = storage.get_review_detail(row["id"])
     assert detail["issues"][0]["severity"] == "P1"
+    assert detail["issues"][0]["relevant_lines_start"] is None
+    assert detail["issues"][0]["relevant_lines_end"] is None
     assert storage.stats_overview()["p0_p1_blocked"] == 1
 
 

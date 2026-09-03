@@ -30,6 +30,19 @@ from pr_agent.algo.utils import ReasoningEffort
 from pr_agent.log import get_logger
 
 MAX_BACKUPS = 5
+MAX_ADMIN_PASSWORD_LENGTH = 4096
+
+
+class InvalidDashboardAdminPassword(ValueError):
+    """Raised when the configured dashboard credential exceeds its supported bound."""
+
+
+def validate_admin_password(password: str) -> str:
+    if len(password) > MAX_ADMIN_PASSWORD_LENGTH:
+        raise InvalidDashboardAdminPassword(
+            f"dashboard admin password must not exceed {MAX_ADMIN_PASSWORD_LENGTH} characters")
+    return password
+
 
 # Field registry: dashboard field name -> (table, key, validator, default).
 # `secret=True` fields are masked in GET responses; an empty/None submission
@@ -438,7 +451,7 @@ class ConfigEngine:
             after = self._file_signature()
             if before is not None and before == after and raw is not None:
                 password = str(raw.get("dashboard", {}).get("admin_password", "") or "")
-                return password, after
+                return validate_admin_password(password), after
         return "", None
 
     # ------------------------------------------------------------------ misc

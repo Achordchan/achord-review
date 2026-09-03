@@ -24,7 +24,12 @@ from pydantic import BaseModel, Field, StrictBool
 
 from pr_agent.config_loader import get_settings
 from pr_agent.dashboard import ops
-from pr_agent.dashboard.config_engine import get_config_engine
+from pr_agent.dashboard.config_engine import (
+    MAX_ADMIN_PASSWORD_LENGTH,
+    InvalidDashboardAdminPassword,
+    get_config_engine,
+    validate_admin_password,
+)
 from pr_agent.dashboard.storage import DashboardStorageReadError, get_storage
 from pr_agent.log import get_logger
 
@@ -76,7 +81,7 @@ def _admin_password_snapshot() -> tuple[str, tuple | None]:
             # and request boundary. The signature only identifies its source;
             # deriving another value from the password would create an
             # unnecessary offline password oracle.
-            return password, ("environment", variable_name)
+            return validate_admin_password(password), ("environment", variable_name)
     return get_config_engine().admin_password_snapshot()
 
 
@@ -171,7 +176,10 @@ async def _create_session(verified_password: str) -> str:
             return "password_changed"
         return "created" if created else "storage_error"
 
-    result = await asyncio.to_thread(_create)
+    try:
+        result = await asyncio.to_thread(_create)
+    except InvalidDashboardAdminPassword as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     if result == "password_changed":
         raise HTTPException(status_code=401, detail="管理员密码已变更，请使用新密码重新登录")
     if result != "created":
@@ -203,9 +211,9 @@ async def require_auth(request: Request, dashboard_session: Optional[str] = Cook
             if auth.startswith("Bearer ") and await asyncio.to_thread(_session_valid, auth[7:].strip()):
                 return
             raise HTTPException(status_code=401, detail="Not authenticated")
-    except DashboardStorageReadError as e:
+    except (DashboardStorageReadError, InvalidDashboardAdminPassword) as e:
         get_logger().warning(f"Dashboard session validation unavailable, error: {e}")
-        raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试") from e
+        raise HTTPException(status_code=503, detail="会话校验暂不可用，请检查配置后重试") from e
 
 
 def require_same_origin(request: Request) -> None:
@@ -264,13 +272,16 @@ def coming_soon() -> JSONResponse:
 # --------------------------------------------------------------------- auth
 
 class LoginRequest(BaseModel):
-    password: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=MAX_ADMIN_PASSWORD_LENGTH)
 
 
 @router.post("/auth/login")
 async def auth_login(body: LoginRequest, request: Request, response: Response):
     key = _lockout_key(request)
-    expected, _ = await asyncio.to_thread(_admin_password_snapshot)
+    try:
+        expected, _ = await asyncio.to_thread(_admin_password_snapshot)
+    except InvalidDashboardAdminPassword as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     if not expected:
         await asyncio.to_thread(_sync_current_admin_password)
         raise HTTPException(status_code=503, detail="管理员密码未配置（config.toml [dashboard] admin_password）")
@@ -310,7 +321,10 @@ async def auth_logout(request: Request, response: Response,
     # revoke whichever credential authenticated this request: the cookie token
     # and the bearer token are both real sessions in shared storage, and a scripted
     # client logging out via the bearer path must lose access immediately
-    password = await asyncio.to_thread(_admin_password)
+    try:
+        password = await asyncio.to_thread(_admin_password)
+    except InvalidDashboardAdminPassword as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     if not password:
         raise HTTPException(status_code=503, detail="会话吊销失败，请稍后重试")
     token_hashes = set()

@@ -4,7 +4,12 @@ import os
 
 import pytest
 
-from pr_agent.dashboard.config_engine import ConfigEngine, mask_secret
+from pr_agent.dashboard.config_engine import (
+    MAX_ADMIN_PASSWORD_LENGTH,
+    ConfigEngine,
+    InvalidDashboardAdminPassword,
+    mask_secret,
+)
 
 
 @pytest.fixture()
@@ -60,6 +65,14 @@ class TestRead:
 
         assert password == "file-password"
         assert signature == engine._file_signature()
+
+    def test_admin_password_snapshot_rejects_unsupported_length(self, engine):
+        with open(engine.config_path, "a", encoding="utf-8") as config_file:
+            config_file.write(
+                f'\n[dashboard]\nadmin_password = "{"x" * (MAX_ADMIN_PASSWORD_LENGTH + 1)}"\n')
+
+        with pytest.raises(InvalidDashboardAdminPassword):
+            engine.admin_password_snapshot()
 
     def test_write_preserves_comments_and_ordering(self, engine):
         comment_line = '# reasoning_effort = "high"  # GPT-5 family knob'

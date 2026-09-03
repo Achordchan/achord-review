@@ -17,6 +17,7 @@ from pr_agent.log import get_logger
 
 _PR_URL_RE = re.compile(r"(?:pull|pull-requests|merge_requests)/(\d+)")
 _VALID_SEVERITIES = {"P0", "P1", "P2", "P3"}
+_MAX_SQLITE_INTEGER = 2 ** 63 - 1
 
 
 def _parse_pr_url(pr_url: str) -> tuple:
@@ -194,6 +195,7 @@ async def review_heartbeat_loop(request_id: str, interval_seconds: Optional[floa
 
 def _as_int(value) -> Optional[int]:
     try:
-        return int(str(value).strip())
+        number = int(str(value).strip())
+        return number if 1 <= number <= _MAX_SQLITE_INTEGER else None
     except (TypeError, ValueError):
         return None
