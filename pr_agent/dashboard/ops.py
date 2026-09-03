@@ -9,6 +9,7 @@ Probes (LLM relay, GitHub App credential, storage) never raise.
 
 import asyncio
 import fcntl
+import hashlib
 import os
 import signal
 import subprocess
@@ -28,6 +29,13 @@ REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "").strip()
 # when the container actually carries a restart policy (the shipped compose does).
 SELF_RESTART_ENABLED = os.environ.get("ACHORD_REVIEW_SELF_RESTART", "").strip().lower() in (
     "1", "true", "yes", "on")
+# The dependency-defining files, and where the image keeps the copy it was built
+# from (see docker/Dockerfile). A restart only re-imports Python — it cannot
+# install packages — so when a mounted checkout's dependencies diverge from the
+# running image's, an in-place restart would boot code against stale deps and, under
+# `restart: unless-stopped`, loop. We compare fingerprints to detect and block that.
+DEPS_FILES = ("requirements.txt", "pyproject.toml")
+DEPS_BAKED_DIR = os.environ.get("ACHORD_DEPS_BAKED_DIR", "/app/.deps-baked")
 GIT_PULL_TIMEOUT_SECONDS = 120
 GIT_FETCH_TIMEOUT_SECONDS = 45
 GIT_PREFLIGHT_TIMEOUT_SECONDS = 5
@@ -187,6 +195,18 @@ def prepare_restart() -> tuple[Dict[str, Any], Optional[_RestartTicket]]:
     if lock_file is None:
         lock_context.__exit__(None, None, None)
         return _not_started("另一项运维操作正在执行，容器重启未发起"), None
+    # Refuse to boot a mounted checkout against dependencies the running image lacks
+    # — an import failure there would loop under `restart: unless-stopped`. Enforced
+    # here so every restart path (ops page, config-save, version panel) is covered.
+    try:
+        needs_rebuild = rebuild_required()
+    except (OSError, subprocess.TimeoutExpired):
+        needs_rebuild = False
+    if needs_rebuild:
+        lock_context.__exit__(None, None, None)
+        return _not_started(
+            "依赖与运行镜像不一致，重启已被阻止：请先在宿主机 docker compose up -d --build，"
+            "再重启以避免重启循环"), None
     capability = restart_capability()
     if not capability["available"]:
         lock_context.__exit__(None, None, None)
@@ -258,19 +278,47 @@ def git_pull_capability() -> Dict[str, Any]:
     return {"available": True, "reason": "已连接受控 Git 工作区，仅允许 fast-forward 更新。"}
 
 
-# A code-only update takes effect on restart; a change to any of these means the
-# installed environment is stale and only a host image rebuild will apply it.
-DEP_SENTINEL_FILES = ("requirements.txt", "pyproject.toml", "docker/Dockerfile", "Dockerfile")
+def _compute_deps_fingerprint(base_dir: str) -> Optional[str]:
+    """Hash the dependency-defining files under base_dir, or None if unreadable.
+
+    A missing file is folded into the hash as an explicit marker, so adding or
+    removing one still changes the fingerprint; an unreadable directory yields
+    None so the caller treats the comparison as inconclusive rather than divergent.
+    """
+    digest = hashlib.sha256()
+    saw_a_file = False
+    for name in DEPS_FILES:
+        path = os.path.join(base_dir, name)
+        try:
+            with open(path, "rb") as handle:
+                content = handle.read()
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(content)
+            digest.update(b"\0")
+            saw_a_file = True
+        except FileNotFoundError:
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0<missing>\0")
+        except OSError:
+            return None
+    return digest.hexdigest() if saw_a_file else None
 
 
-def _dependencies_changed(before_sha: str) -> bool:
-    """True when the pull touched a dependency/build file the running image baked in."""
-    rc, out = _git_text(
-        ["diff", "--name-only", f"{before_sha}..HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
-    if rc != 0:
+def rebuild_required() -> bool:
+    """True when the mounted checkout's dependencies differ from the running image.
+
+    Stateless by design: recomputed on every call, so it survives a panel reload,
+    covers every restart entry point, and clears itself once a host rebuild bakes
+    the new dependencies into the image. Inconclusive reads never block a restart.
+    """
+    if not REPO_DIR:
         return False
-    changed = set(out.splitlines())
-    return any(sentinel in changed for sentinel in DEP_SENTINEL_FILES)
+    baked = _compute_deps_fingerprint(DEPS_BAKED_DIR)
+    checkout = _compute_deps_fingerprint(REPO_DIR)
+    if baked is None or checkout is None:
+        return False
+    return baked != checkout
 
 
 def git_pull() -> Dict[str, Any]:
@@ -281,21 +329,24 @@ def git_pull() -> Dict[str, Any]:
         if lock_file is None:
             return _not_started("另一项运维操作正在执行，git pull 未发起")
         try:
-            _, before_sha = _git_text(["rev-parse", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
             result = _run_bounded_command(
                 ["git", "-C", REPO_DIR, "pull", "--ff-only"],
                 cwd=REPO_DIR, timeout_seconds=GIT_PULL_TIMEOUT_SECONDS,
                 lock_file=lock_file)
-            result["dependencies_changed"] = False
-            if result.get("exit_code") == 0 and before_sha:
-                if _dependencies_changed(before_sha):
-                    result["dependencies_changed"] = True
-                    result["output"].append(
-                        "检测到依赖/构建文件变更（requirements.txt 等），仅重启不生效，"
-                        "需在宿主机执行 docker compose up -d --build")
-            return result
         except OSError:
             return _not_started("git 或代码目录不可用，git pull 未发起")
+        # The dependency check must never turn a completed pull into a failure:
+        # any error here is reported conservatively as "rebuild required", not raised.
+        try:
+            result["dependencies_changed"] = rebuild_required()
+        except (OSError, subprocess.TimeoutExpired):
+            result["dependencies_changed"] = True
+            result["output"].append("无法确认依赖是否变更，保守要求在宿主机重建镜像")
+        if result.get("dependencies_changed"):
+            result["output"].append(
+                "检测到依赖与运行镜像不一致，仅重启不生效且会被阻止，"
+                "需在宿主机执行 docker compose up -d --build")
+        return result
 
 
 def _git_text(args: List[str], timeout_seconds: int) -> tuple[int, str]:

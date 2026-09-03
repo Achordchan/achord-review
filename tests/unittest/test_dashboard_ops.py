@@ -704,21 +704,77 @@ def test_execute_restart_self_mode_signals_pid_one(monkeypatch):
     assert signals == [(1, ops.signal.SIGTERM)]
 
 
+def _completed_pull(*args, **kwargs):
+    return {"started": True, "completed": True, "exit_code": 0,
+            "timed_out": False, "output": ["Updated"]}
+
+
 def test_git_pull_flags_dependency_changes(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
     monkeypatch.setattr(
         ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
-    monkeypatch.setattr(
-        ops, "_run_bounded_command",
-        lambda *args, **kwargs: {
-            "started": True, "completed": True, "exit_code": 0,
-            "timed_out": False, "output": ["Updated"],
-        })
-    monkeypatch.setattr(ops, "_git_text", lambda args, timeout: (
-        (0, "oldsha") if args[:1] == ["rev-parse"]
-        else (0, "requirements.txt\npr_agent/foo.py")))
+    monkeypatch.setattr(ops, "_run_bounded_command", _completed_pull)
+    monkeypatch.setattr(ops, "rebuild_required", lambda: True)
 
     result = ops.git_pull()
 
     assert result["dependencies_changed"] is True
-    assert any("重建镜像" in line or "--build" in line for line in result["output"])
+    assert any("--build" in line for line in result["output"])
+
+
+def test_git_pull_survives_a_dependency_check_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_run_bounded_command", _completed_pull)
+
+    def _timeout():
+        raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+    monkeypatch.setattr(ops, "rebuild_required", _timeout)
+
+    result = ops.git_pull()
+
+    # A completed pull is never turned into a failure; the check degrades to
+    # a conservative rebuild-required.
+    assert result["completed"] is True
+    assert result["exit_code"] == 0
+    assert result["dependencies_changed"] is True
+
+
+def test_rebuild_required_compares_baked_and_checkout_fingerprints(monkeypatch, tmp_path):
+    baked = tmp_path / "baked"
+    checkout = tmp_path / "checkout"
+    baked.mkdir()
+    checkout.mkdir()
+    (baked / "requirements.txt").write_text("requests==1\n")
+    (baked / "pyproject.toml").write_text("[project]\n")
+    (checkout / "requirements.txt").write_text("requests==1\n")
+    (checkout / "pyproject.toml").write_text("[project]\n")
+    monkeypatch.setattr(ops, "REPO_DIR", str(checkout))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+
+    assert ops.rebuild_required() is False
+
+    (checkout / "requirements.txt").write_text("requests==2\n")
+    assert ops.rebuild_required() is True
+
+
+def test_rebuild_required_is_inconclusive_without_a_baked_copy(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(tmp_path / "missing"))
+    # No baked fingerprint to compare against — never block on a guess.
+    assert ops.rebuild_required() is False
+
+
+def test_prepare_restart_is_blocked_when_a_rebuild_is_required(monkeypatch):
+    monkeypatch.setattr(ops, "rebuild_required", lambda: True)
+    unexpected = []
+    monkeypatch.setattr(ops.subprocess, "run", lambda *a, **k: unexpected.append(a))
+
+    result, ticket = ops.prepare_restart()
+
+    assert result["started"] is False
+    assert ticket is None
+    assert "重启已被阻止" in result["output"][0]
+    assert unexpected == []

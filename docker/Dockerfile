@@ -6,7 +6,13 @@ WORKDIR /app
 ADD pyproject.toml .
 ADD requirements.txt .
 ADD docs docs
-RUN pip install --no-cache-dir . && rm pyproject.toml requirements.txt
+# Keep a copy of the dependency-defining files the image was built from, so the
+# dashboard can compare them against a mounted checkout and refuse an in-place
+# restart when a pulled update needs packages this image does not carry.
+RUN pip install --no-cache-dir . \
+    && mkdir -p /app/.deps-baked \
+    && cp pyproject.toml requirements.txt /app/.deps-baked/ \
+    && rm pyproject.toml requirements.txt
 ENV PYTHONPATH=/app
 
 FROM base AS github_app
