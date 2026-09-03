@@ -40,9 +40,10 @@ LOCKOUT_SECONDS = 15 * 60
 TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 
 # Session and lockout state is persisted in the dashboard SQLite database so
-# login remains stable across gunicorn workers. Only SHA-256 digests are stored;
-# bearer tokens and source addresses never enter the database as credentials.
+# login remains stable across gunicorn workers. Bearer tokens and source
+# addresses enter the database only as one-way identifiers, never as credentials.
 MAX_LOCKOUT_KEYS = 10_000
+_ENV_PASSWORD_SIGNATURE_KEY = secrets.token_bytes(32)
 _password_sync_state = {
     "db_path": "", "password": None, "generation": None, "signature": None,
 }
@@ -73,7 +74,16 @@ def _admin_password_snapshot() -> tuple[str, tuple | None]:
         or os.environ.get("DASHBOARD__ADMIN_PASSWORD", "")
     )
     if password:
-        signature = ("environment", hashlib.sha256(password.encode("utf-8")).hexdigest())
+        # This is an ephemeral change detector, not a password verifier. Keying
+        # it prevents the signature from becoming an offline password oracle.
+        signature = (
+            "environment",
+            hmac.new(
+                _ENV_PASSWORD_SIGNATURE_KEY,
+                password.encode("utf-8"),
+                hashlib.sha256,
+            ).digest(),
+        )
         return password, signature
     return get_config_engine().admin_password_snapshot()
 
