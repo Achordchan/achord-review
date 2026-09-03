@@ -140,7 +140,7 @@ def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.gather(task)
 
     asyncio.run(scenario())
 

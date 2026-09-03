@@ -43,7 +43,6 @@ TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
 # login remains stable across gunicorn workers. Bearer tokens and source
 # addresses enter the database only as one-way identifiers, never as credentials.
 MAX_LOCKOUT_KEYS = 10_000
-_ENV_PASSWORD_SIGNATURE_KEY = secrets.token_bytes(32)
 _password_sync_state = {
     "db_path": "", "password": None, "generation": None, "signature": None,
 }
@@ -69,22 +68,14 @@ def _admin_password() -> str:
 
 
 def _admin_password_snapshot() -> tuple[str, tuple | None]:
-    password = (
-        os.environ.get("DASHBOARD_ADMIN_PASSWORD", "")
-        or os.environ.get("DASHBOARD__ADMIN_PASSWORD", "")
-    )
-    if password:
-        # This is an ephemeral change detector, not a password verifier. Keying
-        # it prevents the signature from becoming an offline password oracle.
-        signature = (
-            "environment",
-            hmac.new(
-                _ENV_PASSWORD_SIGNATURE_KEY,
-                password.encode("utf-8"),
-                hashlib.sha256,
-            ).digest(),
-        )
-        return password, signature
+    for variable_name in ("DASHBOARD_ADMIN_PASSWORD", "DASHBOARD__ADMIN_PASSWORD"):
+        password = os.environ.get(variable_name, "")
+        if password:
+            # The password itself is compared in constant time at every cache
+            # and request boundary. The signature only identifies its source;
+            # deriving another value from the password would create an
+            # unnecessary offline password oracle.
+            return password, ("environment", variable_name)
     return get_config_engine().admin_password_snapshot()
 
 

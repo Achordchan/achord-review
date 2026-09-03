@@ -99,6 +99,7 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int,
 
     reader = threading.Thread(target=_drain, name="dashboard-git-output", daemon=True)
     reader.start()
+    exit_code = None
     timed_out = False
     kill_wait_expired = False
     lock_retained = False
@@ -109,12 +110,12 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int,
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
+            # The process exited between wait() timing out and signal delivery.
             pass
         try:
-            exit_code = proc.wait(timeout=5)
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             kill_wait_expired = True
-            exit_code = None
             lock_retained = _retain_operation_lock(lock_file, proc)
     reader.join(timeout=5)
     output = output_tail.decode("utf-8", errors="replace").splitlines()

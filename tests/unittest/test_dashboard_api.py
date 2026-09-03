@@ -52,21 +52,22 @@ def _auth_header(client):
 
 
 class TestAuth:
-    def test_environment_password_signature_is_keyed_and_tracks_rotation(self, monkeypatch):
-        monkeypatch.setattr(dashboard_api, "_ENV_PASSWORD_SIGNATURE_KEY", b"k" * 32)
+    def test_environment_password_snapshot_identifies_source_without_derived_hash(self, monkeypatch):
         monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "first-password")
+        monkeypatch.setenv("DASHBOARD__ADMIN_PASSWORD", "fallback-password")
 
         password, signature = dashboard_api._admin_password_snapshot()
         _, repeated_signature = dashboard_api._admin_password_snapshot()
 
         assert password == "first-password"
         assert signature == repeated_signature
-        assert signature[0] == "environment"
-        assert b"first-password" not in signature[1]
+        assert signature == ("environment", "DASHBOARD_ADMIN_PASSWORD")
+        assert password not in signature
 
-        monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "second-password")
-        _, rotated_signature = dashboard_api._admin_password_snapshot()
-        assert rotated_signature != signature
+        monkeypatch.delenv("DASHBOARD_ADMIN_PASSWORD")
+        fallback_password, fallback_signature = dashboard_api._admin_password_snapshot()
+        assert fallback_password == "fallback-password"
+        assert fallback_signature == ("environment", "DASHBOARD__ADMIN_PASSWORD")
 
     def test_login_success_and_me(self, client):
         auth = _auth_header(client)

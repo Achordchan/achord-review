@@ -747,7 +747,7 @@ async def test_terminal_audit_finishes_before_cancellation_propagates():
     release.set()
 
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.gather(task)
     assert completed == [True]
 
 

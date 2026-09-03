@@ -224,7 +224,6 @@ class ConfigEngine:
         except Exception as e:
             get_logger().warning(f"Dashboard config write failed, error: {e}")
             return False, [f"failed to write config: {e}"]
-        return True, []
 
     @contextmanager
     def _config_write_lock(self):
