@@ -191,7 +191,7 @@ async def _stop_audit_heartbeat(task: Optional[asyncio.Task]) -> None:
     try:
         await asyncio.gather(task)
     except asyncio.CancelledError:
-        pass
+        pass  # expected after cancelling the heartbeat task owned by this review
     except Exception as e:
         get_logger().debug(f"Dashboard audit heartbeat stop failed, error: {e}")
 
