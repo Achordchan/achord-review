@@ -21,7 +21,16 @@ _NO_SECURITY_PREFIXES = (
     "no security concern",
     "no security concerns",
     "no concerns",
+    "no finding",
+    "no findings",
     "no issues",
+    "no vulnerabilities",
+    "no vulnerability",
+    "not detected",
+    "not found",
+    "not identified",
+    "nothing found",
+    "nothing identified",
     "there are no",
     "there is no",
 )
@@ -64,20 +73,29 @@ def _normalize_finding(issue: Any, require_severity: bool) -> dict | None:
     return normalized
 
 
-def _is_explicit_security_concern(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
+def _is_negative_security_summary(value: str) -> bool:
     normalized = " ".join(value.strip().lower().split())
-    is_negative = normalized == "no" or normalized.startswith("no:") or any(
+    return normalized == "no" or normalized.startswith("no:") or any(
         normalized == prefix
         or normalized.startswith(f"{prefix} ")
         or normalized.startswith(f"{prefix}:")
         for prefix in _NO_SECURITY_PREFIXES
     )
-    if not normalized or is_negative:
+
+
+def _is_explicit_security_concern(value: Any) -> bool:
+    if not isinstance(value, str):
         return False
-    heading, separator, details = value.partition(":")
-    return bool(separator and heading.strip() and details.strip())
+    normalized = " ".join(value.strip().lower().split())
+    if not normalized or _is_negative_security_summary(normalized):
+        return False
+    heading, separator, details = normalized.partition(":")
+    return bool(
+        separator
+        and heading.strip()
+        and details.strip()
+        and not _is_negative_security_summary(details)
+    )
 
 
 def recover_missing_review_wrapper(data: Any, *, require_severity: bool = False) -> tuple[Any, bool]:

@@ -216,6 +216,47 @@ def test_audit_start_timeout_abandons_slow_metadata_without_late_running_row(mon
     assert started_records == []
 
 
+def test_audit_start_timeout_returns_while_storage_stalls_and_closes_late_record(monkeypatch):
+    storage_started = threading.Event()
+    release_storage = threading.Event()
+    closed = {}
+
+    class Reviewer:
+        pr_url = "https://github.com/a/b/pull/1"
+        git_provider = type("Provider", (), {"pr": {"title": "Title"}})()
+
+    def delayed_started(**kwargs):
+        storage_started.set()
+        assert release_storage.wait(timeout=2)
+        return "late-request-id"
+
+    async def scenario():
+        record_closed = asyncio.Event()
+
+        async def fake_failed(request_id, error):
+            closed["request_id"] = request_id
+            closed["error"] = str(error)
+            record_closed.set()
+
+        monkeypatch.setattr(pr_reviewer, "AUDIT_START_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(audit, "review_started", delayed_started)
+        monkeypatch.setattr(pr_reviewer, "_audit_failed", fake_failed)
+
+        task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
+        assert await asyncio.to_thread(storage_started.wait, 1)
+        assert await asyncio.wait_for(task, 0.2) == ""
+        assert closed == {}
+
+        release_storage.set()
+        await asyncio.wait_for(record_closed.wait(), 1)
+
+    asyncio.run(scenario())
+    assert closed == {
+        "request_id": "late-request-id",
+        "error": "dashboard audit start timed out",
+    }
+
+
 def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
     started = threading.Event()
     release = threading.Event()

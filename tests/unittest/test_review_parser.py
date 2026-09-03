@@ -110,6 +110,9 @@ def test_missing_authentication_heading_is_an_explicit_security_concern():
     "There are no security concerns",
     "N/A",
     "None",
+    "No vulnerabilities: none found",
+    "Vulnerabilities: none",
+    "Security findings: nothing identified",
     "Possible concern without details",
 ])
 def test_rejects_unwrapped_security_only_response_without_positive_concern(
