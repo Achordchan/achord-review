@@ -389,3 +389,76 @@ def test_review_metadata_leaves_untouched_columns_alone(tmp_path):
     assert row["pr_title"] == "Fix the thing"
     assert row["commit_sha"] == "def456"
     assert row["status"] == "RUNNING"
+
+
+def _pending_audit_start(request_id):
+    """Register a start task that never completes, as a hung SQLite volume would."""
+    pending = asyncio.create_task(asyncio.sleep(3600))
+    pr_reviewer._AUDIT_START_TASKS[request_id] = pending
+    return pending
+
+
+def test_metadata_backfill_gives_up_on_a_pending_audit_start(monkeypatch):
+    # The audit start deadline exists so a hung volume cannot stall the review;
+    # the backfill runs on that same path and must honour it.
+    calls = []
+
+    class Reviewer:
+        pr_url = "https://github.com/a/b/pull/1"
+        git_provider = type("GitProvider", (), {"get_head_commit_sha": lambda self: "abc123"})()
+        vars = {"title": "Fix the thing"}
+
+    async def fake_metadata(*args, **kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(audit, "review_metadata", fake_metadata)
+    monkeypatch.setattr(pr_reviewer, "AUDIT_START_TIMEOUT_SECONDS", 0.01)
+
+    async def scenario():
+        pending = _pending_audit_start("request-id")
+        try:
+            await asyncio.wait_for(
+                pr_reviewer._audit_metadata("request-id", Reviewer()), timeout=5)
+            assert calls == []
+            # still registered, so the terminal write can serialize behind it
+            assert pr_reviewer._AUDIT_START_TASKS.get("request-id") is pending
+        finally:
+            pr_reviewer._AUDIT_START_TASKS.pop("request-id", None)
+            pending.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_waiter_leaves_the_pending_audit_start_registered():
+    # Dropping it here would let the cancellation path write FAILED before the
+    # row exists; the late insert would then strand a RUNNING review.
+    async def scenario():
+        pending = _pending_audit_start("request-id")
+        try:
+            waiter = asyncio.create_task(pr_reviewer._wait_for_audit_start("request-id"))
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.gather(waiter)
+
+            assert pr_reviewer._AUDIT_START_TASKS.get("request-id") is pending
+        finally:
+            pr_reviewer._AUDIT_START_TASKS.pop("request-id", None)
+            pending.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_completed_audit_start_is_retired_after_the_wait():
+    async def scenario():
+        async def _insert():
+            return "request-id"
+
+        pr_reviewer._AUDIT_START_TASKS["request-id"] = asyncio.create_task(_insert())
+        try:
+            assert await pr_reviewer._wait_for_audit_start("request-id") is True
+            assert "request-id" not in pr_reviewer._AUDIT_START_TASKS
+        finally:
+            pr_reviewer._AUDIT_START_TASKS.pop("request-id", None)
+
+    asyncio.run(scenario())

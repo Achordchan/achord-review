@@ -143,18 +143,38 @@ def _track_audit_task(task: asyncio.Task) -> None:
     task.add_done_callback(_AUDIT_BACKGROUND_TASKS.discard)
 
 
-async def _wait_for_audit_start(request_id: str) -> bool:
-    """Serialize a terminal write behind a start that exceeded its foreground deadline."""
-    start_task = _AUDIT_START_TASKS.pop(request_id, None)
+async def _wait_for_audit_start(request_id: str, timeout_seconds: Optional[float] = None) -> bool:
+    """Serialize a write behind a start that exceeded its foreground deadline.
+
+    The pending task stays registered until it actually finishes: a caller that
+    gives up — cancelled, or out of time — must leave the insert discoverable,
+    or the cancellation path writes FAILED before the row exists and the late
+    insert leaves a stale RUNNING review behind. `timeout_seconds` bounds the
+    wait for callers on the review's own path, which must never block on
+    storage; terminal writes still wait as long as it takes.
+    """
+    start_task = _AUDIT_START_TASKS.get(request_id)
     if start_task is None:
         return True
     try:
-        return await asyncio.shield(start_task) == request_id
+        if timeout_seconds is None:
+            started_id = await asyncio.shield(start_task)
+        else:
+            started_id = await asyncio.wait_for(
+                asyncio.shield(start_task), timeout=timeout_seconds)
     except asyncio.CancelledError:
-        raise
+        raise  # leave the task registered for the cancellation path
+    except TimeoutError:
+        get_logger().debug(
+            f"Dashboard audit start still pending after {timeout_seconds:g} seconds; "
+            "continuing without it")
+        return False
     except Exception as e:
+        _AUDIT_START_TASKS.pop(request_id, None)
         get_logger().debug(f"Dashboard audit start did not complete, error: {e}")
         return False
+    _AUDIT_START_TASKS.pop(request_id, None)
+    return started_id == request_id
 
 
 async def _await_terminal_audit(coro) -> None:
@@ -230,7 +250,8 @@ async def _audit_metadata(request_id: str, reviewer: "PRReviewer") -> None:
     head SHA come from provider state the review itself materialized, so the
     dashboard history stops rendering every row without a title or commit.
     """
-    if not request_id or not await _wait_for_audit_start(request_id):
+    if not request_id or not await _wait_for_audit_start(
+            request_id, timeout_seconds=AUDIT_START_TIMEOUT_SECONDS):
         return
     try:
         from pr_agent.dashboard.audit import review_metadata
