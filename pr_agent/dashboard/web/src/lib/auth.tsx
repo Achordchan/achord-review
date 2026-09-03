@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { api, AUTH_INVALIDATED_EVENT, storeToken } from './api'
+import { api, ApiError, AUTH_INVALIDATED_EVENT, storeToken } from './api'
 import type { SessionInfo } from './types'
+import { useToast } from '../components/Toast'
 
 type AuthState = {
   authenticated: boolean
@@ -15,6 +16,7 @@ type AuthState = {
 const AuthContext = createContext<AuthState | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const toast = useToast()
   const [state, setState] = useState({
     authenticated: false,
     loading: true,
@@ -29,14 +31,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const data = await api.get<SessionInfo>('/api/v1/dashboard/auth/me')
       setState({ authenticated: true, loading: false, model: data.model, version: data.version })
-    } catch {
-      storeToken(null)
-      setState((prev) => ({ ...prev, authenticated: false, loading: false }))
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        storeToken(null)
+        setState((prev) => ({ ...prev, authenticated: false, loading: false }))
+        throw error
+      }
+      setState((prev) => ({ ...prev, loading: false }))
+      toast.error(
+        '会话状态刷新失败',
+        error instanceof ApiError ? error.message : '网络或服务暂时不可用，请稍后重试',
+      )
     }
-  }, [])
+  }, [toast])
 
   useEffect(() => {
-    void refresh()
+    void refresh().catch(() => undefined)
   }, [refresh])
 
   useEffect(() => {
@@ -50,6 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (password: string) => {
     const body = await api.post<{ authenticated: boolean }>('/api/v1/dashboard/auth/login', { password })
     if (body.authenticated) {
+      setState((prev) => ({ ...prev, authenticated: true, loading: false }))
       await refresh()
     }
   }, [refresh])

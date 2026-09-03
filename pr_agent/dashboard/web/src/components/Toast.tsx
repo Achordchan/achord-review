@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { CheckCircle2, Info, TriangleAlert, X } from 'lucide-react'
 
@@ -27,11 +27,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
 
-  const value = {
+  const value = useMemo(() => ({
     success: (title: string, detail?: string) => push('success', title, detail),
     error: (title: string, detail?: string) => push('error', title, detail),
     info: (title: string, detail?: string) => push('info', title, detail),
-  }
+  }), [push])
 
   return (
     <ToastContext.Provider value={value}>
