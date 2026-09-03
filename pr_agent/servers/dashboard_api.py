@@ -534,7 +534,7 @@ async def list_reviews(request: Request, dashboard_session: Optional[str] = Cook
                        trigger_type: str = "", limit: int = 50, offset: int = 0):
     await require_auth(request, dashboard_session)
     limit = max(1, min(limit, 200))
-    offset = max(0, offset)
+    offset = max(0, min(offset, MAX_SQLITE_INTEGER))
     data = await _dashboard_storage_read(
         "list_reviews", repo=repo, status=status, verdict=verdict,
         trigger_type=trigger_type, limit=limit, offset=offset)

@@ -704,6 +704,23 @@ class TestProtectedRoutes:
         resp = client.get("/api/v1/dashboard/reviews/99999", headers=auth)
         assert resp.status_code == 404
 
+    def test_reviews_list_clamps_offset_to_sqlite_range(self, client, storage, monkeypatch):
+        captured = {}
+        original = storage.list_reviews
+
+        def capture_offset(**kwargs):
+            captured["offset"] = kwargs["offset"]
+            return original(**kwargs)
+
+        monkeypatch.setattr(storage, "list_reviews", capture_offset)
+        auth = _auth_header(client)
+
+        resp = client.get(f"/api/v1/dashboard/reviews?offset={2 ** 80}", headers=auth)
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["items"] == []
+        assert captured["offset"] == dashboard_api.MAX_SQLITE_INTEGER
+
     @pytest.mark.parametrize("review_id", [-1, 2 ** 63, 2 ** 80])
     def test_review_detail_rejects_ids_outside_sqlite_range(
             self, client, storage, monkeypatch, review_id):
