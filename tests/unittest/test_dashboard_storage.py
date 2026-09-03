@@ -479,6 +479,29 @@ class TestSharedAuthState:
         other.revoke_session("token-hash")
         assert not storage.session_is_valid("token-hash", now=1_000_000_000)
 
+    def test_session_creation_evicts_oldest_rows_at_global_cap(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module, "MAX_DASHBOARD_SESSIONS", 3)
+        assert storage.sync_admin_password("shared-password")
+
+        for index in range(5):
+            assert storage.create_session(f"session-{index}", 4_000_000_000)
+
+        rows = storage._read(
+            "SELECT token_hash FROM dashboard_sessions ORDER BY created_at, rowid")
+        assert {row["token_hash"] for row in rows} == {"session-2", "session-3", "session-4"}
+        assert not storage.session_is_valid("session-0", now=1_000_000_000)
+        assert storage.session_is_valid("session-4", now=1_000_000_000)
+
+    def test_password_bound_session_creation_uses_same_global_cap(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module, "MAX_DASHBOARD_SESSIONS", 2)
+
+        for index in range(3):
+            assert storage.create_session_for_password(
+                f"session-{index}", 4_000_000_000, "shared-password")
+
+        rows = storage._read("SELECT token_hash FROM dashboard_sessions")
+        assert {row["token_hash"] for row in rows} == {"session-1", "session-2"}
+
     def test_batch_revocation_requires_an_existing_session(self, storage):
         assert storage.sync_admin_password("shared-password")
         assert storage.revoke_sessions([]) is False

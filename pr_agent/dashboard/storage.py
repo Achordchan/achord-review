@@ -43,6 +43,7 @@ MAX_REVIEW_FINDINGS_BYTES = min(MAX_REVIEW_PAYLOAD_BYTES, 512 * 1024)
 MAX_FINDING_FILE_BYTES = 4 * 1024
 MAX_FINDING_SUMMARY_BYTES = 16 * 1024
 MAX_FINDING_SUGGESTION_BYTES = 64 * 1024
+MAX_DASHBOARD_SESSIONS = 1000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reviews (
@@ -402,6 +403,7 @@ class DashboardStorage:
                 "INSERT OR REPLACE INTO dashboard_sessions"
                 " (token_hash, expires_at, password_generation, created_at) VALUES (?, ?, ?, ?)",
                 (token_hash, expires_at, int(row["generation"]), _utcnow()))
+            self._retain_dashboard_sessions(conn)
 
         return self._transaction(_create, "session creation")
 
@@ -417,8 +419,18 @@ class DashboardStorage:
                 "INSERT OR REPLACE INTO dashboard_sessions"
                 " (token_hash, expires_at, password_generation, created_at) VALUES (?, ?, ?, ?)",
                 (token_hash, expires_at, generation, _utcnow()))
+            self._retain_dashboard_sessions(conn)
 
         return self._transaction(_create, "password-bound session creation")
+
+    @staticmethod
+    def _retain_dashboard_sessions(conn: sqlite3.Connection) -> None:
+        """Keep only the newest bounded set of unexpired administrator sessions."""
+        conn.execute(
+            "DELETE FROM dashboard_sessions WHERE token_hash IN"
+            " (SELECT token_hash FROM dashboard_sessions"
+            " ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
+            (MAX_DASHBOARD_SESSIONS,))
 
     def session_is_valid(self, token_hash: str, now: Optional[int] = None) -> bool:
         rows = self._read(
