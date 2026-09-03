@@ -7,29 +7,44 @@ import { api, ApiError } from '../lib/api'
 import type { OpsCapabilities, OpsResult, VersionInfo } from '../lib/types'
 import { useToast } from './Toast'
 
+const HEALTH_URL = '/api/v1/dashboard/auth/me'
+
+async function serviceIsUp(): Promise<boolean> {
+  // Any non-5xx answer (200 or even 401) means the process is serving again.
+  try {
+    const res = await fetch(HEALTH_URL, { cache: 'no-store', credentials: 'same-origin' })
+    return res.status < 500
+  } catch {
+    return false
+  }
+}
+
 /**
  * After a restart the container is briefly unreachable (nginx answers 5xx or the
- * socket refuses). Poll the authenticated endpoint until it responds again, then
- * reload. The HttpOnly session cookie stays in the browser and the session row
- * survives the restart in mounted storage, so the reload lands back logged in —
- * no re-login. Any non-5xx answer (200 or even 401) means the service is back.
+ * socket refuses). Reload once it is back so newly pulled frontend code loads.
+ *
+ * Two phases so we don't mistake the still-draining old process for the restarted
+ * one: first wait until the service is observed DOWN, then wait until it is back.
+ * Accepting the first sub-500 answer without an observed outage would, on a slow
+ * shutdown, hit the old process and reload prematurely. If the outage is never seen
+ * within its window (a very fast restart), fall through and recover on the next
+ * healthy answer anyway. The HttpOnly session cookie and the persisted session row
+ * both survive the restart, so the reload lands back logged in — no re-login.
  */
 async function waitForServiceThenReload(maxWaitMs = 150_000) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-  await sleep(3_000) // let the container actually go down first
-  const deadline = Date.now() + maxWaitMs
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch('/api/v1/dashboard/auth/me', {
-        cache: 'no-store',
-        credentials: 'same-origin',
-      })
-      if (res.status < 500) {
-        window.location.reload()
-        return
-      }
-    } catch {
-      // still restarting — keep polling
+  const started = Date.now()
+  // Phase 1: observe the outage (bounded, so a fast restart we miss isn't fatal).
+  const outageDeadline = Date.now() + 30_000
+  while (Date.now() < outageDeadline) {
+    if (!(await serviceIsUp())) break
+    await sleep(1_000)
+  }
+  // Phase 2: wait for recovery.
+  while (Date.now() - started < maxWaitMs) {
+    if (await serviceIsUp()) {
+      window.location.reload()
+      return
     }
     await sleep(2_000)
   }

@@ -313,14 +313,20 @@ def rebuild_required() -> bool:
 
     Stateless by design: recomputed on every call, so it survives a panel reload,
     covers every restart entry point, and clears itself once a host rebuild bakes
-    the new dependencies into the image. Inconclusive reads never block a restart.
+    the new dependencies into the image.
+
+    Only meaningful when a checkout is mounted (REPO_DIR set) — standard deployments
+    never run pulled code, so they are never blocked. Within an opt-in deployment it
+    fails closed: if the baked or checkout fingerprint cannot be read (e.g. an image
+    built before this change is reused under a mounted checkout), it cannot prove the
+    dependencies match, so it requires a rebuild rather than risk a restart loop.
     """
     if not REPO_DIR:
         return False
     baked = _compute_deps_fingerprint(DEPS_BAKED_DIR)
     checkout = _compute_deps_fingerprint(REPO_DIR)
     if baked is None or checkout is None:
-        return False
+        return True
     return baked != checkout
 
 
@@ -405,20 +411,28 @@ def check_update() -> Dict[str, Any]:
             if fetch_rc != 0:
                 result["reason"] = ("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300]
                 return result
+            # Every comparison must succeed before claiming a verdict: after a fetch
+            # (which may prune a deleted upstream branch) a failed rev-parse/rev-list
+            # must not be silently rendered as "already latest".
             latest_rc, latest_sha = _git_text(
                 ["rev-parse", "--short", "@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            if latest_rc != 0 or not latest_sha:
+                result["reason"] = "无法解析远端版本，上游分支可能已被删除或重命名。"
+                return result
             _, latest_subject = _git_text(
                 ["log", "-1", "--format=%s", "@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
             result["latest"] = {
-                "sha": latest_sha if latest_rc == 0 else None,
+                "sha": latest_sha,
                 "subject": latest_subject or None,
                 "branch": upstream,
             }
             behind_rc, behind = _git_text(
                 ["rev-list", "--count", "HEAD..@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
-            if behind_rc == 0 and behind.isdigit():
-                result["behind"] = int(behind)
-                result["update_available"] = int(behind) > 0
+            if behind_rc != 0 or not behind.isdigit():
+                result["reason"] = "无法比较与远端的差异，暂时无法确认更新。"
+                return result
+            result["behind"] = int(behind)
+            result["update_available"] = int(behind) > 0
             result["checked"] = True
             return result
         except (OSError, subprocess.TimeoutExpired) as e:

@@ -20,6 +20,7 @@ def test_git_pull_returns_completed_output(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
     monkeypatch.setattr(
         ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "rebuild_required", lambda: False)
     monkeypatch.setattr(
         ops, "_run_bounded_command",
         lambda *args, **kwargs: {
@@ -760,10 +761,19 @@ def test_rebuild_required_compares_baked_and_checkout_fingerprints(monkeypatch, 
     assert ops.rebuild_required() is True
 
 
-def test_rebuild_required_is_inconclusive_without_a_baked_copy(monkeypatch, tmp_path):
+def test_rebuild_required_fails_closed_without_a_baked_copy(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
     monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(tmp_path / "missing"))
-    # No baked fingerprint to compare against — never block on a guess.
+    # An image reused under a mounted checkout without baked fingerprints cannot be
+    # verified — fail closed and require a rebuild rather than risk a restart loop.
+    assert ops.rebuild_required() is True
+
+
+def test_rebuild_required_never_blocks_a_non_mounted_deployment(monkeypatch):
+    # The standard deployment runs baked code only; a missing baked dir must not
+    # start blocking its ordinary restarts.
+    monkeypatch.setattr(ops, "REPO_DIR", "")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", "/nonexistent")
     assert ops.rebuild_required() is False
 
 
@@ -807,3 +817,23 @@ def test_rebuild_required_detects_a_dockerfile_change(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
 
     assert ops.rebuild_required() is True
+
+
+def test_check_update_does_not_claim_latest_when_upstream_resolution_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    # Fetch succeeds (e.g. with prune) but the upstream ref is gone afterwards.
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "head"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet"): (0, ""),
+        ("rev-parse", "--short", "@{u}"): (128, "fatal: no upstream"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is False
+    assert result["update_available"] is False
+    assert "远端" in result["reason"]
