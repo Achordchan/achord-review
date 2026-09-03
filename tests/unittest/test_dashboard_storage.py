@@ -13,6 +13,18 @@ DashboardStorageReadError = storage_module.DashboardStorageReadError
 STALE_CLEANUP_INTERVAL_SECONDS = storage_module.STALE_CLEANUP_INTERVAL_SECONDS
 
 
+@pytest.mark.parametrize(("value", "expected"), [
+    ("0", 60),
+    ("-1", 60),
+    ("not-a-number", 6 * 3600),
+])
+def test_stale_review_interval_uses_safe_positive_value(monkeypatch, value, expected):
+    monkeypatch.setenv("DASHBOARD_STALE_REVIEW_SECONDS", value)
+
+    assert storage_module._bounded_env_int(
+        "DASHBOARD_STALE_REVIEW_SECONDS", 6 * 3600, 60) == expected
+
+
 @pytest.fixture()
 def storage(tmp_path):
     db_path = os.path.join(str(tmp_path), "test_review.db")
