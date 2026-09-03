@@ -379,7 +379,13 @@ async def auth_login(body: LoginRequest, request: Request, response: Response):
     except InvalidDashboardAdminPassword as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     if not expected:
-        await asyncio.to_thread(_sync_current_admin_password)
+        # Recording the disabled state still touches storage, so an outage here
+        # must read as the same retryable 503 the data routes return, not a 500.
+        try:
+            await asyncio.to_thread(_sync_current_admin_password)
+        except DashboardStorageReadError as e:
+            get_logger().warning(f"Dashboard auth state sync unavailable, error: {e}")
+            raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试") from e
         raise HTTPException(status_code=503, detail="管理员密码未配置（config.toml [dashboard] admin_password）")
     password_matches = hmac.compare_digest(body.password.encode("utf-8"), expected.encode("utf-8"))
     decision = await asyncio.to_thread(

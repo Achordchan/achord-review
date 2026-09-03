@@ -196,6 +196,19 @@ class TestAuth:
         assert resp.status_code == 503
         assert "暂不可用" in resp.json()["detail"]
 
+    def test_disabled_login_reports_storage_outage_as_retryable(self, client, monkeypatch):
+        # No password configured still records the disabled auth state, and a
+        # storage outage there must not surface as an unhandled 500.
+        monkeypatch.setattr(dashboard_api, "_admin_password_snapshot", lambda: ("", None))
+        monkeypatch.setattr(
+            dashboard_api, "_sync_current_admin_password",
+            lambda: (_ for _ in ()).throw(DashboardStorageReadError("volume unavailable")))
+
+        resp = client.post("/api/v1/dashboard/auth/login", json={"password": "anything"})
+
+        assert resp.status_code == 503
+        assert "暂不可用" in resp.json()["detail"]
+
     def test_login_wrong_password(self, client):
         resp = client.post("/api/v1/dashboard/auth/login", json={"password": "wrong"})
         assert resp.status_code == 401
