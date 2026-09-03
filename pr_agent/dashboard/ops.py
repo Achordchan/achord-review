@@ -16,7 +16,7 @@ import signal
 import subprocess
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any, Dict, List, Optional
 
 from pr_agent.log import get_logger
@@ -365,10 +365,8 @@ def _activate_pending_release() -> Optional[str]:
         os.replace(temporary_link, active_link)
         os.unlink(_pending_marker_path())
     finally:
-        try:
+        with suppress(FileNotFoundError):
             os.unlink(temporary_link)
-        except FileNotFoundError:
-            pass
     return pending
 
 
