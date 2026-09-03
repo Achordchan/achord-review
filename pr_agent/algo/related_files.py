@@ -22,7 +22,7 @@ having no retrieval at all:
 
 import fnmatch
 import os
-from typing import List
+from typing import List, Optional
 
 from pr_agent.algo.utils import load_yaml
 from pr_agent.config_loader import get_settings
@@ -41,6 +41,21 @@ CONTEXT_INTRO = (
     "Report an issue only where THIS PR's diff breaks or contradicts them. Do not audit these "
     "files on their own — unrelated problems inside them are out of scope."
 )
+
+# Never offered to the selector and never fetched, whatever the configuration says.
+# Candidates come from the repository tree, so a repo that tracks a credential file
+# would otherwise put it one model choice away from the review prompt — and the diff
+# feeding that choice is attacker-controlled. Over-exclusion here costs recall on a
+# file that merely sounds sensitive; under-exclusion costs a credential.
+SENSITIVE_GLOBS = [
+    "*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore", "*.kdbx", "*.ovpn", "*.asc", "*.gpg",
+    "*.env", ".env", ".env.*", "*.env.*",
+    ".npmrc", ".yarnrc", ".netrc", ".pgpass", ".my.cnf", ".htpasswd", ".git-credentials",
+    "id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*", "*.ppk", "*known_hosts*",
+    "*secret*", "*credential*", "*password*", "*passwd*", "*token*", "*apikey*", "*api_key*",
+    "service-account*.json", "serviceaccount*.json", "*-key.json", "*_key.json",
+    "*.jks.enc", "*.tfstate", "*.tfstate.*", "*.kubeconfig", "kubeconfig*",
+]
 
 # Paths that are never worth spending retrieval budget on.
 DEFAULT_EXCLUDE_GLOBS = [
@@ -88,9 +103,21 @@ def _exclude_globs() -> List[str]:
     return DEFAULT_EXCLUDE_GLOBS
 
 
-def _is_excluded(path: str, patterns: List[str]) -> bool:
-    return any(fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch("/" + path, pattern)
+def _matches_any(path: str, patterns: List[str]) -> bool:
+    basename = os.path.basename(path)
+    return any(fnmatch.fnmatch(path, pattern)
+               or fnmatch.fnmatch("/" + path, pattern)
+               or fnmatch.fnmatch(basename, pattern)
                for pattern in patterns)
+
+
+def is_sensitive_path(path: str) -> bool:
+    """Credential-bearing paths, excluded regardless of configuration."""
+    return _matches_any(path.lower(), SENSITIVE_GLOBS)
+
+
+def _is_excluded(path: str, patterns: List[str]) -> bool:
+    return is_sensitive_path(path) or _matches_any(path, patterns)
 
 
 def _provider_supports_tree(git_provider) -> bool:
@@ -218,13 +245,37 @@ def _fence_for(content: str) -> str:
     return fence
 
 
-def _render(files: dict, max_total_lines: int, max_tokens: int = 0, count_tokens=None) -> str:
-    """Assemble the context one whole file block at a time.
+def _largest_prefix_that_fits(path: str, lines: List[str], fence: str, blocks: list,
+                              assemble, fits) -> Optional[list]:
+    """The longest truncated version of this file's block that still fits, or None.
 
-    Every candidate result is measured complete, closing tag included, and a
-    block that does not fit is dropped rather than cut: a half-written block
-    would leave an open fence, and the review schema that follows would be read
-    as file content.
+    Binary search rather than arithmetic, because the binding constraint can be
+    the token count, which no line arithmetic predicts.
+    """
+    def block_for(count: int) -> list:
+        body = lines[:count] + [TRUNCATION_MARKER]
+        return [f'<file path="{path}">', fence, *body, fence, "</file>"]
+
+    low, high, best = 1, len(lines) - 1, None
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = block_for(middle)
+        if fits(assemble(blocks + [candidate])):
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def _render(files: dict, max_total_lines: int, max_tokens: int = 0, count_tokens=None) -> str:
+    """Assemble the context out of complete file blocks.
+
+    Every candidate result is measured whole, closing tag included, so the block
+    structure is always balanced — a half-written block would leave an open fence
+    and the review schema printed after it would read as file content. A file too
+    big for the budget is shortened inside its own block rather than cut off
+    mid-block, and never at the cost of the files selected after it.
     """
     if not files:
         return ""
@@ -246,25 +297,23 @@ def _render(files: dict, max_total_lines: int, max_tokens: int = 0, count_tokens
                 return False
         return True
 
-    blocks = []
+    # Two passes, so one oversized file cannot starve the rest: everything that
+    # fits whole goes in first, in the order the model asked for it, and only the
+    # leftover budget is spent truncating the ones that did not fit.
+    blocks, oversized = [], []
     for path, content in files.items():
         lines = content.splitlines()
         fence = _fence_for(content)
         block = [f'<file path="{path}">', fence, *lines, fence, "</file>"]
         if fits(assemble(blocks + [block])):
             blocks.append(block)
-            continue
+        else:
+            oversized.append((path, lines, fence))
 
-        # Try the same block with its content shortened; drop it if even that
-        # does not fit, and stop — later files are lower priority than this one.
-        room = max_total_lines - len(assemble(blocks).splitlines()) - 5
-        if room <= 1:
-            break
-        shortened = lines[:room - 1] + [TRUNCATION_MARKER]
-        block = [f'<file path="{path}">', fence, *shortened, fence, "</file>"]
-        if fits(assemble(blocks + [block])):
-            blocks.append(block)
-        break
+    for path, lines, fence in oversized:
+        shortened = _largest_prefix_that_fits(path, lines, fence, blocks, assemble, fits)
+        if shortened is not None:
+            blocks.append(shortened)
 
     return assemble(blocks) if blocks else ""
 
@@ -326,6 +375,12 @@ async def collect_related_files(git_provider, ai_handler, model: str, diff: str,
         max_lines_per_file = _int_setting("max_lines_per_file", 400, minimum=1)
         files = {}
         for path in selected:
+            if is_sensitive_path(path):
+                # Belt and braces: the candidate filter already dropped these, so
+                # arriving here means a bug or a bypass, not a configuration choice.
+                get_logger().warning("Refusing to attach a sensitive file to a review",
+                                     artifact={"path": path})
+                continue
             try:
                 content = git_provider.get_repo_file_content(path) or ""
             except Exception as e:

@@ -280,3 +280,61 @@ def test_an_offered_dotfile_survives_path_validation():
 
     assert related_files._parse_selection(
         _yaml("./.github/workflows/ci.yml", ".eslintrc"), candidates, 6) == candidates
+
+
+class TestSensitiveFilesAreNeverRetrieved:
+    @pytest.mark.parametrize("path", [
+        ".env", "deploy/.env.production", "config/service-account.json",
+        "keys/server.pem", ".npmrc", "home/id_rsa", "infra/terraform.tfstate",
+        "config/.secrets.toml", "app/db_password.txt", "ci/api_key.json",
+    ])
+    def test_a_credential_path_is_not_offered_even_with_exclusions_cleared(self, path):
+        # The candidate list comes from the repository tree, so a repo that tracks
+        # a credential file would otherwise put it one model choice away.
+        get_settings().related_files.exclude_globs = []
+
+        assert related_files.is_sensitive_path(path) is True
+        assert related_files._rank_candidates([path, "src/app.py"], [], 50) == ["src/app.py"]
+
+    @pytest.mark.asyncio
+    async def test_a_selected_credential_path_is_still_refused_at_fetch_time(self):
+        # Defence in depth: reaching the fetch means a bug upstream, not a choice.
+        provider = FakeProvider([".env", "src/app.py"], {".env": "TOKEN=supersecret"})
+        handler = FakeHandler(_yaml(".env"))
+
+        rendered = await related_files.build_related_files(
+            provider, handler, "gpt-5", "diff", [])
+
+        assert "supersecret" not in rendered
+        assert ".env" not in provider.fetched
+
+    def test_ordinary_source_files_are_still_offered(self):
+        tree = ["src/token_service.py", "src/app.py"]
+
+        # A file whose *name* merely mentions a secret is excluded too: losing it
+        # costs recall, keeping it risks a credential.
+        assert related_files._rank_candidates(tree, [], 50) == ["src/app.py"]
+
+
+class TestOversizedFiles:
+    def _counter(self):
+        def count(text, force_accurate=False):
+            return len(text.splitlines()) * 10
+        return count
+
+    def test_a_file_over_the_token_budget_is_shortened_not_dropped(self):
+        rendered = related_files._render(
+            {"big.py": "\n".join(f"line {i}" for i in range(400))},
+            max_total_lines=800, max_tokens=300, count_tokens=self._counter())
+
+        assert "line 0" in rendered
+        assert "...(truncated)..." in rendered
+        assert rendered.count("<file ") == rendered.count("</file>")
+        assert len(rendered.splitlines()) * 10 <= 300
+
+    def test_a_smaller_later_file_survives_an_oversized_earlier_one(self):
+        rendered = related_files._render(
+            {"huge.py": "\n".join(f"x{i}" for i in range(400)), "small.py": "one\ntwo"},
+            max_total_lines=800, max_tokens=300, count_tokens=self._counter())
+
+        assert "small.py" in rendered
