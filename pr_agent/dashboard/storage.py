@@ -20,36 +20,25 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from pr_agent.dashboard.env import bounded_env_int
 from pr_agent.log import get_logger
 
-
-def _bounded_env_int(name: str, default: int, minimum: int) -> int:
-    """Read a positive integer tunable, clamping it to a safe lower bound.
-
-    A nonpositive stale window would place the reconciliation cutoff in the
-    future and immediately mark every in-flight review FAILED, so operator
-    typos degrade to the documented minimum instead of corrupting state.
-    """
-    try:
-        return max(minimum, int(os.environ.get(name, str(default))))
-    except (TypeError, ValueError) as e:
-        get_logger().warning(f"Invalid {name}; using {default}, error: {e}")
-        return default
-
-
 DEFAULT_DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "/app/data/review.db")
-STALE_REVIEW_SECONDS = _bounded_env_int("DASHBOARD_STALE_REVIEW_SECONDS", 6 * 3600, 60)
+# A nonpositive stale window would put the reconciliation cutoff in the future
+# and mark every in-flight review FAILED, so it is clamped before the heartbeat
+# interval derives from it.
+STALE_REVIEW_SECONDS = bounded_env_int("DASHBOARD_STALE_REVIEW_SECONDS", 6 * 3600, 60)
 REVIEW_HEARTBEAT_SECONDS = min(
-    _bounded_env_int("DASHBOARD_REVIEW_HEARTBEAT_SECONDS", 60, 5),
+    bounded_env_int("DASHBOARD_REVIEW_HEARTBEAT_SECONDS", 60, 5),
     max(5, STALE_REVIEW_SECONDS // 3),
 )
 STALE_CLEANUP_INTERVAL_SECONDS = 5 * 60
-REVIEW_RETENTION_DAYS = max(1, int(os.environ.get("DASHBOARD_REVIEW_RETENTION_DAYS", "90")))
-MAX_REVIEW_RECORDS = max(100, int(os.environ.get("DASHBOARD_MAX_REVIEW_RECORDS", "10000")))
-AUDIT_RETENTION_DAYS = max(1, int(os.environ.get("DASHBOARD_AUDIT_RETENTION_DAYS", "90")))
-MAX_AUDIT_LOG_ROWS = max(100, int(os.environ.get("DASHBOARD_MAX_AUDIT_LOG_ROWS", "10000")))
-MAX_REVIEW_PAYLOAD_BYTES = max(
-    64 * 1024, int(os.environ.get("DASHBOARD_MAX_REVIEW_PAYLOAD_BYTES", str(1024 * 1024))))
+REVIEW_RETENTION_DAYS = bounded_env_int("DASHBOARD_REVIEW_RETENTION_DAYS", 90, 1)
+MAX_REVIEW_RECORDS = bounded_env_int("DASHBOARD_MAX_REVIEW_RECORDS", 10000, 100)
+AUDIT_RETENTION_DAYS = bounded_env_int("DASHBOARD_AUDIT_RETENTION_DAYS", 90, 1)
+MAX_AUDIT_LOG_ROWS = bounded_env_int("DASHBOARD_MAX_AUDIT_LOG_ROWS", 10000, 100)
+MAX_REVIEW_PAYLOAD_BYTES = bounded_env_int(
+    "DASHBOARD_MAX_REVIEW_PAYLOAD_BYTES", 1024 * 1024, 64 * 1024)
 MAX_REVIEW_FINDINGS = 30
 MAX_REVIEW_FINDINGS_BYTES = min(MAX_REVIEW_PAYLOAD_BYTES, 512 * 1024)
 MAX_FINDING_FILE_BYTES = 4 * 1024

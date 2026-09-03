@@ -104,6 +104,28 @@ class TestAuth:
 
         assert resp.status_code == 200, resp.text
 
+    def test_malformed_trusted_hops_keep_the_dashboard_importable(self, tmp_path):
+        # github_app.py mounts these routes inside a try/except: an ImportError
+        # from a typo'd hop count would drop the whole panel. Probe in a
+        # subprocess so the hostile environment stays out of the suite.
+        import os
+        import subprocess
+        import sys
+
+        repo_root = os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(dashboard_api.__file__))))
+        env = dict(os.environ, **{
+            "PYTHONPATH": repo_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            "DASHBOARD_DB_PATH": str(tmp_path / "hops_probe.db"),
+            "DASHBOARD_TRUSTED_PROXY_HOPS": "one",
+        })
+        probe = ("import pr_agent.servers.dashboard_api as d;"
+                 "print('HOPS', d.TRUSTED_PROXY_HOPS)")
+        result = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True)
+
+        assert result.returncode == 0, result.stderr
+        assert "HOPS 0" in result.stdout
+
     def test_environment_password_snapshot_identifies_source_without_derived_hash(self, monkeypatch):
         monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "first-password")
         monkeypatch.setenv("DASHBOARD__ADMIN_PASSWORD", "fallback-password")

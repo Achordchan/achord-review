@@ -13,16 +13,45 @@ DashboardStorageReadError = storage_module.DashboardStorageReadError
 STALE_CLEANUP_INTERVAL_SECONDS = storage_module.STALE_CLEANUP_INTERVAL_SECONDS
 
 
-@pytest.mark.parametrize(("value", "expected"), [
-    ("0", 60),
-    ("-1", 60),
-    ("not-a-number", 6 * 3600),
-])
-def test_stale_review_interval_uses_safe_positive_value(monkeypatch, value, expected):
-    monkeypatch.setenv("DASHBOARD_STALE_REVIEW_SECONDS", value)
+def test_module_tunables_survive_malformed_environment(tmp_path):
+    # github_app.py mounts the dashboard inside a try/except, so an ImportError
+    # here would silently drop every dashboard route. Import in a subprocess so
+    # the hostile environment cannot leak into the rest of the suite.
+    import json
+    import subprocess
+    import sys
 
-    assert storage_module._bounded_env_int(
-        "DASHBOARD_STALE_REVIEW_SECONDS", 6 * 3600, 60) == expected
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(storage_module.__file__))))
+    env = dict(os.environ, **{
+        "PYTHONPATH": repo_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        "DASHBOARD_DB_PATH": str(tmp_path / "env_probe.db"),
+        "DASHBOARD_STALE_REVIEW_SECONDS": "0",
+        "DASHBOARD_REVIEW_HEARTBEAT_SECONDS": "-1",
+        "DASHBOARD_REVIEW_RETENTION_DAYS": "90d",
+        "DASHBOARD_MAX_REVIEW_RECORDS": "lots",
+        "DASHBOARD_AUDIT_RETENTION_DAYS": "0",
+        "DASHBOARD_MAX_AUDIT_LOG_ROWS": "",
+        "DASHBOARD_MAX_REVIEW_PAYLOAD_BYTES": "1MB",
+    })
+    probe = (
+        "import json;"
+        "import pr_agent.dashboard.storage as s;"
+        "print(json.dumps({k: getattr(s, k) for k in ("
+        "'STALE_REVIEW_SECONDS', 'REVIEW_HEARTBEAT_SECONDS', 'REVIEW_RETENTION_DAYS',"
+        "'MAX_REVIEW_RECORDS', 'AUDIT_RETENTION_DAYS', 'MAX_AUDIT_LOG_ROWS',"
+        "'MAX_REVIEW_PAYLOAD_BYTES')}))")
+    result = subprocess.run([sys.executable, "-c", probe], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {
+        "STALE_REVIEW_SECONDS": 60,
+        "REVIEW_HEARTBEAT_SECONDS": 5,
+        "REVIEW_RETENTION_DAYS": 90,
+        "MAX_REVIEW_RECORDS": 10000,
+        "AUDIT_RETENTION_DAYS": 1,
+        "MAX_AUDIT_LOG_ROWS": 10000,
+        "MAX_REVIEW_PAYLOAD_BYTES": 1024 * 1024,
+    }
 
 
 @pytest.fixture()

@@ -31,6 +31,7 @@ from pr_agent.dashboard.config_engine import (
     get_config_engine,
     validate_admin_password,
 )
+from pr_agent.dashboard.env import bounded_env_int
 from pr_agent.dashboard.storage import DashboardStorageReadError, get_storage
 from pr_agent.log import get_logger
 
@@ -45,7 +46,7 @@ MAX_DASHBOARD_REQUEST_BYTES = 64 * 1024
 # Number of trusted proxy hops in front of this service. The deployment sits
 # behind exactly one nginx; only headers appended by those hops are consumed,
 # so clients cannot rotate their X-Forwarded-For to evade the login lockout.
-TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
+TRUSTED_PROXY_HOPS = bounded_env_int("DASHBOARD_TRUSTED_PROXY_HOPS", 0, 0)
 DASHBOARD_EXTERNAL_ORIGIN = os.environ.get("DASHBOARD_EXTERNAL_ORIGIN", "").strip()
 
 # Session and lockout state is persisted in the dashboard SQLite database so
