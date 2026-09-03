@@ -115,6 +115,23 @@ class TestReviewsCrud:
         assert row2["status"] == "FAILED"
         assert "timeout" in row2["error_message"]
 
+    def test_completion_never_overwrites_a_terminal_record(self, storage):
+        # fail_review / reconciliation can win the race; a completion arriving
+        # afterwards must leave the terminal row alone.
+        failed = storage.create_review(repo_name="r", pr_number=10, pr_url="u10")
+        storage.fail_review(failed, "cancelled")
+        storage.complete_review(failed, verdict="APPROVE", verdict_reason="late")
+
+        row = storage.get_review_by_request_id(failed)
+        assert row["status"] == "FAILED"
+        assert row["verdict"] != "APPROVE"
+
+        skipped = storage.create_review(repo_name="r", pr_number=11, pr_url="u11")
+        storage.skip_review(skipped, "no files")
+        storage.complete_review(skipped, verdict="APPROVE")
+
+        assert storage.get_review_by_request_id(skipped)["status"] == "SKIPPED"
+
     def test_skip_review_closes_running_record(self, storage):
         request_id = storage.create_review(repo_name="r", pr_number=3, pr_url="u3")
         storage.skip_review(request_id, "PR has no files")

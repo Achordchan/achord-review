@@ -618,9 +618,13 @@ class DashboardStorage:
                         markdown_output: str = "", raw_prediction: str = "") -> None:
         markdown_output = _truncate_payload(markdown_output)
         raw_prediction = _truncate_payload(raw_prediction)
+        # Terminal states are single-writer: a late completion must not overwrite
+        # a FAILED row written by the cancellation path or by stale-review
+        # reconciliation, exactly like finish_review and _finish_without_issues.
         self._write(
             "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
-            " markdown_output=?, raw_prediction=?, completed_at=? WHERE request_id=?",
+            " markdown_output=?, raw_prediction=?, completed_at=?"
+            " WHERE request_id=? AND status='RUNNING'",
             (verdict, verdict_reason, markdown_output, raw_prediction, _utcnow(), request_id),
             timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
