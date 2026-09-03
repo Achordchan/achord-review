@@ -111,6 +111,8 @@ def test_missing_authentication_heading_is_an_explicit_security_concern():
     "N/A",
     "None",
     "No vulnerabilities: none found",
+    "No SQL injection: all queries are parameterized",
+    "No XSS: output is escaped",
     "Vulnerabilities: none",
     "Security findings: nothing identified",
     "Possible concern without details",

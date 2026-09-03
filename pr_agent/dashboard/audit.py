@@ -2,9 +2,9 @@
 
 Called from PRReviewer.run() at the start and on every terminal path. Every
 function here is fail-safe: any storage error is logged and swallowed, the
-review flow itself is never disturbed. Terminal writes run off the event loop
-via asyncio.to_thread and are awaited before the review request returns, so a
-graceful worker shutdown cannot leave a completed run permanently RUNNING.
+review flow itself is never disturbed. Writes run off the event loop via
+asyncio.to_thread; the reviewer gives terminal writes a bounded foreground
+window and keeps delayed writes tracked for asynchronous reconciliation.
 """
 
 import asyncio

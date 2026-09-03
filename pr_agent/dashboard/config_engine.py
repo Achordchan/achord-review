@@ -22,7 +22,7 @@ import time
 import tomllib
 import uuid
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import tomlkit
 
@@ -190,7 +190,9 @@ class ConfigEngine:
 
     # ----------------------------------------------------------------- write
 
-    def write(self, fields: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    def write(self, fields: Dict[str, Any],
+              on_saved: Optional[Callable[[Dict[str, Any], tuple], bool]] = None
+              ) -> Tuple[bool, List[str]]:
         """Validate, back up, atomically replace and hot-apply the config.
 
         Writes go through tomlkit (a comment-preserving TOML document) so the
@@ -240,10 +242,21 @@ class ConfigEngine:
                 # Otherwise another worker can replace the file between these
                 # steps and this worker can mark older values as current.
                 raw = self._load_raw()
+                saved_signature = self._file_signature()
+                if raw is not None and on_saved is not None:
+                    try:
+                        if saved_signature is None or not on_saved(raw, saved_signature):
+                            warnings.append(
+                                "configuration saved but auth state synchronization failed")
+                    except Exception as e:
+                        get_logger().warning(
+                            f"Dashboard config auth state synchronization failed, error: {e}")
+                        warnings.append(
+                            "configuration saved but auth state synchronization failed")
                 if raw is None or not self._hot_reload(raw):
                     warnings.append("configuration saved but hot reload failed; restart required")
                 else:
-                    self._loaded_signature = self._file_signature()
+                    self._loaded_signature = saved_signature
                 return True, warnings
         except Exception as e:
             get_logger().warning(f"Dashboard config write failed, error: {e}")
@@ -259,6 +272,27 @@ class ConfigEngine:
                 yield
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _config_read_lock(self):
+        """Block dashboard auth reads until a controlled config save is acknowledged."""
+        if not self.config_path:
+            yield
+            return
+        lock_path = f"{self.config_path}.lock"
+        with open(lock_path, "a+", encoding="utf-8") as lock_file:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def auth_read_lock(self):
+        """Expose the shared lock for an auth read plus its SQLite synchronization."""
+        with self._config_read_lock():
+            yield
 
     def _apply_fields(self, raw: Dict[str, Any], clean: Dict[str, Any]) -> None:
         for name, value in clean.items():
@@ -445,6 +479,16 @@ class ConfigEngine:
 
     def admin_password_snapshot(self) -> tuple[str, Optional[tuple]]:
         """Read the password and file signature from the authoritative config file."""
+        with self._config_read_lock():
+            return self._admin_password_snapshot_unlocked()
+
+    @contextmanager
+    def locked_admin_password_snapshot(self):
+        """Keep a stable auth snapshot while the caller synchronizes shared state."""
+        with self._config_read_lock():
+            yield self._admin_password_snapshot_unlocked()
+
+    def _admin_password_snapshot_unlocked(self) -> tuple[str, Optional[tuple]]:
         for _ in range(2):
             before = self._file_signature()
             raw = self._load_raw()

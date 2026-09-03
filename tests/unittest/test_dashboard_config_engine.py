@@ -1,6 +1,7 @@
 """Tests for the dashboard config engine (pr_agent/dashboard/config_engine.py)."""
 
 import os
+import threading
 
 import pytest
 
@@ -105,6 +106,57 @@ class TestWrite:
 
         assert ok, errors
         assert directories == [os.path.dirname(engine.config_path)]
+
+    def test_write_acknowledges_saved_signature_inside_config_lock(self, engine):
+        acknowledged = {}
+
+        def acknowledge(raw, signature):
+            acknowledged["model"] = raw["config"]["model"]
+            acknowledged["signature"] = signature
+            return True
+
+        ok, warnings = engine.write({"model": "openai/acknowledged"}, acknowledge)
+
+        assert ok, warnings
+        assert acknowledged == {
+            "model": "openai/acknowledged",
+            "signature": engine._file_signature(),
+        }
+
+    def test_auth_reader_waits_until_config_signature_is_acknowledged(self, engine):
+        callback_started = threading.Event()
+        release_callback = threading.Event()
+        reader_attempted = threading.Event()
+        reader_acquired = threading.Event()
+        results = []
+
+        def acknowledge(raw, signature):
+            callback_started.set()
+            assert release_callback.wait(timeout=2)
+            return True
+
+        def read_auth_state():
+            reader_attempted.set()
+            with engine.auth_read_lock():
+                reader_acquired.set()
+
+        writer = threading.Thread(
+            target=lambda: results.append(
+                engine.write({"model": "openai/locked"}, acknowledge)))
+        reader = threading.Thread(target=read_auth_state)
+        writer.start()
+        assert callback_started.wait(timeout=1)
+        reader.start()
+        assert reader_attempted.wait(timeout=1)
+        assert not reader_acquired.wait(timeout=0.05)
+
+        release_callback.set()
+        writer.join(timeout=2)
+        reader.join(timeout=2)
+        assert not writer.is_alive()
+        assert not reader.is_alive()
+        assert results == [(True, [])]
+        assert reader_acquired.is_set()
 
     def test_directory_fsync_failure_reports_saved_warning(self, engine, monkeypatch):
         def fail_directory_sync(directory):

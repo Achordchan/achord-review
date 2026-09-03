@@ -15,6 +15,7 @@ import os
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
@@ -122,7 +123,13 @@ def _session_hash(token: str, password: Optional[str] = None) -> str:
     return hmac.new(password.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _sync_admin_password(password: str, signature=None) -> bool:
+def _signature_key(signature) -> str:
+    return repr(signature) if signature is not None else ""
+
+
+def _sync_admin_password(
+        password: str, signature=None,
+        allow_same_password_signature_change: bool = False) -> bool:
     if signature is None:
         return False
     storage = get_storage()
@@ -136,7 +143,9 @@ def _sync_admin_password(password: str, signature=None) -> bool:
                 and isinstance(cached_password, str)
                 and hmac.compare_digest(password.encode("utf-8"), cached_password.encode("utf-8"))):
             return True
-        if not storage.sync_admin_password(password):
+        if not storage.sync_admin_password(
+                password, _signature_key(signature),
+                allow_same_password_signature_change=allow_same_password_signature_change):
             return False
         shared_generation = storage.admin_password_generation()
         if shared_generation is None:
@@ -151,29 +160,56 @@ def _sync_admin_password(password: str, signature=None) -> bool:
 
 
 def _sync_current_admin_password() -> bool:
-    password, signature = _admin_password_snapshot()
-    return _sync_admin_password(password, signature)
+    with _admin_password_guard() as (password, signature):
+        return _sync_admin_password(password, signature)
+
+
+@contextmanager
+def _admin_password_guard():
+    """Keep controlled config writes outside password validation and synchronization."""
+    if any(os.environ.get(name, "") for name in (
+            "DASHBOARD_ADMIN_PASSWORD", "DASHBOARD__ADMIN_PASSWORD")):
+        yield _admin_password_snapshot()
+        return
+    engine = get_config_engine()
+    with engine.auth_read_lock():
+        yield _admin_password_snapshot()
+
+
+def _acknowledge_config_save(raw: Dict[str, Any], signature: tuple) -> bool:
+    """Trust a same-password signature produced by ConfigEngine under its write lock."""
+    for variable_name in ("DASHBOARD_ADMIN_PASSWORD", "DASHBOARD__ADMIN_PASSWORD"):
+        password = os.environ.get(variable_name, "")
+        if password:
+            return _sync_admin_password(
+                validate_admin_password(password), ("environment", variable_name),
+                allow_same_password_signature_change=True)
+    password = validate_admin_password(
+        str(raw.get("dashboard", {}).get("admin_password", "") or ""))
+    return _sync_admin_password(
+        password, signature, allow_same_password_signature_change=True)
 
 
 async def _create_session(verified_password: str) -> str:
     token = secrets.token_urlsafe(32)
 
     def _create() -> str:
-        current_password, _ = _admin_password_snapshot()
-        if not hmac.compare_digest(
-                verified_password.encode("utf-8"), current_password.encode("utf-8")):
-            return "password_changed"
-        token_hash = _session_hash(token, verified_password)
-        created = get_storage().create_session_for_password(
-            token_hash,
-            int(time.time()) + SESSION_TTL_SECONDS,
-            current_password)
-        after_password, _ = _admin_password_snapshot()
-        if not hmac.compare_digest(
-                current_password.encode("utf-8"), after_password.encode("utf-8")):
-            get_storage().revoke_session(token_hash)
-            return "password_changed"
-        return "created" if created else "storage_error"
+        with _admin_password_guard() as (current_password, current_signature):
+            if not hmac.compare_digest(
+                    verified_password.encode("utf-8"), current_password.encode("utf-8")):
+                return "password_changed"
+            token_hash = _session_hash(token, verified_password)
+            created = get_storage().create_session_for_password(
+                token_hash,
+                int(time.time()) + SESSION_TTL_SECONDS,
+                current_password,
+                _signature_key(current_signature))
+            after_password, _ = _admin_password_snapshot()
+            if not hmac.compare_digest(
+                    current_password.encode("utf-8"), after_password.encode("utf-8")):
+                get_storage().revoke_session(token_hash)
+                return "password_changed"
+            return "created" if created else "storage_error"
 
     try:
         result = await asyncio.to_thread(_create)
@@ -187,20 +223,20 @@ async def _create_session(verified_password: str) -> str:
 
 
 def _session_valid(token: Optional[str]) -> bool:
-    password, signature = _admin_password_snapshot()
-    if not _sync_admin_password(password, signature):
-        raise DashboardStorageReadError("dashboard authentication state is unavailable")
-    if not token or not password:
-        return False
-    token_hash = _session_hash(token, password)
-    valid = bool(token_hash and get_storage().session_is_valid(token_hash))
-    after_password, after_signature = _admin_password_snapshot()
-    if not hmac.compare_digest(password.encode("utf-8"), after_password.encode("utf-8")):
-        _sync_admin_password(after_password, after_signature)
-        return False
-    if signature != after_signature and not _sync_admin_password(after_password, after_signature):
-        raise DashboardStorageReadError("dashboard authentication state is unavailable")
-    return valid
+    with _admin_password_guard() as (password, signature):
+        if not _sync_admin_password(password, signature):
+            raise DashboardStorageReadError("dashboard authentication state is unavailable")
+        if not token or not password:
+            return False
+        token_hash = _session_hash(token, password)
+        valid = bool(token_hash and get_storage().session_is_valid(token_hash))
+        after_password, after_signature = _admin_password_snapshot()
+        if not hmac.compare_digest(password.encode("utf-8"), after_password.encode("utf-8")):
+            _sync_admin_password(after_password, after_signature)
+            return False
+        if signature != after_signature and not _sync_admin_password(after_password, after_signature):
+            raise DashboardStorageReadError("dashboard authentication state is unavailable")
+        return valid
 
 
 async def require_auth(request: Request, dashboard_session: Optional[str] = Cookie(None)) -> None:
@@ -364,12 +400,14 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     restart = payload.pop("restart")
     fields = payload
     engine = get_config_engine()
-    success, errors = await asyncio.to_thread(engine.write, fields)
+    success, errors = await asyncio.to_thread(engine.write, fields, _acknowledge_config_save)
     if not success:
         raise HTTPException(status_code=400, detail="; ".join(errors))
     hot_reload_pending = any("hot reload failed" in warning for warning in errors)
     persistence_warning = next(
         (warning for warning in errors if "directory sync failed" in warning), "")
+    auth_sync_warning = next(
+        (warning for warning in errors if "auth state synchronization failed" in warning), "")
     await asyncio.to_thread(
         _storage_call, "add_audit_log", "UPDATE_CONFIG", {"fields": sorted(fields.keys())},
         ip_address=_client_ip(request))
@@ -388,7 +426,9 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
             ip_address=_client_ip(request))
         if restart_ticket is not None:
             background_tasks.add_task(ops.execute_restart, restart_ticket)
-    if hot_reload_pending:
+    if auth_sync_warning:
+        message = "配置已保存，但认证状态同步失败，现有会话将被安全吊销"
+    elif hot_reload_pending:
         message = "配置已保存，但热重载失败，需要重启"
     elif persistence_warning:
         message = "配置已保存并热生效，但崩溃持久性同步未确认"
@@ -404,6 +444,7 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
                 "restart_started": restart_started,
                 "restart_output": (result or {}).get("output", []) if restart else [],
                 "hot_reload_pending": hot_reload_pending,
+                "auth_sync_warning": auth_sync_warning,
                 "reload_warning": next(
                     (warning for warning in errors if "hot reload failed" in warning), ""),
                 "persistence_warning": persistence_warning},

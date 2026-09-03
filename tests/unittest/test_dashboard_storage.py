@@ -510,6 +510,36 @@ class TestSharedAuthState:
 
         assert not storage.session_is_valid("session-a", now=1_000_000_000)
 
+    def test_untrusted_source_rewrite_revokes_same_password_sessions(self, storage):
+        assert storage.sync_admin_password("password-a", "signature-a")
+        assert storage.create_session("session-a", 4_000_000_000)
+        first_generation = storage.admin_password_generation()
+
+        assert storage.sync_admin_password("password-a", "signature-after-a-b-a")
+
+        assert storage.admin_password_generation() == first_generation + 1
+        assert not storage.session_is_valid("session-a", now=1_000_000_000)
+
+    def test_trusted_config_save_preserves_same_password_sessions(self, storage):
+        assert storage.sync_admin_password("password-a", "signature-a")
+        assert storage.create_session("session-a", 4_000_000_000)
+        first_generation = storage.admin_password_generation()
+
+        assert storage.sync_admin_password(
+            "password-a", "signature-b", allow_same_password_signature_change=True)
+
+        assert storage.admin_password_generation() == first_generation
+        assert storage.session_is_valid("session-a", now=1_000_000_000)
+
+    def test_trusted_config_save_still_revokes_changed_password(self, storage):
+        assert storage.sync_admin_password("password-a", "signature-a")
+        assert storage.create_session("session-a", 4_000_000_000)
+
+        assert storage.sync_admin_password(
+            "password-b", "signature-b", allow_same_password_signature_change=True)
+
+        assert not storage.session_is_valid("session-a", now=1_000_000_000)
+
     def test_same_password_is_stable_across_workers_and_worker_restart(self, storage):
         assert storage.sync_admin_password("shared-password")
         assert storage.create_session("shared-session", 4_000_000_000)

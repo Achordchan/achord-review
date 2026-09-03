@@ -34,6 +34,18 @@ _NO_SECURITY_PREFIXES = (
     "there are no",
     "there is no",
 )
+_MISSING_CONTROL_PREFIXES = (
+    "no access control",
+    "no authentication",
+    "no authorization",
+    "no csrf protection",
+    "no encryption",
+    "no input validation",
+    "no nonce validation",
+    "no permission check",
+    "no rate limiting",
+    "no sanitization",
+)
 
 
 def _is_positive_line_number(value: Any) -> bool:
@@ -90,10 +102,16 @@ def _is_explicit_security_concern(value: Any) -> bool:
     if not normalized or _is_negative_security_summary(normalized):
         return False
     heading, separator, details = normalized.partition(":")
+    heading = heading.strip()
+    generic_negative_heading = heading.startswith("no ") and not any(
+        heading == prefix or heading.startswith(f"{prefix} ")
+        for prefix in _MISSING_CONTROL_PREFIXES
+    )
     return bool(
         separator
-        and heading.strip()
+        and heading
         and details.strip()
+        and not generic_negative_heading
         and not _is_negative_security_summary(details)
     )
 

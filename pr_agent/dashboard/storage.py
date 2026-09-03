@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS dashboard_auth_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     password_fingerprint TEXT NOT NULL,
     fingerprint_salt BLOB,
+    source_signature TEXT NOT NULL DEFAULT '',
     generation INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
@@ -249,6 +250,7 @@ class DashboardStorage:
                 row["name"] for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
             }
             auth_generation_migrated = False
+            auth_signature_migrated = False
             session_generation_migrated = False
             if "fingerprint_salt" not in auth_columns:
                 conn.execute("ALTER TABLE dashboard_auth_state ADD COLUMN fingerprint_salt BLOB")
@@ -256,6 +258,11 @@ class DashboardStorage:
                 conn.execute(
                     "ALTER TABLE dashboard_auth_state ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
                 auth_generation_migrated = True
+            if "source_signature" not in auth_columns:
+                conn.execute(
+                    "ALTER TABLE dashboard_auth_state"
+                    " ADD COLUMN source_signature TEXT NOT NULL DEFAULT ''")
+                auth_signature_migrated = True
             if "password_generation" not in session_columns:
                 conn.execute(
                     "ALTER TABLE dashboard_sessions"
@@ -264,7 +271,7 @@ class DashboardStorage:
             if "heartbeat_at" not in review_columns:
                 conn.execute("ALTER TABLE reviews ADD COLUMN heartbeat_at TEXT")
                 conn.execute("UPDATE reviews SET heartbeat_at = created_at WHERE heartbeat_at IS NULL")
-            if auth_generation_migrated or session_generation_migrated:
+            if auth_generation_migrated or auth_signature_migrated or session_generation_migrated:
                 # Legacy sessions have no trustworthy generation and must not revive.
                 conn.execute("DELETE FROM dashboard_sessions")
                 conn.execute(
@@ -398,11 +405,13 @@ class DashboardStorage:
 
         return self._transaction(_create, "session creation")
 
-    def create_session_for_password(self, token_hash: str, expires_at: int, password: str) -> bool:
+    def create_session_for_password(self, token_hash: str, expires_at: int, password: str,
+                                    source_signature: str = "") -> bool:
         """Synchronize password state and create its generation-bound session atomically."""
         def _create(conn: sqlite3.Connection) -> None:
             conn.execute("BEGIN IMMEDIATE")
-            generation = self._sync_admin_password_state(conn, password)
+            generation = self._sync_admin_password_state(
+                conn, password, source_signature=source_signature)
             conn.execute("DELETE FROM dashboard_sessions WHERE expires_at <= ?", (int(time.time()),))
             conn.execute(
                 "INSERT OR REPLACE INTO dashboard_sessions"
@@ -444,18 +453,23 @@ class DashboardStorage:
 
         return self._transaction(_revoke, "session revocation") and revoked
 
-    def sync_admin_password(self, password: str) -> bool:
-        """Persist password generation and purge sessions on every observed rotation."""
+    def sync_admin_password(self, password: str, source_signature: str = "",
+                            allow_same_password_signature_change: bool = False) -> bool:
+        """Persist auth source state and purge sessions on password or untrusted file changes."""
         def _sync(conn: sqlite3.Connection) -> None:
             conn.execute("BEGIN IMMEDIATE")
-            self._sync_admin_password_state(conn, password)
+            self._sync_admin_password_state(
+                conn, password, source_signature=source_signature,
+                allow_same_password_signature_change=allow_same_password_signature_change)
 
         return self._transaction(_sync, "admin-password synchronization")
 
     @staticmethod
-    def _sync_admin_password_state(conn: sqlite3.Connection, password: str) -> int:
+    def _sync_admin_password_state(
+            conn: sqlite3.Connection, password: str, source_signature: str = "",
+            allow_same_password_signature_change: bool = False) -> int:
         row = conn.execute(
-            "SELECT password_fingerprint, fingerprint_salt, generation"
+            "SELECT password_fingerprint, fingerprint_salt, source_signature, generation"
             " FROM dashboard_auth_state WHERE id = 1").fetchone()
         salt = bytes(row["fingerprint_salt"]) if row and row["fingerprint_salt"] else secrets.token_bytes(16)
         password_fingerprint = _password_fingerprint(password, salt)
@@ -463,24 +477,30 @@ class DashboardStorage:
             generation = 1
             conn.execute(
                 "INSERT INTO dashboard_auth_state"
-                " (id, password_fingerprint, fingerprint_salt, generation, updated_at)"
-                " VALUES (1, ?, ?, ?, ?)",
-                (password_fingerprint, salt, generation, _utcnow()))
+                " (id, password_fingerprint, fingerprint_salt, source_signature, generation, updated_at)"
+                " VALUES (1, ?, ?, ?, ?, ?)",
+                (password_fingerprint, salt, source_signature, generation, _utcnow()))
             return generation
         generation = max(1, int(row["generation"] or 0))
-        if (not row["fingerprint_salt"]
-                or row["password_fingerprint"] != password_fingerprint):
+        password_changed = (
+            not row["fingerprint_salt"] or row["password_fingerprint"] != password_fingerprint)
+        stored_signature = str(row["source_signature"] or "")
+        untrusted_signature_change = (
+            bool(source_signature and stored_signature and source_signature != stored_signature)
+            and not allow_same_password_signature_change)
+        if password_changed or untrusted_signature_change:
             generation += 1
             conn.execute("DELETE FROM dashboard_sessions")
             conn.execute(
                 "UPDATE dashboard_auth_state SET password_fingerprint = ?,"
-                " fingerprint_salt = ?, generation = ?, updated_at = ?"
+                " fingerprint_salt = ?, source_signature = ?, generation = ?, updated_at = ?"
                 " WHERE id = 1",
-                (password_fingerprint, salt, generation, _utcnow()))
-        elif int(row["generation"] or 0) < 1:
+                (password_fingerprint, salt, source_signature, generation, _utcnow()))
+        elif int(row["generation"] or 0) < 1 or source_signature != stored_signature:
             conn.execute(
-                "UPDATE dashboard_auth_state SET generation = ?, updated_at = ? WHERE id = 1",
-                (generation, _utcnow()))
+                "UPDATE dashboard_auth_state SET source_signature = ?, generation = ?,"
+                " updated_at = ? WHERE id = 1",
+                (source_signature or stored_signature, generation, _utcnow()))
         return generation
 
     def admin_password_generation(self) -> Optional[int]:

@@ -1,5 +1,7 @@
 """Tests for the dashboard API routes (pr_agent/servers/dashboard_api.py)."""
 
+from contextlib import contextmanager
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,10 +25,16 @@ def client(storage, monkeypatch):
         def read(self):
             return {"available": False, "path": None, "values": {}}
 
-        def write(self, fields):
+        def write(self, fields, on_saved=None):
             from pr_agent.dashboard.config_engine import _validate
             _, errors = _validate(fields)
+            if not errors and on_saved is not None:
+                on_saved({}, ("stub-config",))
             return not errors, errors
+
+        @contextmanager
+        def auth_read_lock(self):
+            yield
 
     monkeypatch.setattr(dashboard_api, "get_config_engine", lambda: StubEngine())
     # FastAPI app with only the dashboard router
@@ -239,7 +247,7 @@ class TestAuth:
 
         assert dashboard_api._session_valid(token) is False
 
-    def test_session_survives_unrelated_config_signature_change(self, client, monkeypatch):
+    def test_session_survives_trusted_unrelated_config_signature_change(self, client, monkeypatch):
         signature = {"value": (1,)}
         monkeypatch.setattr(
             dashboard_api, "_admin_password_snapshot",
@@ -247,22 +255,21 @@ class TestAuth:
         token = __import__("asyncio").run(dashboard_api._create_session("password-a"))
 
         signature["value"] = (2,)
+        assert dashboard_api._sync_admin_password(
+            "password-a", signature["value"], allow_same_password_signature_change=True)
 
         assert dashboard_api._session_valid(token) is True
 
-    def test_session_creation_ignores_unrelated_signature_change(self, client, monkeypatch):
-        signature = {"value": 0}
-
-        def changing_snapshot():
-            signature["value"] += 1
-            return "password-a", (signature["value"],)
-
-        monkeypatch.setattr(dashboard_api, "_admin_password_snapshot", changing_snapshot)
-
+    def test_session_rejects_unacknowledged_a_b_a_source_change(self, client, monkeypatch):
+        signature = {"value": (1,)}
+        monkeypatch.setattr(
+            dashboard_api, "_admin_password_snapshot",
+            lambda: ("password-a", signature["value"]))
         token = __import__("asyncio").run(dashboard_api._create_session("password-a"))
 
-        assert token
-        assert dashboard_api._session_valid(token) is True
+        signature["value"] = (3,)
+
+        assert dashboard_api._session_valid(token) is False
 
 
 class TestClientIp:
@@ -501,6 +508,7 @@ class TestProtectedRoutes:
         assert resp.status_code == 200
         assert resp.json()["data"]["restarted"] is False
         assert resp.json()["data"]["restart_started"] is False
+        assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 200
 
     def test_config_restart_acceptance_is_not_reported_as_completion(
             self, client, storage, monkeypatch):
@@ -560,7 +568,7 @@ class TestProtectedRoutes:
 
     def test_config_reports_persisted_but_pending_hot_reload(self, client, monkeypatch):
         class PartialEngine:
-            def write(self, fields):
+            def write(self, fields, on_saved=None):
                 return True, ["configuration saved but hot reload failed; restart required"]
 
         monkeypatch.setattr(dashboard_api, "get_config_engine", lambda: PartialEngine())
@@ -575,7 +583,7 @@ class TestProtectedRoutes:
 
     def test_config_reports_post_rename_durability_warning(self, client, monkeypatch):
         class PartialEngine:
-            def write(self, fields):
+            def write(self, fields, on_saved=None):
                 return True, [
                     "configuration saved but directory sync failed; "
                     "crash durability unconfirmed: unsupported"
@@ -592,6 +600,23 @@ class TestProtectedRoutes:
         assert resp.json()["data"]["hot_reload_pending"] is False
         assert "directory sync failed" in resp.json()["data"]["persistence_warning"]
         assert "持久性同步未确认" in resp.json()["message"]
+
+    def test_config_reports_auth_state_sync_warning(self, client, monkeypatch):
+        class PartialEngine:
+            def write(self, fields, on_saved=None):
+                return True, ["configuration saved but auth state synchronization failed"]
+
+        monkeypatch.setattr(dashboard_api, "get_config_engine", lambda: PartialEngine())
+        auth = _auth_header(client)
+
+        resp = client.put(
+            "/api/v1/dashboard/config",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"},
+            json={"model": "openai/persisted"})
+
+        assert resp.status_code == 200
+        assert "auth state synchronization failed" in resp.json()["data"]["auth_sync_warning"]
+        assert "现有会话将被安全吊销" in resp.json()["message"]
 
     def test_ops_reports_command_not_started(self, client, monkeypatch):
         auth = _auth_header(client)
