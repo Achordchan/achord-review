@@ -181,6 +181,41 @@ def test_metadata_fields_are_extracted_independently(monkeypatch):
     assert captured["pr_number"] == 77
 
 
+def test_audit_start_timeout_abandons_slow_metadata_without_late_running_row(monkeypatch):
+    metadata_started = threading.Event()
+    release_metadata = threading.Event()
+    metadata_finished = threading.Event()
+    started_records = []
+
+    class GitProvider:
+        pr = {"title": "Title"}
+
+        def get_head_commit_sha(self):
+            metadata_started.set()
+            assert release_metadata.wait(timeout=2)
+            metadata_finished.set()
+            return "late-sha"
+
+    class Reviewer:
+        pr_url = "https://github.com/a/b/pull/1"
+        git_provider = GitProvider()
+
+    monkeypatch.setattr(pr_reviewer, "AUDIT_START_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        audit, "review_started", lambda **kwargs: started_records.append(kwargs) or "late-id")
+
+    async def scenario():
+        task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
+        assert await asyncio.to_thread(metadata_started.wait, 1)
+        assert await task == ""
+        release_metadata.set()
+        assert await asyncio.to_thread(metadata_finished.wait, 1)
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert started_records == []
+
+
 def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
     started = threading.Event()
     release = threading.Event()

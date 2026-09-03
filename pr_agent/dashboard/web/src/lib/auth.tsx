@@ -9,6 +9,7 @@ type AuthState = {
   loading: boolean
   model: string
   version: string
+  refresh: () => Promise<void>
   login: (password: string) => Promise<void>
   logout: () => Promise<void>
 }
@@ -71,7 +72,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setState((prev) => ({ ...prev, authenticated: false }))
   }, [])
 
-  return <AuthContext.Provider value={{ ...state, login, logout }}>{children}</AuthContext.Provider>
+  return <AuthContext.Provider value={{ ...state, refresh, login, logout }}>{children}</AuthContext.Provider>
 }
 
 export function useAuth(): AuthState {

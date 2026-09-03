@@ -144,7 +144,13 @@ export default function ReviewDetailPage() {
         {issues.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-10">
             <p className="text-sm text-muted">
-              {data.status === 'SKIPPED' ? '本次审查已跳过，未生成 Findings' : '本次审查没有发现问题'}
+              {data.status === 'RUNNING'
+                ? '审查进行中，Findings 将在完成后显示'
+                : data.status === 'SKIPPED'
+                  ? '本次审查已跳过，未生成 Findings'
+                  : data.status === 'FAILED'
+                    ? '本次审查失败，未生成 Findings'
+                    : '本次审查没有发现问题'}
             </p>
           </div>
         ) : (

@@ -1,7 +1,9 @@
 import asyncio
 import copy
 import datetime
+import os
 import re
+import threading
 from functools import partial
 from typing import List, Optional, Tuple
 
@@ -46,6 +48,8 @@ from pr_agent.servers.help import HelpMessage
 from pr_agent.tools.ticket_pr_compliance_check import extract_and_cache_pr_tickets
 
 MAX_REVIEW_COVERAGE_FILES = 50
+AUDIT_START_TIMEOUT_SECONDS = max(
+    0.1, float(os.environ.get("DASHBOARD_AUDIT_START_TIMEOUT_SECONDS", "2")))
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
 
 
@@ -69,6 +73,9 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
     from starlette_context import context as request_context
 
     from pr_agent.dashboard.audit import review_started
+
+    state_lock = threading.Lock()
+    state = {"abandoned": False, "request_id": ""}
 
     def _work() -> str:
         sender, trigger_type = "", "manual"
@@ -113,16 +120,35 @@ async def _audit_started(reviewer: "PRReviewer") -> str:
                 or 0)
         except Exception as e:
             get_logger().debug(f"Dashboard audit could not read PR number, error: {e}")
-        return review_started(
-            pr_url=reviewer.pr_url, sender=sender, trigger_type=trigger_type,
-            commit_sha=sha, pr_title=title, repo_name=repo_name,
-            pr_number=pr_number) or ""
+        with state_lock:
+            if state["abandoned"]:
+                return ""
+            request_id = review_started(
+                pr_url=reviewer.pr_url, sender=sender, trigger_type=trigger_type,
+                commit_sha=sha, pr_title=title, repo_name=repo_name,
+                pr_number=pr_number) or ""
+            state["request_id"] = request_id
+            return request_id
+
+    def _abandon() -> str:
+        with state_lock:
+            state["abandoned"] = True
+            return state["request_id"]
 
     work_task = asyncio.create_task(asyncio.to_thread(_work))
     try:
-        return await asyncio.shield(work_task)
+        return await asyncio.wait_for(
+            asyncio.shield(work_task), timeout=AUDIT_START_TIMEOUT_SECONDS)
+    except TimeoutError:
+        request_id = _abandon()
+        if request_id:
+            await asyncio.shield(
+                _audit_failed(request_id, RuntimeError("dashboard audit start timed out")))
+        get_logger().warning(
+            f"Dashboard audit start exceeded {AUDIT_START_TIMEOUT_SECONDS:g} seconds; continuing review")
+        return ""
     except asyncio.CancelledError:
-        request_id = await asyncio.shield(work_task)
+        request_id = _abandon()
         if request_id:
             await asyncio.shield(
                 _audit_failed(request_id, RuntimeError("review task cancelled during audit startup")))

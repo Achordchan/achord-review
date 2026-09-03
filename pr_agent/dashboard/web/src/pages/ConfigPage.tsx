@@ -6,6 +6,7 @@ import type { ConfigData, ConfigValues } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/Dialogs'
 import { useToast } from '../components/Toast'
+import { useAuth } from '../lib/auth'
 
 const SEVERITIES = ['P0', 'P1', 'P2', 'P3'] as const
 
@@ -24,6 +25,7 @@ const inputClass =
 
 export default function ConfigPage() {
   const toast = useToast()
+  const { refresh: refreshAuth } = useAuth()
   const queryClient = useQueryClient()
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['config'],
@@ -92,6 +94,7 @@ export default function ConfigPage() {
         window.setTimeout(() => window.location.reload(), 30_000)
       } else {
         await queryClient.invalidateQueries({ queryKey: ['config'] })
+        await refreshAuth()
       }
     } catch (err) {
       toast.error('保存失败', err instanceof ApiError ? err.message : '未知错误')
