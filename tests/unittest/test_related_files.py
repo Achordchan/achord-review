@@ -40,6 +40,8 @@ def _yaml(*paths):
 def _reset_settings():
     section = get_settings().related_files
     original = {key: section[key] for key in list(section.keys())}
+    # Retrieval ships disabled; these tests exercise it switched on.
+    section["enabled"] = True
     yield
     for key, value in original.items():
         section[key] = value
@@ -338,3 +340,81 @@ class TestOversizedFiles:
             max_total_lines=800, max_tokens=300, count_tokens=self._counter())
 
         assert "small.py" in rendered
+
+
+class TestContentScreening:
+    @pytest.mark.parametrize("content", [
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----",
+        'GITHUB_TOKEN = "ghp_abcdefghijklmnopqrstuvwxyz0123"',
+        'openai_key = "sk-abcdefghijklmnopqrstuvwxyz0123456789"',
+        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+        'api_key: "1c3f8b2a9d4e5f6a7b8c"',
+        'DATABASE_URL = "postgres://admin:hunter2secret@db.internal:5432/app"',
+    ])
+    def test_credential_material_is_recognised(self, content):
+        assert related_files.contains_credential_material(content) is True
+
+    @pytest.mark.parametrize("content", [
+        "def login(user, password):\n    return check(user, password)",
+        "API_KEY = os.environ['API_KEY']",
+        "# set your token in .env before running",
+        'placeholder = "REPLACE_WITH_TOKEN"',
+    ])
+    def test_ordinary_code_about_secrets_is_not_flagged(self, content):
+        assert related_files.contains_credential_material(content) is False
+
+    @pytest.mark.asyncio
+    async def test_a_credential_in_an_innocent_filename_is_refused(self):
+        # The path denylist cannot see this one; the content check has to.
+        provider = FakeProvider(
+            ["config/settings.py", "src/app.py"],
+            {"config/settings.py": 'SECRET_KEY = "ghp_abcdefghijklmnopqrstuvwxyz0123"'})
+        handler = FakeHandler(_yaml("config/settings.py"))
+
+        rendered = await related_files.build_related_files(
+            provider, handler, "gpt-5", "diff", [])
+
+        assert rendered == ""
+        assert "ghp_" not in rendered
+
+
+class TestRetrievalIsOptIn:
+    @pytest.mark.asyncio
+    async def test_the_shipped_default_makes_no_request(self):
+        # Sending untouched repository content to a provider is a decision each
+        # deployment makes, not a default.
+        del get_settings().related_files["enabled"]
+        handler = FakeHandler(_yaml("a.py"))
+
+        files = await related_files.collect_related_files(
+            FakeProvider(["a.py"], {"a.py": "x"}), handler, "gpt-5", "diff", [])
+
+        assert files == {}
+        assert handler.calls == []
+
+
+class TestSelectorPromptBudget:
+    def test_the_candidate_list_is_trimmed_to_fit_the_model_window(self, monkeypatch):
+        monkeypatch.setattr("pr_agent.algo.utils.get_max_tokens", lambda model: 2000)
+
+        class Handler:
+            def count_tokens(self, text, force_accurate=False):
+                return len(text.splitlines()) * 5
+
+        candidates = [f"src/file{i}.py" for i in range(400)]
+
+        fitted = related_files._candidates_that_fit(
+            "diff", "t", candidates, 6, "m", Handler())
+
+        assert 0 < len(fitted) < len(candidates)
+        assert fitted == candidates[:len(fitted)]
+
+    def test_retrieval_is_skipped_when_even_one_candidate_does_not_fit(self, monkeypatch):
+        monkeypatch.setattr("pr_agent.algo.utils.get_max_tokens", lambda model: 10)
+
+        class Handler:
+            def count_tokens(self, text, force_accurate=False):
+                return 10_000
+
+        assert related_files._candidates_that_fit(
+            "diff", "t", ["a.py", "b.py"], 6, "m", Handler()) == []

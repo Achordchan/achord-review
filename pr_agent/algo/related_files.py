@@ -22,6 +22,7 @@ having no retrieval at all:
 
 import fnmatch
 import os
+import re
 from typing import List, Optional
 
 from pr_agent.algo.utils import load_yaml
@@ -101,6 +102,35 @@ def _exclude_globs() -> List[str]:
     if isinstance(configured, list) and configured:
         return [str(pattern) for pattern in configured]
     return DEFAULT_EXCLUDE_GLOBS
+
+
+# Credential material that a filename cannot reveal. A file whose content matches
+# is refused whole: redacting would leave the impression that what remains was
+# checked, and this list can only ever be a floor, never a guarantee.
+CREDENTIAL_MARKERS = [
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bASIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(r"(?i)\b(?:api[_-]?key|secret|password|passwd|token|private[_-]?key)\b\s*[:=]\s*"
+               r"['\"][^'\"\s]{12,}['\"]"),
+    re.compile(r"(?i)\b(?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp)://"
+               r"[^\s:@/]+:[^\s:@/]+@"),
+]
+
+
+def contains_credential_material(content: str) -> bool:
+    """Whether this content looks like it carries a live credential.
+
+    A filename denylist cannot see a key pasted into config/settings.py, so the
+    content gets a look too. This is a floor, not a guarantee: that is precisely
+    why retrieval ships disabled and each deployment enables it knowingly.
+    """
+    return any(marker.search(content) for marker in CREDENTIAL_MARKERS)
 
 
 def _matches_any(path: str, patterns: List[str]) -> bool:
@@ -191,8 +221,7 @@ def _parse_selection(response: str, candidates: List[str], max_files: int) -> Li
     return selected
 
 
-async def _select_paths(ai_handler, model: str, diff: str, title: str,
-                        candidates: List[str], max_files: int) -> List[str]:
+def _render_selection_prompts(diff: str, title: str, candidates: List[str], max_files: int):
     from jinja2 import Environment, StrictUndefined, select_autoescape
 
     variables = {
@@ -205,9 +234,54 @@ async def _select_paths(ai_handler, model: str, diff: str, title: str,
     environment = Environment(undefined=StrictUndefined,
                               autoescape=select_autoescape(default_for_string=False))
     settings = get_settings().pr_related_files_prompt
-    system_prompt = environment.from_string(settings.system).render(variables)
-    user_prompt = environment.from_string(settings.user).render(variables)
+    return (environment.from_string(settings.system).render(variables),
+            environment.from_string(settings.user).render(variables))
 
+
+def _candidates_that_fit(diff: str, title: str, candidates: List[str], max_files: int,
+                         model: str, token_handler) -> List[str]:
+    """Shorten the candidate list until the selection prompt fits the model window.
+
+    get_pr_diff already sized the diff close to that window, so appending
+    hundreds of unmeasured paths can overflow the selector — which costs a failed
+    request and its latency before the outer handler drops the context anyway.
+    """
+    if token_handler is None or not candidates:
+        return candidates
+    try:
+        from pr_agent.algo.pr_processing import OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD
+        from pr_agent.algo.utils import get_max_tokens
+
+        limit = get_max_tokens(model) - OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD
+
+        def fits(count: int) -> bool:
+            system_prompt, user_prompt = _render_selection_prompts(
+                diff, title, candidates[:count], max_files)
+            return token_handler.count_tokens(system_prompt + user_prompt) <= limit
+
+        if fits(len(candidates)):
+            return candidates
+
+        low, high, best = 1, len(candidates) - 1, 0
+        while low <= high:
+            middle = (low + high) // 2
+            if fits(middle):
+                best, low = middle, middle + 1
+            else:
+                high = middle - 1
+        if not best:
+            get_logger().info("Selection prompt does not fit the model window; skipping retrieval")
+            return []
+        get_logger().info(f"Trimmed retrieval candidates to {best} paths to fit the model window")
+        return candidates[:best]
+    except Exception as e:
+        get_logger().warning(f"Could not size the selection prompt; skipping retrieval, error: {e}")
+        return []
+
+
+async def _select_paths(ai_handler, model: str, diff: str, title: str,
+                        candidates: List[str], max_files: int) -> List[str]:
+    system_prompt, user_prompt = _render_selection_prompts(diff, title, candidates, max_files)
     response, _ = await ai_handler.chat_completion(
         model=model, temperature=get_settings().config.temperature,
         system=system_prompt, user=user_prompt)
@@ -344,7 +418,8 @@ def render_related_files(files: dict, model: str, diff: str, token_handler=None)
 
 
 async def collect_related_files(git_provider, ai_handler, model: str, diff: str,
-                                changed_paths: List[str], title: str = "") -> dict:
+                                changed_paths: List[str], title: str = "",
+                                token_handler=None) -> dict:
     """Pick and fetch the files this diff could break; {} when that is not possible.
 
     This is the expensive half — a tree listing plus one model call — and its
@@ -352,7 +427,7 @@ async def collect_related_files(git_provider, ai_handler, model: str, diff: str,
     across fallback models should do this once.
     """
     try:
-        if not _bool_setting("enabled", True) or not diff:
+        if not _bool_setting("enabled", False) or not diff:
             return {}
         if not _provider_supports_tree(git_provider):
             return {}
@@ -364,6 +439,11 @@ async def collect_related_files(git_provider, ai_handler, model: str, diff: str,
 
         candidates = _rank_candidates(
             tree, changed_paths, _int_setting("max_candidate_paths", 600, minimum=1))
+        if not candidates:
+            return {}
+
+        candidates = _candidates_that_fit(
+            diff, title, candidates, max_files, model, token_handler)
         if not candidates:
             return {}
 
@@ -388,6 +468,11 @@ async def collect_related_files(git_provider, ai_handler, model: str, diff: str,
                 continue
             if not content.strip():
                 continue
+            if contains_credential_material(content):
+                get_logger().warning(
+                    "Refusing to attach a file whose content looks like a credential",
+                    artifact={"path": path})
+                continue
             lines = content.splitlines()
             if len(lines) > max_lines_per_file:
                 lines = lines[:max_lines_per_file] + [TRUNCATION_MARKER]
@@ -403,5 +488,7 @@ async def build_related_files(git_provider, ai_handler, model: str, diff: str,
                               changed_paths: List[str], title: str = "",
                               token_handler=None) -> str:
     """Collect and render in one call, for callers that review with a single model."""
-    files = await collect_related_files(git_provider, ai_handler, model, diff, changed_paths, title)
+    files = await collect_related_files(
+        git_provider, ai_handler, model, diff, changed_paths, title,
+        token_handler=token_handler)
     return render_related_files(files, model, diff, token_handler)

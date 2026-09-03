@@ -799,7 +799,8 @@ class PRReviewer:
                 changed_paths = self._changed_paths()
                 self.related_files = {} if changed_paths is None else await collect_related_files(
                     self.git_provider, self.ai_handler, model, self.patches_diff,
-                    changed_paths, title=self.vars.get("title", ""))
+                    changed_paths, title=self.vars.get("title", ""),
+                    token_handler=self.token_handler)
             self.vars["related_files"] = render_related_files(
                 self.related_files, model, self.patches_diff, self.token_handler)
             self.prediction = await self._get_prediction(model)

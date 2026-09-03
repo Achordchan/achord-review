@@ -1194,8 +1194,12 @@ class GithubProvider(GitProvider):
                 get_logger().warning(
                     "Repository tree is truncated; related-file retrieval sees only part of the repo",
                     artifact={"ref": ref})
+            # Regular files only. A symlink is a blob too, and a safe-looking name
+            # pointing at a tracked secret would walk straight past a path denylist.
             return [element.path for element in tree.tree
-                    if getattr(element, "type", "") == "blob" and getattr(element, "path", "")]
+                    if getattr(element, "type", "") == "blob"
+                    and getattr(element, "mode", "") in ("100644", "100755")
+                    and getattr(element, "path", "")]
         except GithubException as e:
             if e.status == 404:
                 return []

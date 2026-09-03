@@ -528,7 +528,13 @@ pr_commands = [
 ]
 
 [related_files] # Files the diff does not change but could break; fetched from the PR base ref and attached to /review as read-only reference.
-enabled = true # Set to false to review from the diff alone (saves one model call per review)
+# Off by default, and that is a security decision rather than a performance one:
+# candidates come from the repository tree, so enabling this sends untouched file
+# contents to the model provider. Credential paths are excluded and file contents
+# are screened for credential material, but neither check can be exhaustive — a
+# secret living in an ordinarily-named file is invisible to both. Enable it per
+# deployment, on repositories whose contents you are willing to send.
+enabled = false # Costs one extra model call per review when enabled
 max_files = 6 # Upper bound on files attached to a single review
 max_lines_per_file = 400 # Longer files are truncated, not skipped
 max_total_lines = 800 # Ceiling across all attached files
