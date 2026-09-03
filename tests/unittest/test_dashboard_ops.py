@@ -19,6 +19,8 @@ def _isolated_ops_lock(monkeypatch, tmp_path):
 def test_git_pull_returns_completed_output(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
     monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(
         ops, "_run_bounded_command",
         lambda *args, **kwargs: {
             "started": True, "completed": True, "exit_code": 0,
@@ -38,12 +40,32 @@ def test_git_pull_reports_not_started_without_binary(monkeypatch):
         raise FileNotFoundError
 
     monkeypatch.setattr(ops, "_run_bounded_command", missing)
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
 
     result = ops.git_pull()
 
     assert result["started"] is False
     assert result["completed"] is True
     assert "task_id" not in result
+
+
+def test_git_pull_is_disabled_without_deliberate_checkout(monkeypatch):
+    monkeypatch.setattr(ops, "REPO_DIR", "")
+    result = ops.git_pull_capability()
+
+    assert result["available"] is False
+    assert "宿主机" in result["reason"]
+
+
+def test_git_pull_capability_verifies_real_checkout(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="true\n"))
+
+    assert ops.git_pull_capability()["available"] is True
 
 
 def test_restart_stops_after_failed_preflight(monkeypatch):
@@ -241,6 +263,8 @@ def test_operations_reject_while_another_worker_holds_lock(monkeypatch):
         called = True
 
     monkeypatch.setattr(ops, "_run_bounded_command", unexpected)
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
     with ops._operation_lock() as lock_file:
         assert lock_file is not None
         result = ops.git_pull()

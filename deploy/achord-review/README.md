@@ -104,9 +104,14 @@ image and the API routes share the webhook process).
 - Login is rate-limited to 5 failures per IP per 15 minutes; the client IP is
   derived from the trusted proxy hops only (tune with `DASHBOARD_TRUSTED_PROXY_HOPS`,
   default 1 for the shipped nginx setup).
+- Cookie-authenticated writes require the exact external browser origin. The
+  shipped Compose file pins `DASHBOARD_EXTERNAL_ORIGIN=https://review.achord.cn`;
+  custom domains must change this value together with nginx.
 - Every review run is recorded to `./data/review.db`, which feeds the overview
   stats, the review history, and the per-run detail pages. Config saves and ops
-  actions (restart, git pull) are written to the audit log.
+  actions are written to the audit log. Active reviews refresh a durable
+  heartbeat every 60 seconds; only a RUNNING row with no heartbeat for 6 hours
+  is reconciled as interrupted.
 - The config page edits the mounted `config/.secrets.toml` live: each save is validated,
   backed up (5 copies kept, comments preserved), applied to the running process, and —
   when a restart-requiring field changed — can trigger a container restart when the
@@ -114,6 +119,12 @@ image and the API routes share the webhook process).
   without them the panel says so and the restart happens on the host shell).
 - Some navigation entries are greyed out with a "Phase N" badge: those features
   are planned but not shipped yet; their API routes answer 501 COMING_SOON.
+- The shipped image contains application files, not a writable Git checkout, so
+  code releases remain delegated to the host (`git pull --ff-only` followed by
+  `docker compose up -d --build`). The panel disables its update button by
+  default instead of advertising an operation that cannot work. Custom
+  deployments may expose it only by mounting a dedicated writable checkout and
+  setting `ACHORD_REVIEW_REPO_DIR` to that mount.
 
 ## Behaviour summary
 

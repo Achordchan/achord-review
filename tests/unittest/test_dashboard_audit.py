@@ -28,6 +28,46 @@ def test_terminal_audit_write_is_complete_before_await_returns(tmp_path, monkeyp
     assert row["total_tokens"] == 3
 
 
+def test_review_heartbeat_loop_refreshes_until_cancelled(monkeypatch):
+    touched = asyncio.Event()
+
+    async def fake_heartbeat(request_id):
+        assert request_id == "request-id"
+        touched.set()
+
+    monkeypatch.setattr(audit, "review_heartbeat", fake_heartbeat)
+
+    async def scenario():
+        task = asyncio.create_task(
+            audit.review_heartbeat_loop("request-id", interval_seconds=0))
+        await touched.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.gather(task)
+
+    asyncio.run(scenario())
+
+
+def test_reviewer_owns_and_stops_heartbeat_task(monkeypatch):
+    started = asyncio.Event()
+
+    async def fake_loop(request_id):
+        assert request_id == "request-id"
+        started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(audit, "review_heartbeat_loop", fake_loop)
+
+    async def scenario():
+        task = pr_reviewer._start_audit_heartbeat("request-id")
+        assert task is not None
+        await started.wait()
+        await pr_reviewer._stop_audit_heartbeat(task)
+        assert task.cancelled()
+
+    asyncio.run(scenario())
+
+
 def test_failed_audit_persists_usage_and_status_in_one_call(monkeypatch):
     captured = {}
 

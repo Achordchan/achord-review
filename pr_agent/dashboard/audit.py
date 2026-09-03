@@ -157,6 +157,34 @@ async def review_skipped(request_id: str, reason: str) -> None:
     await asyncio.to_thread(_work)
 
 
+async def review_heartbeat(request_id: str) -> None:
+    """Refresh one RUNNING record without affecting the review flow on failure."""
+    if not request_id:
+        return
+
+    def _work():
+        try:
+            storage = _run_audit()
+            if storage is not None:
+                storage.touch_review(request_id)
+        except Exception as e:
+            get_logger().warning(f"Dashboard audit (review_heartbeat) failed, error: {e}")
+
+    await asyncio.to_thread(_work)
+
+
+async def review_heartbeat_loop(request_id: str, interval_seconds: Optional[float] = None) -> None:
+    """Keep a long-running review live until its owner cancels this task."""
+    if not request_id:
+        return
+    if interval_seconds is None:
+        from pr_agent.dashboard.storage import REVIEW_HEARTBEAT_SECONDS
+        interval_seconds = REVIEW_HEARTBEAT_SECONDS
+    while True:
+        await asyncio.sleep(interval_seconds)
+        await review_heartbeat(request_id)
+
+
 def _as_int(value) -> Optional[int]:
     try:
         return int(str(value).strip())

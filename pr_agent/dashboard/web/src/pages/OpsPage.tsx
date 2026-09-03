@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, GitPullRequestArrow, HeartPulse, RefreshCcw, Terminal } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
-import type { AuditLogListData, DiagnoseResult, OpsResult } from '../lib/types'
+import type { AuditLogListData, DiagnoseResult, OpsCapabilities, OpsResult } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/Dialogs'
 import { useToast } from '../components/Toast'
@@ -59,6 +59,13 @@ export default function OpsPage() {
     queryFn: () => api.get<AuditLogListData>('/api/v1/dashboard/audit-logs?limit=50'),
     refetchInterval: 30_000,
   })
+
+  const capabilitiesQuery = useQuery({
+    queryKey: ['ops-capabilities'],
+    queryFn: () => api.get<OpsCapabilities>('/api/v1/dashboard/ops/capabilities'),
+  })
+  const gitPullCapability = capabilitiesQuery.data?.git_pull
+  const gitPullAvailable = gitPullCapability?.available === true
 
   const runAction = async (action: 'restart' | 'pull') => {
     setConfirmAction(null)
@@ -120,12 +127,15 @@ export default function OpsPage() {
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-good/15 text-good"><GitPullRequestArrow size={16} /></span>
             <h3 className="text-sm font-semibold text-text">更新代码</h3>
           </div>
-          <p className="mt-2 text-xs leading-relaxed text-muted">git pull --ff-only 拉取最新代码（fast-forward，不自动合并）。更新后通常需要重启生效。</p>
+          <p className="mt-2 text-xs leading-relaxed text-muted">
+            {gitPullCapability?.reason ?? '正在检测受控 Git 工作区…'}
+          </p>
           <button
             onClick={() => setConfirmAction('pull')}
-            className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2"
+            disabled={!gitPullAvailable}
+            className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            拉取更新
+            {capabilitiesQuery.isLoading ? '检测中…' : gitPullAvailable ? '拉取更新' : '由宿主机更新'}
           </button>
         </Card>
         <Card hover className="p-5">

@@ -142,6 +142,30 @@ async def _await_terminal_audit(coro) -> None:
         raise
 
 
+def _start_audit_heartbeat(request_id: str) -> Optional[asyncio.Task]:
+    """Start durable liveness updates after the RUNNING record exists."""
+    if not request_id:
+        return None
+    try:
+        from pr_agent.dashboard.audit import review_heartbeat_loop
+        return asyncio.create_task(review_heartbeat_loop(request_id))
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit heartbeat not started, error: {e}")
+        return None
+
+
+async def _stop_audit_heartbeat(task: Optional[asyncio.Task]) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await asyncio.gather(task)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        get_logger().debug(f"Dashboard audit heartbeat stop failed, error: {e}")
+
+
 def _audit_verdict(reviewer: "PRReviewer", review_data: Optional[dict]) -> tuple:
     """Best-effort (verdict, reason) for the audit record; "" when unavailable."""
     try:
@@ -304,8 +328,10 @@ class PRReviewer:
         progress_response = None
         review_failed = False
         audit_request_id = ""
+        audit_heartbeat_task = None
         try:
             audit_request_id = await _audit_started(self)
+            audit_heartbeat_task = _start_audit_heartbeat(audit_request_id)
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
                 await _await_terminal_audit(_audit_skipped(audit_request_id, "PR has no files"))
@@ -429,6 +455,7 @@ class PRReviewer:
             if get_settings().config.get("propagate_tool_errors", False):
                 raise
         finally:
+            await _stop_audit_heartbeat(audit_heartbeat_task)
             if progress_response is not None:
                 try:
                     self.git_provider.remove_comment(progress_response)

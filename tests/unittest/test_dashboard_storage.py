@@ -260,8 +260,8 @@ class TestStats:
         recent = storage.create_review(repo_name="r", pr_number=11, pr_url="u11")
         stale_time = storage_module._utc_at(
             time.time() - storage_module.STALE_REVIEW_SECONDS - 60)
-        storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
-                       (stale_time, stale))
+        storage._write("UPDATE reviews SET created_at = ?, heartbeat_at = ? WHERE request_id = ?",
+                       (stale_time, stale_time, stale))
 
         storage.initialize()
 
@@ -274,8 +274,8 @@ class TestStats:
         request_id = storage.create_review(repo_name="r", pr_number=12, pr_url="u12")
         stale_time = storage_module._utc_at(
             time.time() - storage_module.STALE_REVIEW_SECONDS - 60)
-        storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
-                       (stale_time, request_id))
+        storage._write("UPDATE reviews SET created_at = ?, heartbeat_at = ? WHERE request_id = ?",
+                       (stale_time, stale_time, request_id))
         storage._last_stale_cleanup = time.monotonic() - STALE_CLEANUP_INTERVAL_SECONDS - 1
         previous_cleanup = storage._last_stale_cleanup
 
@@ -284,6 +284,32 @@ class TestStats:
         assert stats["running"] == 0
         assert storage._last_stale_cleanup > previous_cleanup
         assert storage.get_review_by_request_id(request_id)["status"] == "FAILED"
+
+    def test_heartbeat_keeps_a_long_running_review_active(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=13, pr_url="u13")
+        stale_time = storage_module._utc_at(
+            time.time() - storage_module.STALE_REVIEW_SECONDS - 60)
+        storage._write("UPDATE reviews SET created_at = ?, heartbeat_at = ? WHERE request_id = ?",
+                       (stale_time, stale_time, request_id))
+
+        assert storage.touch_review(request_id) is True
+        storage.reconcile_stale_reviews(force=True)
+
+        row = storage.get_review_by_request_id(request_id)
+        assert row["status"] == "RUNNING"
+        assert row["heartbeat_at"] != stale_time
+
+    def test_initialize_migrates_review_heartbeat_column(self, storage):
+        with storage._connect() as conn:
+            conn.execute("ALTER TABLE reviews DROP COLUMN heartbeat_at")
+
+        migrated = DashboardStorage(db_path=storage.db_path)
+        migrated.initialize()
+
+        columns = {
+            row["name"] for row in migrated._read("PRAGMA table_info(reviews)")
+        }
+        assert "heartbeat_at" in columns
 
     def test_periodic_maintenance_caps_review_count(self, storage, monkeypatch):
         monkeypatch.setattr(storage_module, "MAX_REVIEW_RECORDS", 3)
@@ -323,6 +349,7 @@ class TestStats:
 
     def test_periodic_maintenance_deletes_expired_history(self, storage):
         request_id = storage.create_review(repo_name="r", pr_number=20, pr_url="u20")
+        storage.complete_review(request_id)
         storage._write("UPDATE reviews SET created_at = ? WHERE request_id = ?",
                        ("2000-01-01 00:00:00", request_id))
         storage.reconcile_stale_reviews(force=True)

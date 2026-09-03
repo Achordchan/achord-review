@@ -38,6 +38,7 @@ LOCKOUT_SECONDS = 15 * 60
 # behind exactly one nginx; only headers appended by those hops are consumed,
 # so clients cannot rotate their X-Forwarded-For to evade the login lockout.
 TRUSTED_PROXY_HOPS = int(os.environ.get("DASHBOARD_TRUSTED_PROXY_HOPS", "0"))
+DASHBOARD_EXTERNAL_ORIGIN = os.environ.get("DASHBOARD_EXTERNAL_ORIGIN", "").strip()
 
 # Session and lockout state is persisted in the dashboard SQLite database so
 # login remains stable across gunicorn workers. Bearer tokens and source
@@ -222,11 +223,28 @@ def require_same_origin(request: Request) -> None:
     origin = request.headers.get("origin") or request.headers.get("referer") or ""
     if not origin:
         raise HTTPException(status_code=403, detail="Missing origin evidence")
-    host = request.headers.get("host", "")
-    # accept only an origin whose host is exactly this deployment's host
-    parsed = urlsplit(origin)
-    if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != host.lower():
+    expected_origin = DASHBOARD_EXTERNAL_ORIGIN
+    if not expected_origin:
+        raise HTTPException(status_code=403, detail="Trusted external origin is not configured")
+    actual_identity = _normalized_origin(origin)
+    expected_identity = _normalized_origin(expected_origin)
+    if actual_identity is None or expected_identity is None or actual_identity != expected_identity:
         raise HTTPException(status_code=403, detail="Cross-site request rejected")
+
+
+def _normalized_origin(value: str) -> Optional[tuple[str, str, int]]:
+    """Return the scheme/host/effective-port identity used by browser origins."""
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https") or not parsed.hostname:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        port = parsed.port or (443 if scheme == "https" else 80)
+        return scheme, parsed.hostname.lower(), port
+    except ValueError:
+        return None
 
 
 def _ok(data: Any = None, message: str = "操作成功") -> Dict[str, Any]:
@@ -371,6 +389,12 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
 
 
 # --------------------------------------------------------------------- ops
+
+@router.get("/ops/capabilities")
+async def ops_capabilities(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+    await require_auth(request, dashboard_session)
+    return _ok({"git_pull": await asyncio.to_thread(ops.git_pull_capability)})
+
 
 @router.post("/ops/restart")
 async def ops_restart(request: Request, dashboard_session: Optional[str] = Cookie(None)):

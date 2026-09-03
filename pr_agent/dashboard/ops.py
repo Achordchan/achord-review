@@ -21,8 +21,9 @@ from pr_agent.log import get_logger
 
 # Fixed commands only; nothing constructed from user input reaches the shell.
 CONTAINER_NAME = os.environ.get("ACHORD_REVIEW_CONTAINER", "achord-review")
-REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "/app")
+REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "").strip()
 GIT_PULL_TIMEOUT_SECONDS = 120
+GIT_PREFLIGHT_TIMEOUT_SECONDS = 5
 DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 5
 RESTART_ACCEPTANCE_GRACE_SECONDS = 0.2
 RESTART_COMMAND_TIMEOUT_SECONDS = 45
@@ -187,7 +188,29 @@ def _monitor_restart_process(proc: subprocess.Popen) -> threading.Thread:
     return monitor
 
 
+def git_pull_capability() -> Dict[str, Any]:
+    """Report whether an operator deliberately mounted a writable checkout."""
+    if not REPO_DIR:
+        return {
+            "available": False,
+            "reason": "标准部署由宿主机发布流程更新，面板内代码更新未启用。",
+        }
+    try:
+        inspection = subprocess.run(
+            ["git", "-C", REPO_DIR, "rev-parse", "--is-inside-work-tree"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            timeout=GIT_PREFLIGHT_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return {"available": False, "reason": "受控 Git 工作区不可用。"}
+    if inspection.returncode != 0 or inspection.stdout.strip() != "true":
+        return {"available": False, "reason": "配置的代码目录不是可更新的 Git 工作区。"}
+    return {"available": True, "reason": "已连接受控 Git 工作区，仅允许 fast-forward 更新。"}
+
+
 def git_pull() -> Dict[str, Any]:
+    capability = git_pull_capability()
+    if not capability["available"]:
+        return _not_started(capability["reason"])
     with _operation_lock() as lock_file:
         if lock_file is None:
             return _not_started("另一项运维操作正在执行，git pull 未发起")

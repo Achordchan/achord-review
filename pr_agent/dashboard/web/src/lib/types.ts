@@ -85,6 +85,9 @@ export type OpsResult = {
   exit_code: number | null
   output: string[]
 }
+export type OpsCapabilities = {
+  git_pull: { available: boolean; reason: string }
+}
 export type DiagnoseResult = {
   ok: boolean
   llm: Record<string, unknown>

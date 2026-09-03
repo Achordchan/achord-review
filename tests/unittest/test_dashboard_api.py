@@ -304,13 +304,19 @@ class TestClientIp:
 
 
 class TestSameOrigin:
-    def _request(self, headers):
+    @pytest.fixture(autouse=True)
+    def _external_origin(self, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_api, "DASHBOARD_EXTERNAL_ORIGIN", "https://review.achord.cn")
+
+    def _request(self, headers, scheme="https"):
         from fastapi import Request
         from starlette.datastructures import Headers as SHeaders
 
         scope = {
             "type": "http", "method": "POST", "path": "/", "headers": [],
             "query_string": b"", "client": ("10.0.0.1", 1234), "server": ("h", 80),
+            "scheme": scheme,
         }
         req = Request(scope)
         req._headers = SHeaders(headers)
@@ -327,11 +333,15 @@ class TestSameOrigin:
             dashboard_api.require_same_origin(self._request({"sec-fetch-site": "cross-site"}))
         assert exc.value.status_code == 403
 
-    def test_origin_match_passes(self, client):
+    def test_origin_match_passes(self, client, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_api, "DASHBOARD_EXTERNAL_ORIGIN", "https://review.achord.cn")
         dashboard_api.require_same_origin(self._request({
             "origin": "https://review.achord.cn", "host": "review.achord.cn"}))
 
-    def test_referer_path_match_passes(self, client):
+    def test_referer_path_match_passes(self, client, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_api, "DASHBOARD_EXTERNAL_ORIGIN", "https://review.achord.cn")
         dashboard_api.require_same_origin(self._request({
             "referer": "https://review.achord.cn/dashboard/config?tab=model",
             "host": "review.achord.cn"}))
@@ -345,12 +355,41 @@ class TestSameOrigin:
                 "origin": "https://evil.example", "host": "review.achord.cn"}))
         assert exc.value.status_code == 403
 
+    def test_cross_scheme_and_non_default_port_are_rejected(self, client, monkeypatch):
+        import pytest as _pytest
+        from fastapi import HTTPException
+
+        monkeypatch.setattr(
+            dashboard_api, "DASHBOARD_EXTERNAL_ORIGIN", "https://review.achord.cn")
+        for origin in ("http://review.achord.cn", "https://review.achord.cn:8443"):
+            with _pytest.raises(HTTPException) as exc:
+                dashboard_api.require_same_origin(self._request({
+                    "origin": origin, "host": "review.achord.cn"}))
+            assert exc.value.status_code == 403
+
+    def test_configured_external_origin_wins_over_internal_request_url(
+            self, client, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_api, "DASHBOARD_EXTERNAL_ORIGIN", "https://review.achord.cn")
+        dashboard_api.require_same_origin(self._request({
+            "origin": "https://review.achord.cn", "host": "internal:3000"}, scheme="http"))
+
     def test_no_evidence_rejected(self, client):
         import pytest as _pytest
         from fastapi import HTTPException
 
         with _pytest.raises(HTTPException) as exc:
             dashboard_api.require_same_origin(self._request({}))
+        assert exc.value.status_code == 403
+
+    def test_origin_fallback_requires_trusted_external_origin(self, client, monkeypatch):
+        import pytest as _pytest
+        from fastapi import HTTPException
+
+        monkeypatch.setattr(dashboard_api, "DASHBOARD_EXTERNAL_ORIGIN", "")
+        with _pytest.raises(HTTPException) as exc:
+            dashboard_api.require_same_origin(self._request({
+                "origin": "https://review.achord.cn", "host": "review.achord.cn"}))
         assert exc.value.status_code == 403
 
     def test_mutations_require_origin_evidence(self, client):
@@ -381,6 +420,18 @@ class TestProtectedRoutes:
         assert resp.status_code == 200
         assert event_loop_threads and resolved_on
         assert all(thread_id != event_loop_threads[0] for thread_id in resolved_on)
+
+    def test_ops_capabilities_report_host_managed_updates(self, client, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_api.ops, "git_pull_capability",
+            lambda: {"available": False, "reason": "host managed"})
+
+        resp = client.get(
+            "/api/v1/dashboard/ops/capabilities", headers=_auth_header(client))
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["git_pull"] == {
+            "available": False, "reason": "host managed"}
 
     def test_config_save_without_restart_reports_not_restarted(self, client):
         auth = _auth_header(client)

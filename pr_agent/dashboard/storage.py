@@ -24,6 +24,13 @@ from pr_agent.log import get_logger
 
 DEFAULT_DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "/app/data/review.db")
 STALE_REVIEW_SECONDS = int(os.environ.get("DASHBOARD_STALE_REVIEW_SECONDS", str(6 * 3600)))
+REVIEW_HEARTBEAT_SECONDS = max(
+    5,
+    min(
+        int(os.environ.get("DASHBOARD_REVIEW_HEARTBEAT_SECONDS", "60")),
+        max(5, STALE_REVIEW_SECONDS // 3),
+    ),
+)
 STALE_CLEANUP_INTERVAL_SECONDS = 5 * 60
 REVIEW_RETENTION_DAYS = max(1, int(os.environ.get("DASHBOARD_REVIEW_RETENTION_DAYS", "90")))
 MAX_REVIEW_RECORDS = max(100, int(os.environ.get("DASHBOARD_MAX_REVIEW_RECORDS", "10000")))
@@ -46,6 +53,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     command TEXT DEFAULT '/review',
 
     status TEXT NOT NULL,
+    heartbeat_at TEXT,
     verdict TEXT,
     verdict_reason TEXT,
 
@@ -179,11 +187,18 @@ class DashboardStorage:
             os.chmod(directory, 0o700)
         with self._write_lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # Serialize cross-worker schema inspection and migrations. Without
+            # an early write lock, two fresh workers can both decide that a
+            # column is missing and race the same ALTER TABLE.
+            conn.execute("BEGIN IMMEDIATE")
             auth_columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(dashboard_auth_state)").fetchall()
             }
             session_columns = {
                 row["name"] for row in conn.execute("PRAGMA table_info(dashboard_sessions)").fetchall()
+            }
+            review_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
             }
             auth_generation_migrated = False
             session_generation_migrated = False
@@ -198,6 +213,9 @@ class DashboardStorage:
                     "ALTER TABLE dashboard_sessions"
                     " ADD COLUMN password_generation INTEGER NOT NULL DEFAULT 0")
                 session_generation_migrated = True
+            if "heartbeat_at" not in review_columns:
+                conn.execute("ALTER TABLE reviews ADD COLUMN heartbeat_at TEXT")
+                conn.execute("UPDATE reviews SET heartbeat_at = created_at WHERE heartbeat_at IS NULL")
             if auth_generation_migrated or session_generation_migrated:
                 # Legacy sessions have no trustworthy generation and must not revive.
                 conn.execute("DELETE FROM dashboard_sessions")
@@ -224,10 +242,10 @@ class DashboardStorage:
         conn.execute(
             "UPDATE reviews SET status='FAILED',"
             " error_message='审查进程未正常结束（服务重启或 worker 中断）', completed_at=?"
-            " WHERE status='RUNNING' AND created_at < ?",
+            " WHERE status='RUNNING' AND COALESCE(heartbeat_at, created_at) < ?",
             (_utcnow(), _utc_at(now - STALE_REVIEW_SECONDS)))
         conn.execute(
-            "DELETE FROM reviews WHERE created_at < ?",
+            "DELETE FROM reviews WHERE status != 'RUNNING' AND created_at < ?",
             (_utc_at(now - REVIEW_RETENTION_DAYS * 24 * 3600),))
         running_count = conn.execute(
             "SELECT COUNT(*) FROM reviews WHERE status='RUNNING'").fetchone()[0]
@@ -475,14 +493,30 @@ class DashboardStorage:
         """Insert a RUNNING record and return its request_id, or "" on failure."""
         self.reconcile_stale_reviews(timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
         request_id = uuid.uuid4().hex
+        now = _utcnow()
         inserted = self._write(
             "INSERT INTO reviews (request_id, repo_name, pr_number, pr_title, pr_url, commit_sha,"
-            " sender, trigger_type, command, status, model, reasoning_effort, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?)",
+            " sender, trigger_type, command, status, heartbeat_at, model, reasoning_effort, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?, ?)",
             (request_id, repo_name, pr_number, pr_title, pr_url, commit_sha, sender,
-             trigger_type, command, model, reasoning_effort, _utcnow()),
+             trigger_type, command, now, model, reasoning_effort, now),
             timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
         return request_id if inserted is not None else ""
+
+    def touch_review(self, request_id: str) -> bool:
+        """Refresh liveness for a RUNNING review without reviving terminal rows."""
+        touched = False
+
+        def _touch(conn: sqlite3.Connection) -> None:
+            nonlocal touched
+            cursor = conn.execute(
+                "UPDATE reviews SET heartbeat_at=? WHERE request_id=? AND status='RUNNING'",
+                (_utcnow(), request_id))
+            touched = cursor.rowcount == 1
+
+        return self._transaction(
+            _touch, "review heartbeat", timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS,
+            max_retry=1) and touched
 
     def complete_review(self, request_id: str, verdict: str = "", verdict_reason: str = "",
                         markdown_output: str = "", raw_prediction: str = "") -> None:

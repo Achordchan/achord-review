@@ -34,6 +34,12 @@ services:
       # The published port is loopback-only behind the single documented nginx.
       # Direct/custom deployments default to zero trusted hops and must opt in.
       DASHBOARD_TRUSTED_PROXY_HOPS: "1"
+      # Exact public browser origin used by the CSRF fallback when Fetch
+      # Metadata headers are unavailable. Scheme and effective port matter.
+      DASHBOARD_EXTERNAL_ORIGIN: "https://review.achord.cn"
+      # Intentionally omit ACHORD_REVIEW_REPO_DIR: this image is not a checkout.
+      # Code releases are performed by the host deployment workflow. A custom
+      # deployment may opt in only with a deliberately mounted writable checkout.
     mem_limit: 900m
     logging:
       driver: json-file
