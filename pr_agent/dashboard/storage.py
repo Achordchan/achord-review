@@ -167,6 +167,7 @@ class DashboardStorage:
         self._last_stale_cleanup = 0.0
 
     def _connect(self, timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS) -> sqlite3.Connection:
+        self._prepare_storage_path()
         conn = sqlite3.connect(self.db_path, timeout=timeout_seconds)
         try:
             conn.row_factory = sqlite3.Row
@@ -180,10 +181,9 @@ class DashboardStorage:
             raise
 
     def initialize(self) -> None:
-        directory = os.path.dirname(self.db_path) or "."
-        directory_created = not os.path.exists(directory)
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        if directory_created:
+        directory = os.path.dirname(self.db_path)
+        if directory:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
             os.chmod(directory, 0o700)
         with self._write_lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
@@ -225,6 +225,22 @@ class DashboardStorage:
             self._maintain_review_rows(conn)
         self._protect_storage_permissions()
         self._last_stale_cleanup = time.monotonic()
+
+    def _prepare_storage_path(self) -> None:
+        """Create/secure the database before SQLite can open it or make sidecars."""
+        directory = os.path.dirname(self.db_path)
+        if directory:
+            os.chmod(directory, 0o700)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self.db_path, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
 
     def _protect_storage_permissions(self) -> None:
         """Keep the database and SQLite sidecars owner-readable only."""

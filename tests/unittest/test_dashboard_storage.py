@@ -548,20 +548,25 @@ class TestStoragePermissions:
         assert stat.S_IMODE(os.stat(f"{storage.db_path}-wal").st_mode) == 0o600
         assert stat.S_IMODE(os.stat(f"{storage.db_path}-shm").st_mode) == 0o600
 
-    def test_existing_parent_directory_permissions_are_not_changed(self, tmp_path, monkeypatch):
-        directory = tmp_path / "shared-parent"
-        directory.mkdir()
-        real_chmod = os.chmod
-        chmod_targets = []
+    def test_existing_data_directory_is_secured_before_sqlite_connect(self, tmp_path, monkeypatch):
+        directory = tmp_path / "dashboard-data"
+        directory.mkdir(mode=0o755)
+        db_path = directory / "review.db"
+        observed_modes = []
+        real_connect = storage_module.sqlite3.connect
 
-        def record_chmod(path, mode):
-            chmod_targets.append(os.fspath(path))
-            real_chmod(path, mode)
+        def inspect_modes_before_connect(path, *args, **kwargs):
+            observed_modes.append((
+                stat.S_IMODE(os.stat(directory).st_mode),
+                stat.S_IMODE(os.stat(path).st_mode),
+            ))
+            return real_connect(path, *args, **kwargs)
 
-        monkeypatch.setattr("pr_agent.dashboard.storage.os.chmod", record_chmod)
-        DashboardStorage(db_path=str(directory / "review.db")).initialize()
+        monkeypatch.setattr(storage_module.sqlite3, "connect", inspect_modes_before_connect)
+        DashboardStorage(db_path=str(db_path)).initialize()
 
-        assert str(directory) not in chmod_targets
+        assert observed_modes
+        assert all(modes == (0o700, 0o600) for modes in observed_modes)
 
     def test_vanished_sqlite_sidecar_does_not_fail_permission_protection(self, storage, monkeypatch):
         real_chmod = os.chmod

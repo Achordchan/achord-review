@@ -275,7 +275,7 @@ def probe_github_app() -> Dict[str, Any]:
         if app_response.status_code != 200:
             return {"ok": False, "app_id": app_id,
                     "error": f"GitHub App API returned {app_response.status_code}"}
-        installation = None
+        active_installations = []
         installations_url = "https://api.github.com/app/installations?per_page=100"
         while installations_url:
             installations_response = requests.get(
@@ -284,51 +284,65 @@ def probe_github_app() -> Dict[str, Any]:
                 return {"ok": False, "app_id": app_id,
                         "error": f"GitHub installations API returned {installations_response.status_code}"}
             installations = installations_response.json()
-            installation = next(
-                (item for item in installations if not item.get("suspended_at")), None)
-            if installation is not None:
-                break
+            active_installations.extend(
+                item for item in installations if not item.get("suspended_at"))
             installations_url = _next_link(
                 getattr(installations_response, "headers", {}).get("Link", ""))
-        if installation is None:
+        if not active_installations:
             return {"ok": False, "app_id": app_id, "error": "no active GitHub App installation"}
 
-        installation_id = int(installation["id"])
-        token_response = requests.post(
-            f"https://api.github.com/app/installations/{installation_id}/access_tokens",
-            timeout=15, headers=app_headers)
-        if token_response.status_code != 201:
-            return {"ok": False, "app_id": app_id, "installation_id": installation_id,
-                    "error": f"GitHub installation token API returned {token_response.status_code}"}
-        installation_token = str(token_response.json().get("token", ""))
-        if not installation_token:
-            return {"ok": False, "app_id": app_id, "installation_id": installation_id,
-                    "error": "GitHub installation token response was empty"}
-        installation_headers = {
-            "Authorization": f"Bearer {installation_token}",
-            "Accept": "application/vnd.github+json",
-        }
-        try:
-            repositories_response = requests.get(
-                "https://api.github.com/installation/repositories?per_page=1",
-                timeout=15, headers=installation_headers)
-            if repositories_response.status_code != 200:
-                return {"ok": False, "app_id": app_id, "installation_id": installation_id,
-                        "error": f"GitHub repository access returned {repositories_response.status_code}"}
-            return {
-                "ok": True,
-                "app_id": app_id,
-                "app_name": app_response.json().get("name", ""),
-                "installation_id": installation_id,
-                "repository_count": int(repositories_response.json().get("total_count", 0)),
+        probe_errors = []
+        for installation in active_installations:
+            installation_id = int(installation["id"])
+            token_response = requests.post(
+                f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+                timeout=15, headers=app_headers)
+            if token_response.status_code != 201:
+                probe_errors.append(
+                    f"installation {installation_id} token API returned {token_response.status_code}")
+                continue
+            installation_token = str(token_response.json().get("token", ""))
+            if not installation_token:
+                probe_errors.append(f"installation {installation_id} token response was empty")
+                continue
+            installation_headers = {
+                "Authorization": f"Bearer {installation_token}",
+                "Accept": "application/vnd.github+json",
             }
-        finally:
             try:
-                requests.delete(
-                    "https://api.github.com/installation/token",
+                repositories_response = requests.get(
+                    "https://api.github.com/installation/repositories?per_page=1",
                     timeout=15, headers=installation_headers)
-            except Exception as e:
-                get_logger().debug(f"GitHub probe token revocation skipped, error: {e}")
+                if repositories_response.status_code != 200:
+                    probe_errors.append(
+                        f"installation {installation_id} repository access returned "
+                        f"{repositories_response.status_code}")
+                    continue
+                repository_count = int(repositories_response.json().get("total_count", 0))
+                if repository_count <= 0:
+                    probe_errors.append(f"installation {installation_id} has no accessible repositories")
+                    continue
+                return {
+                    "ok": True,
+                    "app_id": app_id,
+                    "app_name": app_response.json().get("name", ""),
+                    "installation_id": installation_id,
+                    "repository_count": repository_count,
+                }
+            finally:
+                try:
+                    requests.delete(
+                        "https://api.github.com/installation/token",
+                        timeout=15, headers=installation_headers)
+                except Exception as e:
+                    get_logger().debug(f"GitHub probe token revocation skipped, error: {e}")
+        return {
+            "ok": False,
+            "app_id": app_id,
+            "app_name": app_response.json().get("name", ""),
+            "installation_count": len(active_installations),
+            "error": "; ".join(probe_errors)[:300] or "no accessible GitHub repositories",
+        }
     except Exception as e:
         return {"ok": False, "app_id": app_id, "error": str(e)[:300]}
 

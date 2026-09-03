@@ -360,3 +360,64 @@ def test_github_probe_mints_and_validates_installation_token(monkeypatch):
     assert any("/app/installations?per_page=100&page=2" in url for method, url, _ in requested)
     assert ("DELETE", "https://api.github.com/installation/token",
             "Bearer installation-token") in requested
+
+
+def test_github_probe_skips_installations_without_repository_access(monkeypatch):
+    import jwt
+    import requests
+
+    class FakeSettings:
+        def get(self, key, default=None):
+            return {
+                "github.app_id": "123",
+                "github.private_key": "private-key",
+            }.get(key, default)
+
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self.payload = payload
+            self.headers = {}
+
+        def json(self):
+            return self.payload
+
+    import pr_agent.config_loader as config_loader
+    monkeypatch.setattr(config_loader, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(jwt, "encode", lambda *args, **kwargs: "app-jwt")
+    repository_counts = {1: 0, 2: 3}
+    revoked = []
+
+    def fake_get(url, **kwargs):
+        if url.endswith("/app"):
+            return Response(200, {"name": "achord-review"})
+        if "/app/installations" in url:
+            return Response(200, [
+                {"id": 1, "suspended_at": None},
+                {"id": 2, "suspended_at": None},
+            ])
+        token = kwargs["headers"]["Authorization"].removeprefix("Bearer token-")
+        return Response(200, {"total_count": repository_counts[int(token)]})
+
+    def fake_post(url, **kwargs):
+        installation_id = int(url.split("/installations/", 1)[1].split("/", 1)[0])
+        return Response(201, {"token": f"token-{installation_id}"})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(
+        requests, "delete",
+        lambda url, **kwargs: revoked.append(kwargs["headers"]["Authorization"]))
+
+    result = ops.probe_github_app()
+
+    assert result["ok"] is True
+    assert result["installation_id"] == 2
+    assert result["repository_count"] == 3
+    assert revoked == ["Bearer token-1", "Bearer token-2"]
+
+    repository_counts[2] = 0
+    result = ops.probe_github_app()
+    assert result["ok"] is False
+    assert result["installation_count"] == 2
+    assert "no accessible repositories" in result["error"]
