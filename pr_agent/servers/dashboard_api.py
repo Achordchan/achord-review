@@ -18,7 +18,7 @@ import time
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Cookie, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Cookie, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictBool
 
@@ -342,6 +342,7 @@ async def get_config(request: Request, dashboard_session: Optional[str] = Cookie
 
 @router.put("/config")
 async def put_config(body: ConfigUpdateRequest, request: Request,
+                     background_tasks: BackgroundTasks,
                      dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
     require_same_origin(request)
@@ -360,16 +361,19 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
         ip_address=_client_ip(request))
     # report what actually happened: without docker inside the container the
     # restart never starts, and the UI must not wait for one
-    result = await asyncio.to_thread(ops.restart_container) if restart else None
+    result, restart_ticket = await asyncio.to_thread(ops.prepare_restart) if restart else (None, None)
     restart_started = bool(restart and result and result.get("started"))
     restarted = bool(restart_started and result.get("completed") and result.get("exit_code") == 0)
     if restart:
         await asyncio.to_thread(
             _storage_call, "add_audit_log", "RESTART_CONTAINER",
             {"source": "config_save", "started": restart_started,
+             "scheduled": restart_ticket is not None,
              "completed": bool(result and result.get("completed")),
              "exit_code": (result or {}).get("exit_code")},
             ip_address=_client_ip(request))
+        if restart_ticket is not None:
+            background_tasks.add_task(ops.execute_restart, restart_ticket)
     if hot_reload_pending:
         message = "配置已保存，但热重载失败，需要重启"
     elif persistence_warning:
@@ -379,7 +383,7 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
     if restarted:
         message += "，容器已完成重启"
     elif restart_started:
-        message += "，重启指令已下发，完成状态待确认"
+        message += "，重启已排队，将在当前响应后执行"
     elif restart:
         message += "，但重启未发起，请检查受控 Docker 端点或在宿主机重启"
     return _ok({"restarted": restarted,
@@ -397,24 +401,32 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
 @router.get("/ops/capabilities")
 async def ops_capabilities(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
-    return _ok({"git_pull": await asyncio.to_thread(ops.git_pull_capability)})
+    git_pull, restart = await asyncio.gather(
+        asyncio.to_thread(ops.git_pull_capability),
+        asyncio.to_thread(ops.restart_capability),
+    )
+    return _ok({"git_pull": git_pull, "restart": restart})
 
 
 @router.post("/ops/restart")
-async def ops_restart(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+async def ops_restart(request: Request, background_tasks: BackgroundTasks,
+                      dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)
     require_same_origin(request)
-    result = await asyncio.to_thread(ops.restart_container)
+    result, restart_ticket = await asyncio.to_thread(ops.prepare_restart)
     started = bool(result.get("started"))
     await asyncio.to_thread(
-        _storage_call, "add_audit_log", "RESTART_CONTAINER", {"started": started},
+        _storage_call, "add_audit_log", "RESTART_CONTAINER",
+        {"started": started, "scheduled": restart_ticket is not None},
         ip_address=_client_ip(request))
     if not started:
         return JSONResponse(
             status_code=503,
             content={"success": False, "code": "OPERATION_NOT_STARTED",
                      "message": (result.get("output") or ["容器重启未发起"])[0], "data": result})
-    return _ok(result, message="容器重启指令已下发")
+    if restart_ticket is not None:
+        background_tasks.add_task(ops.execute_restart, restart_ticket)
+    return _ok(result, message="容器重启已排队")
 
 
 @router.post("/ops/git-pull")

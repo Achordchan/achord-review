@@ -38,6 +38,11 @@ AUDIT_RETENTION_DAYS = max(1, int(os.environ.get("DASHBOARD_AUDIT_RETENTION_DAYS
 MAX_AUDIT_LOG_ROWS = max(100, int(os.environ.get("DASHBOARD_MAX_AUDIT_LOG_ROWS", "10000")))
 MAX_REVIEW_PAYLOAD_BYTES = max(
     64 * 1024, int(os.environ.get("DASHBOARD_MAX_REVIEW_PAYLOAD_BYTES", str(1024 * 1024))))
+MAX_REVIEW_FINDINGS = 30
+MAX_REVIEW_FINDINGS_BYTES = min(MAX_REVIEW_PAYLOAD_BYTES, 512 * 1024)
+MAX_FINDING_FILE_BYTES = 4 * 1024
+MAX_FINDING_SUMMARY_BYTES = 16 * 1024
+MAX_FINDING_SUGGESTION_BYTES = 64 * 1024
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reviews (
@@ -155,6 +160,47 @@ def _truncate_payload(value: str, max_bytes: Optional[int] = None) -> str:
     marker = b"\n\n[dashboard payload truncated]"
     prefix = encoded[:max(0, max_bytes - len(marker))]
     return prefix.decode("utf-8", errors="ignore") + marker.decode()
+
+
+def _truncate_text_bytes(value: Any, max_bytes: int) -> str:
+    """Return UTF-8 text that never exceeds max_bytes, with a bounded marker."""
+    if max_bytes <= 0:
+        return ""
+    encoded = str(value or "").encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return encoded.decode("utf-8")
+    marker = b"..."
+    if max_bytes <= len(marker):
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+    prefix = encoded[:max_bytes - len(marker)].decode("utf-8", errors="ignore").encode("utf-8")
+    return (prefix + marker).decode("utf-8")
+
+
+def _bounded_review_issues(issues: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Bound model-controlled finding count, fields and aggregate UTF-8 bytes."""
+    remaining = MAX_REVIEW_FINDINGS_BYTES
+    bounded = []
+    text_fields = (
+        ("severity", 16),
+        ("relevant_file", MAX_FINDING_FILE_BYTES),
+        ("issue_summary", MAX_FINDING_SUMMARY_BYTES),
+        ("suggestion", MAX_FINDING_SUGGESTION_BYTES),
+    )
+    for issue in issues:
+        if len(bounded) >= MAX_REVIEW_FINDINGS or remaining <= 0:
+            break
+        if not isinstance(issue, dict):
+            continue
+        clean_issue = {
+            "relevant_lines_start": issue.get("relevant_lines_start"),
+            "relevant_lines_end": issue.get("relevant_lines_end"),
+        }
+        for field, field_limit in text_fields:
+            text = _truncate_text_bytes(issue.get(field), min(field_limit, remaining))
+            clean_issue[field] = text
+            remaining -= len(text.encode("utf-8"))
+        bounded.append(clean_issue)
+    return bounded
 
 
 class DashboardStorage:
@@ -590,6 +636,7 @@ class DashboardStorage:
 
     def add_review_issues(self, request_id: str, issues: List[Dict[str, Any]]) -> None:
         row = self.get_review_by_request_id(request_id)
+        issues = _bounded_review_issues(issues)
         if not row or not issues:
             return
         review_id = row["id"]
@@ -619,6 +666,7 @@ class DashboardStorage:
         """
         markdown_output = _truncate_payload(markdown_output)
         raw_prediction = _truncate_payload(raw_prediction)
+        issues = _bounded_review_issues(issues)
 
         def _finish(conn: sqlite3.Connection) -> None:
             cursor = conn.execute(

@@ -436,6 +436,9 @@ class TestProtectedRoutes:
         monkeypatch.setattr(
             dashboard_api.ops, "git_pull_capability",
             lambda: {"available": False, "reason": "host managed"})
+        monkeypatch.setattr(
+            dashboard_api.ops, "restart_capability",
+            lambda: {"available": False, "reason": "host restarted"})
 
         resp = client.get(
             "/api/v1/dashboard/ops/capabilities", headers=_auth_header(client))
@@ -443,6 +446,8 @@ class TestProtectedRoutes:
         assert resp.status_code == 200
         assert resp.json()["data"]["git_pull"] == {
             "available": False, "reason": "host managed"}
+        assert resp.json()["data"]["restart"] == {
+            "available": False, "reason": "host restarted"}
 
     def test_config_save_without_restart_reports_not_restarted(self, client):
         auth = _auth_header(client)
@@ -456,9 +461,19 @@ class TestProtectedRoutes:
 
     def test_config_restart_acceptance_is_not_reported_as_completion(
             self, client, storage, monkeypatch):
+        executed = []
         monkeypatch.setattr(
-            dashboard_api.ops, "restart_container",
-            lambda: {"started": True, "completed": False, "exit_code": None, "output": []})
+            dashboard_api.ops, "prepare_restart",
+            lambda: (
+                {"started": True, "completed": False, "exit_code": None,
+                 "scheduled": True, "output": []},
+                "restart-ticket",
+            ))
+        monkeypatch.setattr(
+            dashboard_api.ops, "execute_restart",
+            lambda ticket: executed.append((ticket, bool([
+                row for row in storage.list_audit_logs()
+                if row["action"] == "RESTART_CONTAINER"]))))
         auth = _auth_header(client)
 
         resp = client.put(
@@ -469,7 +484,8 @@ class TestProtectedRoutes:
         assert resp.status_code == 200
         assert resp.json()["data"]["restart_started"] is True
         assert resp.json()["data"]["restarted"] is False
-        assert "待确认" in resp.json()["message"]
+        assert "已排队" in resp.json()["message"]
+        assert executed == [("restart-ticket", True)]
         restart_logs = [
             row for row in storage.list_audit_logs()
             if row["action"] == "RESTART_CONTAINER"]
@@ -478,6 +494,7 @@ class TestProtectedRoutes:
         details = json.loads(restart_logs[0]["details_json"])
         assert details == {
             "source": "config_save", "started": True,
+            "scheduled": True,
             "completed": False, "exit_code": None,
         }
 
@@ -536,9 +553,9 @@ class TestProtectedRoutes:
     def test_ops_reports_command_not_started(self, client, monkeypatch):
         auth = _auth_header(client)
         monkeypatch.setattr(
-            dashboard_api.ops, "restart_container",
-            lambda: {"started": False, "completed": True, "exit_code": None,
-                     "output": ["docker unavailable"]})
+            dashboard_api.ops, "prepare_restart",
+            lambda: ({"started": False, "completed": True, "exit_code": None,
+                      "output": ["docker unavailable"]}, None))
         resp = client.post(
             "/api/v1/dashboard/ops/restart",
             headers={**auth, "Sec-Fetch-Site": "same-origin"})

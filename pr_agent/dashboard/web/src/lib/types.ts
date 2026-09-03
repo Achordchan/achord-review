@@ -87,6 +87,7 @@ export type OpsResult = {
 }
 export type OpsCapabilities = {
   git_pull: { available: boolean; reason: string }
+  restart: { available: boolean; reason: string }
 }
 export type DiagnoseResult = {
   ok: boolean

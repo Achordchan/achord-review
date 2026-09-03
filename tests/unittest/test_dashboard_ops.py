@@ -73,86 +73,76 @@ def test_restart_stops_after_failed_preflight(monkeypatch):
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args=args[0], returncode=1, stdout="daemon unavailable"))
-    popen_called = False
+    command_called = False
 
-    def unexpected_popen(*args, **kwargs):
-        nonlocal popen_called
-        popen_called = True
+    def unexpected_command(*args, **kwargs):
+        nonlocal command_called
+        command_called = True
 
-    monkeypatch.setattr(ops.subprocess, "Popen", unexpected_popen)
+    monkeypatch.setattr(ops, "_run_bounded_command", unexpected_command)
 
-    result = ops.restart_container()
+    result, ticket = ops.prepare_restart()
 
     assert result["started"] is False
-    assert popen_called is False
+    assert ticket is None
+    assert command_called is False
 
 
-def test_restart_reports_immediate_command_rejection(monkeypatch):
+def test_restart_reports_scheduler_lock_conflict(monkeypatch):
     monkeypatch.setattr(
-        ops.subprocess, "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args=args[0], returncode=0, stdout="container found"))
+        ops, "_operation_lock",
+        lambda: __import__("contextlib").nullcontext(None))
 
-    class RejectedProcess:
-        def poll(self):
-            return 13
-
-    monkeypatch.setattr(ops.subprocess, "Popen", lambda *args, **kwargs: RejectedProcess())
-    monkeypatch.setattr(ops.time, "sleep", lambda _: None)
-
-    result = ops.restart_container()
+    result, ticket = ops.prepare_restart()
 
     assert result["started"] is False
     assert result["completed"] is True
-    assert "退出码 13" in result["output"][0]
+    assert ticket is None
+    assert "正在执行" in result["output"][0]
 
 
-def test_restart_monitor_kills_hung_cli(monkeypatch):
-    killed = []
-
-    class HungRestart:
-        pid = 9001
-
-        def __init__(self):
-            self.waits = 0
-
-        def wait(self, timeout):
-            self.waits += 1
-            if self.waits == 1:
-                raise subprocess.TimeoutExpired(cmd="docker restart", timeout=timeout)
-            return -signal.SIGKILL
-
-    process = HungRestart()
-    monkeypatch.setattr(ops.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
-
-    monitor = ops._monitor_restart_process(process)
-    monitor.join(timeout=2)
-
-    assert monitor.is_alive() is False
-    assert killed == [(process.pid, signal.SIGKILL)]
-
-
-def test_restart_starts_bounded_monitor_after_acceptance(monkeypatch):
+def test_restart_prepares_ticket_without_running_command(monkeypatch):
     monkeypatch.setattr(
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args=args[0], returncode=0, stdout="container found"))
+    commands = []
+    monkeypatch.setattr(
+        ops, "_run_bounded_command", lambda *args, **kwargs: commands.append(args))
 
-    class AcceptedProcess:
-        def poll(self):
-            return None
-
-    process = AcceptedProcess()
-    monitored = []
-    monkeypatch.setattr(ops.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(ops.time, "sleep", lambda _: None)
-    monkeypatch.setattr(ops, "_monitor_restart_process", lambda proc: monitored.append(proc))
-
-    result = ops.restart_container()
+    result, ticket = ops.prepare_restart()
 
     assert result["started"] is True
     assert result["completed"] is False
-    assert monitored == [process]
+    assert result["scheduled"] is True
+    assert ticket is not None
+    assert commands == []
+    ticket.lock_context.__exit__(None, None, None)
+
+
+def test_execute_restart_runs_fixed_bounded_command_and_releases_ticket(monkeypatch):
+    class LockContext:
+        exited = False
+
+        def __exit__(self, *args):
+            self.exited = True
+
+    lock_context = LockContext()
+    ticket = ops._RestartTicket(lock_context, "lock-file")
+    captured = {}
+    monkeypatch.setattr(
+        ops, "_run_bounded_command",
+        lambda *args, **kwargs: captured.update({"args": args, "kwargs": kwargs}) or {
+            "exit_code": 0,
+        })
+
+    ops.execute_restart(ticket)
+
+    assert captured["args"][0] == [
+        "docker", "restart", "--timeout", "30", ops.CONTAINER_NAME]
+    assert captured["kwargs"]["timeout_seconds"] == ops.RESTART_COMMAND_TIMEOUT_SECONDS
+    assert captured["kwargs"]["lock_file"] == "lock-file"
+    assert lock_context.exited is True
 
 
 def test_tail_logs_caps_a_single_huge_line(monkeypatch, tmp_path):

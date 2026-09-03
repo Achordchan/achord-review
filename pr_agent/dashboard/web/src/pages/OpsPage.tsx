@@ -66,6 +66,8 @@ export default function OpsPage() {
   })
   const gitPullCapability = capabilitiesQuery.data?.git_pull
   const gitPullAvailable = gitPullCapability?.available === true
+  const restartCapability = capabilitiesQuery.data?.restart
+  const restartAvailable = restartCapability?.available === true
 
   const runAction = async (action: 'restart' | 'pull') => {
     setConfirmAction(null)
@@ -76,7 +78,7 @@ export default function OpsPage() {
         : await api.post<OpsResult>('/api/v1/dashboard/ops/git-pull')
       setTask(body)
       if (action === 'restart') {
-        toast.info('重启指令已下发', '连接可能短暂中断')
+        toast.info('重启已排队', '当前响应结束后执行，连接会短暂中断')
       } else {
         toast.success('代码已更新')
         await queryClient.invalidateQueries({ queryKey: ['ops-logs'] })
@@ -114,12 +116,15 @@ export default function OpsPage() {
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent/15 text-accent"><RefreshCcw size={16} /></span>
             <h3 className="text-sm font-semibold text-text">重启服务</h3>
           </div>
-          <p className="mt-2 text-xs leading-relaxed text-muted">重启 achord-review 容器。服务将短暂中断，正在执行的审查可能被终止，请在低峰期操作。</p>
+          <p className="mt-2 text-xs leading-relaxed text-muted">
+            {restartCapability?.reason ?? '正在检测受控 Docker 端点…'}
+          </p>
           <button
             onClick={() => setConfirmAction('restart')}
-            className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2"
+            disabled={!restartAvailable}
+            className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            重启容器
+            {capabilitiesQuery.isLoading ? '检测中…' : restartAvailable ? '重启容器' : '由宿主机重启'}
           </button>
         </Card>
         <Card hover className="p-5">
@@ -232,7 +237,7 @@ export default function OpsPage() {
       <ConfirmDialog
         open={confirmAction === 'restart'}
         title="重启 achord-review 容器？"
-        body="服务将短暂中断，正在执行的审查可能被终止。确认当前没有重要审查后再继续。"
+        body="操作会先返回并写入审计，再重启服务。当前审查可能被终止，确认继续吗？"
         danger
         confirmLabel="确认重启"
         onConfirm={() => void runAction('restart')}

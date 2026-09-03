@@ -1,10 +1,10 @@
 """One-click operations and self-diagnosis for the dashboard.
 
 Ops commands are restricted to a fixed whitelist - there is no generic shell
-endpoint. Restart and git-pull shell out to the container runtime / git binary
-from an API worker thread. Git pull returns its bounded final output directly;
-restart returns once the controlled runtime accepts the command. Probes (LLM
-relay, GitHub App credential, storage) run in-process and never raise.
+endpoint. Git pull returns its bounded final output from an API worker thread.
+Self-restart is prepared under the shared lock, then executed as a FastAPI
+post-response task so the acknowledgment and audit reach the client first.
+Probes (LLM relay, GitHub App credential, storage) never raise.
 """
 
 import asyncio
@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pr_agent.log import get_logger
 
@@ -25,7 +25,6 @@ REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "").strip()
 GIT_PULL_TIMEOUT_SECONDS = 120
 GIT_PREFLIGHT_TIMEOUT_SECONDS = 5
 DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 5
-RESTART_ACCEPTANCE_GRACE_SECONDS = 0.2
 RESTART_COMMAND_TIMEOUT_SECONDS = 45
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
@@ -131,61 +130,66 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int,
             "output": output}
 
 
-def restart_container() -> Dict[str, Any]:
-    """Restart the achord-review container through a configured Docker endpoint.
+class _RestartTicket:
+    """Transfer the held operations lock into an after-response restart task."""
 
-    The default deployment intentionally exposes no raw Docker socket. An
-    operator may supply a narrowly authorized Docker endpoint; otherwise the
-    explicit not-started result lets the API and UI report the unavailable
-    operation without creating process-local task state.
-    """
-    with _operation_lock() as lock_file:
-        if lock_file is None:
-            return _not_started("另一项运维操作正在执行，容器重启未发起")
-        try:
-            preflight = subprocess.run(
-                ["docker", "inspect", CONTAINER_NAME], stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, timeout=DOCKER_PREFLIGHT_TIMEOUT_SECONDS,
-                check=False)
-            if preflight.returncode != 0:
-                return _not_started((preflight.stdout or "Docker 端点不可用").strip()[:1000])
-            restart_process = subprocess.Popen(
-                ["docker", "restart", "--timeout", "30", CONTAINER_NAME],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-                pass_fds=(lock_file.fileno(),))
-            time.sleep(RESTART_ACCEPTANCE_GRACE_SECONDS)
-            return_code = restart_process.poll()
-            if return_code not in (None, 0):
-                return _not_started(f"docker restart 立即失败（退出码 {return_code}）")
-            if return_code == 0:
-                return {"started": True, "completed": True, "exit_code": 0, "output": []}
-            _monitor_restart_process(restart_process)
-            return {"started": True, "completed": False, "exit_code": None, "output": []}
-        except subprocess.TimeoutExpired:
-            return _not_started("Docker 端点预检超时，容器重启未发起")
-        except OSError:
-            return _not_started("docker CLI 或受控 Docker 端点不可用，容器重启未发起")
+    def __init__(self, lock_context, lock_file):
+        self.lock_context = lock_context
+        self.lock_file = lock_file
 
 
-def _monitor_restart_process(proc: subprocess.Popen) -> threading.Thread:
-    """Terminate a restart CLI that exceeds Docker's own restart deadline."""
-    def _monitor() -> None:
-        try:
-            proc.wait(timeout=RESTART_COMMAND_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                get_logger().warning("docker restart process survived the monitor SIGKILL")
+def restart_capability() -> Dict[str, Any]:
+    """Check whether a deliberately configured Docker endpoint can see the target."""
+    try:
+        preflight = subprocess.run(
+            ["docker", "inspect", CONTAINER_NAME], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=DOCKER_PREFLIGHT_TIMEOUT_SECONDS,
+            check=False)
+    except subprocess.TimeoutExpired:
+        return {"available": False, "reason": "Docker 端点预检超时，重启由宿主机管理。"}
+    except OSError:
+        return {"available": False, "reason": "未配置受控 Docker 端点，重启由宿主机管理。"}
+    if preflight.returncode != 0:
+        reason = (preflight.stdout or "Docker 端点不可用").strip()[:300]
+        return {"available": False, "reason": reason}
+    return {"available": True, "reason": "已连接受控 Docker 端点，重启将在响应后执行。"}
 
-    monitor = threading.Thread(
-        target=_monitor, name="dashboard-restart-monitor", daemon=True)
-    monitor.start()
-    return monitor
+
+def prepare_restart() -> tuple[Dict[str, Any], Optional[_RestartTicket]]:
+    """Reserve the ops lock and prepare a restart without stopping this API."""
+    lock_context = _operation_lock()
+    lock_file = lock_context.__enter__()
+    if lock_file is None:
+        lock_context.__exit__(None, None, None)
+        return _not_started("另一项运维操作正在执行，容器重启未发起"), None
+    capability = restart_capability()
+    if not capability["available"]:
+        lock_context.__exit__(None, None, None)
+        return _not_started(capability["reason"]), None
+    result = {
+        "started": True,
+        "completed": False,
+        "exit_code": None,
+        "scheduled": True,
+        "output": ["重启已排队，将在当前响应发送并完成审计后执行"],
+    }
+    return result, _RestartTicket(lock_context, lock_file)
+
+
+def execute_restart(ticket: _RestartTicket) -> None:
+    """Run the fixed self-restart command from a post-response background task."""
+    try:
+        result = _run_bounded_command(
+            ["docker", "restart", "--timeout", "30", CONTAINER_NAME],
+            cwd="/", timeout_seconds=RESTART_COMMAND_TIMEOUT_SECONDS,
+            lock_file=ticket.lock_file)
+        if result.get("exit_code") not in (0, None):
+            get_logger().warning(
+                f"Scheduled dashboard restart failed with exit code {result['exit_code']}")
+    except Exception as e:
+        get_logger().warning(f"Scheduled dashboard restart failed, error: {e}")
+    finally:
+        ticket.lock_context.__exit__(None, None, None)
 
 
 def git_pull_capability() -> Dict[str, Any]:

@@ -157,6 +157,34 @@ class TestReviewsCrud:
         assert len(row["raw_prediction"].encode()) <= 128
         assert row["markdown_output"].endswith("[dashboard payload truncated]")
 
+    def test_finish_review_bounds_finding_count_fields_and_total_bytes(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module, "MAX_REVIEW_FINDINGS", 2)
+        monkeypatch.setattr(storage_module, "MAX_REVIEW_FINDINGS_BYTES", 160)
+        monkeypatch.setattr(storage_module, "MAX_FINDING_FILE_BYTES", 20)
+        monkeypatch.setattr(storage_module, "MAX_FINDING_SUMMARY_BYTES", 20)
+        monkeypatch.setattr(storage_module, "MAX_FINDING_SUGGESTION_BYTES", 40)
+        request_id = storage.create_review(repo_name="r", pr_number=8, pr_url="u8")
+        issues = [{
+            "severity": "P1",
+            "relevant_file": "路径/" + "a" * 100,
+            "relevant_lines_start": 1,
+            "relevant_lines_end": 2,
+            "issue_summary": "摘要" * 100,
+            "suggestion": "修复" * 100,
+        } for _ in range(10)]
+
+        storage.finish_review(request_id, issues)
+
+        detail = storage.get_review_detail(storage.get_review_by_request_id(request_id)["id"])
+        assert len(detail["issues"]) == 2
+        total_bytes = sum(
+            len(str(issue.get(field) or "").encode("utf-8"))
+            for issue in detail["issues"]
+            for field in ("severity", "relevant_file", "issue_summary", "suggestion")
+        )
+        assert total_bytes <= 160
+        assert len(detail["issues"][0]["relevant_file"].encode("utf-8")) <= 20
+
     def test_finish_review_retries_database_lock(self, storage, monkeypatch):
         import sqlite3
 

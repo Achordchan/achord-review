@@ -116,7 +116,9 @@ image and the API routes share the webhook process).
   backed up (5 copies kept, comments preserved), applied to the running process, and —
   when a restart-requiring field changed — can trigger a container restart when the
   docker CLI + socket are available inside the container (not mounted by default;
-  without them the panel says so and the restart happens on the host shell).
+  without them the panel disables the action and restart happens on the host shell).
+  An explicitly enabled self-restart is queued as an after-response task, so the
+  browser acknowledgment and audit row are emitted before the container stops.
 - Some navigation entries are greyed out with a "Phase N" badge: those features
   are planned but not shipped yet; their API routes answer 501 COMING_SOON.
 - The shipped image contains application files, not a writable Git checkout, so
