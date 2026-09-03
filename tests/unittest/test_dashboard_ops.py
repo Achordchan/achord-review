@@ -18,9 +18,16 @@ def _isolated_ops_lock(monkeypatch, tmp_path):
 
 def test_git_pull_returns_completed_output(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    releases = tmp_path / "releases"
+    releases.mkdir()
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
     monkeypatch.setattr(
         ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
     monkeypatch.setattr(ops, "rebuild_required", lambda: False)
+    revision = "a" * 40
+    monkeypatch.setattr(
+        ops, "_git_text",
+        lambda args, timeout: (0, "") if args == ["fetch", "--quiet"] else (0, revision))
     monkeypatch.setattr(
         ops, "_run_bounded_command",
         lambda *args, **kwargs: {
@@ -30,11 +37,13 @@ def test_git_pull_returns_completed_output(monkeypatch, tmp_path):
 
     result = ops.git_pull()
 
-    assert result == {
-        "started": True, "completed": True, "exit_code": 0,
-        "timed_out": False, "output": ["Updating files", "Done"],
-        "dependencies_changed": False,
-    }
+    assert result["started"] is True
+    assert result["completed"] is True
+    assert result["release"] == revision
+    assert result["mode"] == "staged"
+    assert result["dependencies_changed"] is False
+    assert "运行中的后端与静态资源尚未改变" in result["output"][-1]
+    assert (releases / ".pending-release").read_text().strip() == str(releases / revision)
 
 
 def test_git_pull_reports_not_started_without_binary(monkeypatch):
@@ -44,6 +53,7 @@ def test_git_pull_reports_not_started_without_binary(monkeypatch):
     monkeypatch.setattr(ops, "_run_bounded_command", missing)
     monkeypatch.setattr(
         ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_git_text", lambda *args: (0, "") if args[0] == ["fetch", "--quiet"] else (0, "a" * 40))
 
     result = ops.git_pull()
 
@@ -62,6 +72,7 @@ def test_git_pull_is_disabled_without_deliberate_checkout(monkeypatch):
 
 def test_git_pull_capability_verifies_real_checkout(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(tmp_path / "releases"))
     monkeypatch.setattr(
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
@@ -714,9 +725,13 @@ def _completed_pull(*args, **kwargs):
 
 def test_git_pull_flags_dependency_changes(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(tmp_path / "releases"))
     monkeypatch.setattr(
         ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
     monkeypatch.setattr(ops, "_run_bounded_command", _completed_pull)
+    monkeypatch.setattr(
+        ops, "_git_text",
+        lambda args, timeout: (0, "") if args == ["fetch", "--quiet"] else (0, "a" * 40))
     monkeypatch.setattr(ops, "rebuild_required", lambda: True)
 
     result = ops.git_pull()
@@ -727,9 +742,13 @@ def test_git_pull_flags_dependency_changes(monkeypatch, tmp_path):
 
 def test_git_pull_survives_a_dependency_check_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(tmp_path / "releases"))
     monkeypatch.setattr(
         ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
     monkeypatch.setattr(ops, "_run_bounded_command", _completed_pull)
+    monkeypatch.setattr(
+        ops, "_git_text",
+        lambda args, timeout: (0, "") if args == ["fetch", "--quiet"] else (0, "a" * 40))
 
     def _timeout():
         raise subprocess.TimeoutExpired(cmd="git", timeout=5)
@@ -790,6 +809,71 @@ def test_prepare_restart_is_blocked_when_a_rebuild_is_required(monkeypatch):
     assert ticket is None
     assert "重启已被阻止" in result["output"][0]
     assert unexpected == []
+
+
+def test_prepare_restart_atomically_activates_pending_release(monkeypatch, tmp_path):
+    releases = tmp_path / "releases"
+    old_release = releases / "old"
+    new_release = releases / "new"
+    old_release.mkdir(parents=True)
+    new_release.mkdir()
+    active = releases / "current"
+    active.symlink_to(old_release)
+    (releases / ".pending-release").write_text(str(new_release) + "\n")
+    monkeypatch.setattr(ops, "REPO_DIR", str(active))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "rebuild_required", lambda: False)
+    monkeypatch.setattr(
+        ops, "restart_capability",
+        lambda: {"available": True, "mode": "self", "reason": "ready"})
+
+    result, ticket = ops.prepare_restart()
+
+    assert result["started"] is True
+    assert active.resolve() == new_release.resolve()
+    assert not (releases / ".pending-release").exists()
+    assert ticket is not None
+    ticket.lock_context.__exit__(None, None, None)
+
+
+def test_git_pull_stages_without_mutating_live_worktree(monkeypatch, tmp_path):
+    remote = tmp_path / "remote.git"
+    source = tmp_path / "source"
+    writer = tmp_path / "writer"
+    releases = tmp_path / "releases"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(remote), str(source)], check=True, capture_output=True)
+    for checkout in (source,):
+        subprocess.run(["git", "-C", str(checkout), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(checkout), "config", "user.name", "Test"], check=True)
+    (source / "value.txt").write_text("old\n")
+    subprocess.run(["git", "-C", str(source), "add", "value.txt"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-m", "old"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(source), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(source), "push", "-u", "origin", "main"], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(remote), str(writer)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(writer), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(writer), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(writer), "checkout", "main"], check=True, capture_output=True)
+    (writer / "value.txt").write_text("new\n")
+    subprocess.run(["git", "-C", str(writer), "commit", "-am", "new"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(writer), "push"], check=True, capture_output=True)
+    releases.mkdir()
+    current = releases / "current"
+    current.symlink_to(source)
+    monkeypatch.setattr(ops, "REPO_DIR", str(current))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "UPDATE_REF", "origin/main")
+    monkeypatch.setattr(ops, "CONFIG_DIR", "")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(source))
+
+    result = ops.git_pull()
+
+    pending = ops._pending_release()
+    assert result["completed"] is True
+    assert (source / "value.txt").read_text() == "old\n"
+    assert pending is not None
+    assert (tmp_path / "releases" / result["release"] / "value.txt").read_text() == "new\n"
 
 
 def test_rebuild_required_flags_removal_of_all_dependency_files(monkeypatch, tmp_path):

@@ -5,52 +5,8 @@ import {
 } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
 import type { OpsCapabilities, OpsResult, VersionInfo } from '../lib/types'
+import { waitForServiceThenReload } from '../lib/restart'
 import { useToast } from './Toast'
-
-const HEALTH_URL = '/api/v1/dashboard/auth/me'
-
-async function serviceIsUp(): Promise<boolean> {
-  // Any non-5xx answer (200 or even 401) means the process is serving again.
-  try {
-    const res = await fetch(HEALTH_URL, { cache: 'no-store', credentials: 'same-origin' })
-    return res.status < 500
-  } catch {
-    return false
-  }
-}
-
-/**
- * After a restart the container is briefly unreachable (nginx answers 5xx or the
- * socket refuses). Reload once it is back so newly pulled frontend code loads.
- *
- * Two phases so we don't mistake the still-draining old process for the restarted
- * one: first wait until the service is observed DOWN, then wait until it is back.
- * Accepting the first sub-500 answer without an observed outage would, on a slow
- * shutdown, hit the old process and reload prematurely. If the outage is never seen
- * within its window (a very fast restart), fall through and recover on the next
- * healthy answer anyway. The HttpOnly session cookie and the persisted session row
- * both survive the restart, so the reload lands back logged in — no re-login.
- */
-async function waitForServiceThenReload(maxWaitMs = 150_000) {
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-  const started = Date.now()
-  // Phase 1: observe the outage (bounded, so a fast restart we miss isn't fatal).
-  const outageDeadline = Date.now() + 30_000
-  while (Date.now() < outageDeadline) {
-    if (!(await serviceIsUp())) break
-    await sleep(1_000)
-  }
-  // Phase 2: wait for recovery.
-  while (Date.now() - started < maxWaitMs) {
-    if (await serviceIsUp()) {
-      window.location.reload()
-      return
-    }
-    await sleep(2_000)
-  }
-  // Took longer than expected; reload anyway so the user isn't stranded.
-  window.location.reload()
-}
 
 function CommitLine({ label, sha, subject, tone }: {
   label: string
@@ -113,9 +69,9 @@ export function VersionCenter({ onClose, version }: {
     try {
       const result = await api.post<OpsResult>('/api/v1/dashboard/ops/git-pull')
       setDepsChanged(result.dependencies_changed === true)
-      setPhase('updated')
       toast.success('代码已更新', (result.output ?? []).slice(-1)[0] || '重启后生效')
-      await updateQuery.refetch()
+      await Promise.all([updateQuery.refetch(), capabilitiesQuery.refetch()])
+      setPhase('updated')
     } catch (error) {
       setPhase('idle')
       toast.error('更新失败', error instanceof ApiError ? error.message : '请检查受控 Git 工作区')
@@ -198,7 +154,7 @@ export function VersionCenter({ onClose, version }: {
                 ) : phase === 'updated' && depsChanged ? (
                   <p className="text-xs font-medium text-warn">
                     ⚠ 代码已拉取，但本次更新改动了依赖/构建文件，重启不生效——
-                    请在宿主机执行 <code className="font-mono">docker compose up -d --build</code>
+                    请在宿主机执行 <code className="font-mono">git pull --ff-only &amp;&amp; docker compose up -d --build</code>
                   </p>
                 ) : phase === 'updated' ? (
                   <p className="flex items-center gap-1.5 text-xs font-medium text-good">
@@ -212,7 +168,7 @@ export function VersionCenter({ onClose, version }: {
                 ) : rebuildRequired ? (
                   <p className="text-xs font-medium text-warn">
                     ⚠ 运行镜像与检出依赖不一致，重启已被禁用——
-                    请在宿主机执行 <code className="font-mono">docker compose up -d --build</code>
+                    请在宿主机执行 <code className="font-mono">git pull --ff-only &amp;&amp; docker compose up -d --build</code>
                   </p>
                 ) : aheadOnly ? (
                   <p className="text-xs font-medium text-warn">
@@ -239,7 +195,7 @@ export function VersionCenter({ onClose, version }: {
                 {updateAvailable && (
                   <button
                     onClick={() => void runUpdate()}
-                    disabled={phase === 'updating' || !info?.available}
+                    disabled={phase === 'updating' || updateQuery.isFetching || !info?.available}
                     className="flex items-center gap-1.5 rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-accent active:scale-[0.98] disabled:opacity-50"
                   >
                     {phase === 'updating'
@@ -249,7 +205,7 @@ export function VersionCenter({ onClose, version }: {
                 )}
                 <button
                   onClick={() => void runRestart()}
-                  disabled={!restartAvailable || phase === 'updating' || rebuildRequired}
+                  disabled={!restartAvailable || phase === 'updating' || updateQuery.isFetching || rebuildRequired}
                   title={rebuildRequired
                     ? '依赖与运行镜像不一致，重启会因缺少新依赖导入失败并进入重启循环，请在宿主机重建镜像'
                     : (restartAvailable ? '' : capabilitiesQuery.data?.restart.reason)}

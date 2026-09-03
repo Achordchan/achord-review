@@ -19,13 +19,12 @@ services:
     image: achord-review:latest
     container_name: achord-review
     restart: unless-stopped
-    # In-panel updates (opt-in): run the app FROM the mounted checkout so a
-    # git-pull + self-restart actually loads new code. `python -m gunicorn` puts
-    # the working directory at sys.path[0], ahead of PYTHONPATH, so without this
-    # the baked /app/pr_agent shadows the mounted checkout and the pull has no
-    # effect. Uncomment this together with the ../.. mount and the two
-    # ACHORD_REVIEW_* env vars below.
-    #working_dir: /app/repo
+    # In-panel updates (opt-in): start through the release launcher. It creates
+    # a detached initial worktree and runs from the stable `current` symlink.
+    # Updates are staged in another worktree and the symlink changes atomically
+    # only after the restart response is ready, so live Python/static files are
+    # never modified in place. Uncomment together with the update mounts/env below.
+    #command: ["/bin/sh", "/app/source/deploy/achord-review/run-staged-release.sh"]
     # The panel runs `git pull` as the container user. As root (the default) fetched
     # objects become root-owned in the mounted checkout — fine when that checkout is
     # root-managed (the shipped /opt/achord-review is). If a non-root host user owns
@@ -38,19 +37,12 @@ services:
       # Dashboard SQLite database (review history, audit logs); survives restarts.
       - ./data:/app/data
       # --- In-panel code updates (opt-in) -------------------------------------
-      # Mount the repo root (the same tree this image is built from) so the panel's
-      # "check update / one-click update" can git-pull live code that the app then
-      # imports. No separate clone needed. Uncomment together with working_dir above
-      # and the two ACHORD_REVIEW_* env vars below. Code-only updates apply on
-      # restart; a change to requirements.txt / pyproject.toml / Dockerfile still
-      # needs a host rebuild — the panel detects this and blocks the restart.
-      #- ../..:/app/repo
-      # With working_dir /app/repo the app imports pr_agent from the checkout, so
-      # config_loader resolves settings_prod relative to /app/repo/pr_agent. Mount
-      # the same config there too, or the deployed secrets go unread after a
-      # self-restart. (The /app/pr_agent/settings_prod mount above still covers the
-      # baked package for the pre-opt-in boot.)
-      #- ./config:/app/repo/pr_agent/settings_prod
+      # The source checkout supplies Git metadata but is never pulled in place.
+      # Prepared worktrees live in a separate persistent release directory.
+      #- ../..:/app/source
+      #- ./releases:/app/releases
+      # Releases use this stable config path instead of a checkout-relative mount.
+      #- ./config:/app/config
     environment:
       # Keep at least two workers (the gunicorn default) so a slow provider call
       # cannot stall health checks and unrelated webhooks. Dashboard sessions
@@ -63,12 +55,13 @@ services:
       # Exact public browser origin used by the CSRF fallback when Fetch
       # Metadata headers are unavailable. Scheme and effective port matter.
       DASHBOARD_EXTERNAL_ORIGIN: "https://review.achord.cn"
-      # In-panel updates (opt-in) — uncomment together with working_dir and the
-      # ../.. mount above. Point git operations at the mounted checkout and allow a
-      # socket-free self-restart that exits PID 1 so `restart: unless-stopped`
-      # respawns a fresh process importing the pulled code. No Docker socket.
-      #ACHORD_REVIEW_REPO_DIR: "/app/repo"
+      # In-panel updates (opt-in) — uncomment with command and mounts above.
+      #ACHORD_REVIEW_SOURCE_DIR: "/app/source"
+      #ACHORD_REVIEW_RELEASES_DIR: "/app/releases"
+      #ACHORD_REVIEW_REPO_DIR: "/app/releases/current"
+      #ACHORD_REVIEW_UPDATE_REF: "origin/main"
       #ACHORD_REVIEW_SELF_RESTART: "1"
+      #ACHORD_REVIEW_CONFIG_DIR: "/app/config"
       # Left commented by default: releases stay host-managed
       # (git pull --ff-only + docker compose up -d --build).
     mem_limit: 900m

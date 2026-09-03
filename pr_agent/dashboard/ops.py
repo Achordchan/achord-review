@@ -1,7 +1,7 @@
 """One-click operations and self-diagnosis for the dashboard.
 
 Ops commands are restricted to a fixed whitelist - there is no generic shell
-endpoint. Git pull returns its bounded final output from an API worker thread.
+endpoint. Updates are prepared in an isolated Git worktree by an API worker.
 Self-restart is prepared under the shared lock, then executed as a FastAPI
 post-response task so the acknowledgment and audit reach the client first.
 Probes (LLM relay, GitHub App credential, storage) never raise.
@@ -11,6 +11,7 @@ import asyncio
 import fcntl
 import hashlib
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -23,6 +24,9 @@ from pr_agent.log import get_logger
 # Fixed commands only; nothing constructed from user input reaches the shell.
 CONTAINER_NAME = os.environ.get("ACHORD_REVIEW_CONTAINER", "achord-review")
 REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "").strip()
+RELEASES_DIR = os.environ.get("ACHORD_REVIEW_RELEASES_DIR", "").strip()
+UPDATE_REF = os.environ.get("ACHORD_REVIEW_UPDATE_REF", "@{u}").strip() or "@{u}"
+CONFIG_DIR = os.environ.get("ACHORD_REVIEW_CONFIG_DIR", "").strip()
 # Socket-free self-restart: terminate the gunicorn master (PID 1) and let the
 # container's `restart: unless-stopped` policy bring a fresh process up, which
 # re-imports code from the mounted checkout. Opt-in, because it is only safe
@@ -34,7 +38,13 @@ SELF_RESTART_ENABLED = os.environ.get("ACHORD_REVIEW_SELF_RESTART", "").strip().
 # install packages — so when a mounted checkout's dependencies diverge from the
 # running image's, an in-place restart would boot code against stale deps and, under
 # `restart: unless-stopped`, loop. We compare fingerprints to detect and block that.
-DEPS_FILES = ("requirements.txt", "pyproject.toml", "docker/Dockerfile")
+DEPS_FILES = (
+    "requirements.txt",
+    "pyproject.toml",
+    "docker/Dockerfile",
+    "deploy/achord-review/docker-compose.yml",
+    "deploy/achord-review/run-staged-release.sh",
+)
 DEPS_BAKED_DIR = os.environ.get("ACHORD_DEPS_BAKED_DIR", "/app/.deps-baked")
 GIT_PULL_TIMEOUT_SECONDS = 120
 GIT_FETCH_TIMEOUT_SECONDS = 45
@@ -205,12 +215,17 @@ def prepare_restart() -> tuple[Dict[str, Any], Optional[_RestartTicket]]:
     if needs_rebuild:
         lock_context.__exit__(None, None, None)
         return _not_started(
-            "依赖与运行镜像不一致，重启已被阻止：请先在宿主机 docker compose up -d --build，"
-            "再重启以避免重启循环"), None
+            "依赖与运行镜像不一致，重启已被阻止：请先在宿主机执行 "
+            "git pull --ff-only && docker compose up -d --build，以避免重启循环"), None
     capability = restart_capability()
     if not capability["available"]:
         lock_context.__exit__(None, None, None)
         return _not_started(capability["reason"]), None
+    try:
+        activated_release = _activate_pending_release()
+    except OSError as e:
+        lock_context.__exit__(None, None, None)
+        return _not_started(f"待发布版本切换失败，重启未发起：{e}"), None
     mode = capability.get("mode", "docker")
     scheduled_note = ("重启已排队：将在当前响应后退出进程，由容器重启策略自动拉起"
                       if mode == "self"
@@ -223,6 +238,8 @@ def prepare_restart() -> tuple[Dict[str, Any], Optional[_RestartTicket]]:
         "mode": mode,
         "output": [scheduled_note],
     }
+    if activated_release:
+        result["output"].insert(0, f"已原子切换到待发布版本 {os.path.basename(activated_release)}")
     return result, _RestartTicket(lock_context, lock_file, mode)
 
 
@@ -260,11 +277,11 @@ def _execute_self_restart() -> None:
 
 
 def git_pull_capability() -> Dict[str, Any]:
-    """Report whether an operator deliberately mounted a writable checkout."""
-    if not REPO_DIR:
+    """Report whether an operator configured isolated staged releases."""
+    if not REPO_DIR or not RELEASES_DIR:
         return {
             "available": False,
-            "reason": "标准部署由宿主机发布流程更新，面板内代码更新未启用。",
+            "reason": "标准部署由宿主机发布流程更新，面板内分阶段更新未启用。",
         }
     try:
         inspection = subprocess.run(
@@ -275,7 +292,84 @@ def git_pull_capability() -> Dict[str, Any]:
         return {"available": False, "reason": "受控 Git 工作区不可用。"}
     if inspection.returncode != 0 or inspection.stdout.strip() != "true":
         return {"available": False, "reason": "配置的代码目录不是可更新的 Git 工作区。"}
-    return {"available": True, "reason": "已连接受控 Git 工作区，仅允许 fast-forward 更新。"}
+    try:
+        os.makedirs(RELEASES_DIR, mode=0o700, exist_ok=True)
+    except OSError:
+        return {"available": False, "reason": "受控发布目录不可写。"}
+    return {"available": True, "reason": "已连接受控 Git 工作区，更新会先写入独立发布目录。"}
+
+
+def _pending_marker_path() -> str:
+    return os.path.join(RELEASES_DIR, ".pending-release")
+
+
+def _safe_release_path(path: str) -> Optional[str]:
+    """Return a canonical release path only when it is contained by RELEASES_DIR."""
+    if not RELEASES_DIR or not path:
+        return None
+    releases = os.path.realpath(RELEASES_DIR)
+    candidate = os.path.realpath(path)
+    try:
+        if os.path.commonpath((releases, candidate)) != releases:
+            return None
+    except ValueError:
+        return None
+    return candidate if candidate != releases else None
+
+
+def _pending_release() -> Optional[str]:
+    try:
+        with open(_pending_marker_path(), encoding="utf-8") as handle:
+            candidate = handle.read().strip()
+    except (OSError, ValueError):
+        return None
+    candidate = _safe_release_path(candidate)
+    return candidate if candidate and os.path.isdir(candidate) else None
+
+
+def _write_pending_release(path: str) -> None:
+    """Persist a fully prepared release using an atomic marker replacement."""
+    marker = _pending_marker_path()
+    temporary = f"{marker}.{os.getpid()}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(path + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, marker)
+
+
+def _ensure_release_config_link(release_path: str) -> None:
+    """Attach the stable deployment config without exposing it to Git."""
+    if not CONFIG_DIR:
+        return
+    settings_path = os.path.join(release_path, "pr_agent", "settings_prod")
+    if os.path.lexists(settings_path):
+        if (os.path.islink(settings_path)
+                and os.path.realpath(settings_path) == os.path.realpath(CONFIG_DIR)):
+            return
+        raise OSError("待发布版本的 settings_prod 路径不是预期配置链接")
+    os.symlink(CONFIG_DIR, settings_path)
+
+
+def _activate_pending_release() -> Optional[str]:
+    """Atomically redirect the stable current symlink to a prepared worktree."""
+    pending = _pending_release()
+    if pending is None:
+        return None
+    active_link = REPO_DIR.rstrip(os.sep)
+    if not os.path.islink(active_link):
+        raise OSError("活动代码路径不是可原子切换的符号链接")
+    temporary_link = f"{active_link}.{os.getpid()}.tmp"
+    try:
+        os.symlink(pending, temporary_link)
+        os.replace(temporary_link, active_link)
+        os.unlink(_pending_marker_path())
+    finally:
+        try:
+            os.unlink(temporary_link)
+        except FileNotFoundError:
+            pass
+    return pending
 
 
 def _compute_deps_fingerprint(base_dir: str) -> Optional[str]:
@@ -324,13 +418,17 @@ def rebuild_required() -> bool:
     if not REPO_DIR:
         return False
     baked = _compute_deps_fingerprint(DEPS_BAKED_DIR)
-    checkout = _compute_deps_fingerprint(REPO_DIR)
+    # A staged release is what the next restart would boot. Compare that tree,
+    # not the still-running release, so dependency-changing updates are blocked
+    # before the atomic switch.
+    checkout = _compute_deps_fingerprint(_pending_release() or REPO_DIR)
     if baked is None or checkout is None:
         return True
     return baked != checkout
 
 
 def git_pull() -> Dict[str, Any]:
+    """Fetch and prepare an isolated worktree without touching the live release."""
     capability = git_pull_capability()
     if not capability["available"]:
         return _not_started(capability["reason"])
@@ -338,12 +436,41 @@ def git_pull() -> Dict[str, Any]:
         if lock_file is None:
             return _not_started("另一项运维操作正在执行，git pull 未发起")
         try:
-            result = _run_bounded_command(
-                ["git", "-C", REPO_DIR, "pull", "--ff-only"],
-                cwd=REPO_DIR, timeout_seconds=GIT_PULL_TIMEOUT_SECONDS,
-                lock_file=lock_file)
-        except OSError:
-            return _not_started("git 或代码目录不可用，git pull 未发起")
+            os.makedirs(RELEASES_DIR, mode=0o700, exist_ok=True)
+            fetch_rc, fetch_out = _git_text(["fetch", "--quiet"], GIT_FETCH_TIMEOUT_SECONDS)
+            if fetch_rc != 0:
+                return _not_started(("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300])
+            revision_rc, revision = _git_text(["rev-parse", UPDATE_REF], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            if revision_rc != 0 or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision.lower()):
+                return _not_started("无法解析待发布的远端版本")
+            ancestor_rc, _ = _git_text(
+                ["merge-base", "--is-ancestor", "HEAD", revision], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            if ancestor_rc != 0:
+                return _not_started("当前版本与远端不满足 fast-forward 条件，请在宿主机处理分叉")
+            release_path = os.path.join(RELEASES_DIR, revision)
+            if os.path.isdir(release_path):
+                existing_rc, existing_revision = _git_text_at(
+                    release_path, ["rev-parse", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                if existing_rc != 0 or existing_revision != revision:
+                    return _not_started("目标发布目录已存在但不是预期版本，请在宿主机检查")
+                _ensure_release_config_link(release_path)
+                result = {"started": True, "completed": True, "exit_code": 0,
+                          "timed_out": False, "output": ["远端版本已在独立发布目录中准备完成"]}
+            else:
+                stage = _run_bounded_command(
+                    ["git", "-C", REPO_DIR, "worktree", "add", "--detach", release_path, revision],
+                    cwd=REPO_DIR, timeout_seconds=GIT_PULL_TIMEOUT_SECONDS, lock_file=lock_file)
+                if stage.get("exit_code") != 0 or not stage.get("completed"):
+                    shutil.rmtree(release_path, ignore_errors=True)
+                    return stage
+                _ensure_release_config_link(release_path)
+                result = stage
+            _write_pending_release(release_path)
+            result["mode"] = "staged"
+            result["release"] = revision
+            result["output"].append("更新已分阶段准备；运行中的后端与静态资源尚未改变")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return _not_started(f"git 或发布目录不可用，更新未准备：{e}")
         # The dependency check must never turn a completed pull into a failure:
         # any error here is reported conservatively as "rebuild required", not raised.
         try:
@@ -353,15 +480,20 @@ def git_pull() -> Dict[str, Any]:
             result["output"].append("无法确认依赖是否变更，保守要求在宿主机重建镜像")
         if result.get("dependencies_changed"):
             result["output"].append(
-                "检测到依赖与运行镜像不一致，仅重启不生效且会被阻止，"
-                "需在宿主机执行 docker compose up -d --build")
+                "待发布版本的依赖与运行镜像不一致，仅重启不生效且会被阻止，"
+                "需在宿主机执行 git pull --ff-only && docker compose up -d --build")
         return result
 
 
 def _git_text(args: List[str], timeout_seconds: int) -> tuple[int, str]:
     """Run one read-only git command in the checkout, returning trimmed output."""
+    return _git_text_at(REPO_DIR, args, timeout_seconds)
+
+
+def _git_text_at(repo_dir: str, args: List[str], timeout_seconds: int) -> tuple[int, str]:
+    """Run one read-only git command in a specified controlled checkout."""
     proc = subprocess.run(
-        ["git", "-C", REPO_DIR, *args], stdout=subprocess.PIPE,
+        ["git", "-C", repo_dir, *args], stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, timeout=timeout_seconds, check=False)
     return proc.returncode, (proc.stdout or "").strip()
 
@@ -403,12 +535,16 @@ def check_update() -> Dict[str, Any]:
                 "sha": head_sha if head_rc == 0 else None,
                 "subject": head_subject or None,
             }
-            upstream_rc, upstream = _git_text(
-                ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-                GIT_PREFLIGHT_TIMEOUT_SECONDS)
-            if upstream_rc != 0 or not upstream:
-                result["reason"] = "当前分支未跟踪远端分支，无法检查更新。"
-                return result
+            upstream = UPDATE_REF
+            comparison_ref = UPDATE_REF
+            if UPDATE_REF == "@{u}":
+                upstream_rc, resolved_upstream = _git_text(
+                    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                    GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                if upstream_rc != 0 or not resolved_upstream:
+                    result["reason"] = "当前分支未跟踪远端分支，无法检查更新。"
+                    return result
+                upstream = resolved_upstream
             fetch_rc, fetch_out = _git_text(["fetch", "--quiet"], GIT_FETCH_TIMEOUT_SECONDS)
             if fetch_rc != 0:
                 result["reason"] = ("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300]
@@ -417,12 +553,12 @@ def check_update() -> Dict[str, Any]:
             # (which may prune a deleted upstream branch) a failed rev-parse/rev-list
             # must not be silently rendered as "already latest".
             latest_rc, latest_sha = _git_text(
-                ["rev-parse", "--short", "@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                ["rev-parse", "--short", comparison_ref], GIT_PREFLIGHT_TIMEOUT_SECONDS)
             if latest_rc != 0 or not latest_sha:
                 result["reason"] = "无法解析远端版本，上游分支可能已被删除或重命名。"
                 return result
             _, latest_subject = _git_text(
-                ["log", "-1", "--format=%s", "@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                ["log", "-1", "--format=%s", comparison_ref], GIT_PREFLIGHT_TIMEOUT_SECONDS)
             result["latest"] = {
                 "sha": latest_sha,
                 "subject": latest_subject or None,
@@ -432,9 +568,9 @@ def check_update() -> Dict[str, Any]:
             # local commits upstream lacks, so `git pull --ff-only` cannot succeed —
             # never advertise a one-click update that is bound to fail.
             behind_rc, behind = _git_text(
-                ["rev-list", "--count", "HEAD..@{u}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                ["rev-list", "--count", f"HEAD..{comparison_ref}"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
             ahead_rc, ahead = _git_text(
-                ["rev-list", "--count", "@{u}..HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                ["rev-list", "--count", f"{comparison_ref}..HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
             if behind_rc != 0 or not behind.isdigit() or ahead_rc != 0 or not ahead.isdigit():
                 result["reason"] = "无法比较与远端的差异，暂时无法确认更新。"
                 return result

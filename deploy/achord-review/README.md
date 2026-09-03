@@ -131,24 +131,21 @@ image and the API routes share the webhook process).
   tag the merge `v<APP_VERSION>`) — and, when a checkout is mounted, compares it against
   the tracked remote so you can update and restart in place.
 - **In-panel updates are opt-in**, because the shipped image bakes its code in rather than
-  running from a live checkout. To enable the sub2api-style "check → one-click update →
-  restart" flow, uncomment the opt-in lines in `docker-compose.yml`: `working_dir: /app/repo`,
-  the `../..:/app/repo` mount (the repo root the image is already built from — no separate
-  clone), the `./config:/app/repo/pr_agent/settings_prod` mount, and the
-  `ACHORD_REVIEW_REPO_DIR` / `ACHORD_REVIEW_SELF_RESTART` env. Both matter: `python -m
-  gunicorn` puts the working directory at `sys.path[0]`, ahead of any `PYTHONPATH`, so without
-  `working_dir` the baked `/app/pr_agent` shadows the mounted checkout and a pull has no
-  effect; and once the app imports from `/app/repo`, `config_loader` reads settings from
-  `/app/repo/pr_agent/settings_prod`, so the config must be mounted there too or the deployed
-  secrets go unread after a self-restart. With them in place: **check update** does `git fetch` and shows how far
-  behind you are; **one-click update** runs `git pull --ff-only`; **restart** self-exits so
-  the fresh process imports the pulled code. The browser polls the service back up and
-  reloads automatically — the HttpOnly session cookie and the SQLite session row both
-  survive, so no re-login.
+  running from managed releases. To enable the sub2api-style "check → one-click update →
+  restart" flow, uncomment the opt-in `command`, the source/releases/config mounts, and all
+  six opt-in environment variables in `docker-compose.yml`. The launcher creates an initial
+  detached worktree under `./releases` and runs from its stable `current` symlink. **Check
+  update** fetches and compares `origin/main`; **one-click update** prepares a second detached
+  worktree without modifying the running release; **restart** atomically redirects `current`
+  only after the API response is ready, then self-exits so the fresh process imports the new
+  release. The old process keeps absolute paths to its original Python and static files, so
+  no request can combine a new frontend with the old backend. The browser polls the service
+  back up and reloads automatically; the HttpOnly cookie and SQLite session survive.
 - **The one limit, surfaced honestly:** a restart only re-imports Python — it cannot
   install packages. When a pull changes `requirements.txt` / `pyproject.toml` / the
-  Dockerfile, the panel detects it and tells you to rebuild on the host
-  (`docker compose up -d --build`) instead of implying a restart is enough.
+  Dockerfile or release configuration, the panel detects it and tells you to update
+  the source checkout and rebuild on the host (`git pull --ff-only && docker compose
+  up -d --build`) instead of implying a restart is enough.
 - Left fully commented, the buttons stay disabled and releases remain host-managed
   (`git pull --ff-only` then `docker compose up -d --build`).
 

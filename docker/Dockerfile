@@ -9,6 +9,8 @@ ADD requirements.txt .
 # checkout uses (docker/Dockerfile), so a base-image/system-package change is
 # detected as needing a rebuild.
 ADD docker/Dockerfile /app/.deps-baked/docker/Dockerfile
+ADD deploy/achord-review/docker-compose.yml /app/.deps-baked/deploy/achord-review/docker-compose.yml
+ADD deploy/achord-review/run-staged-release.sh /app/.deps-baked/deploy/achord-review/run-staged-release.sh
 ADD docs docs
 # Keep a copy of the dependency-/build-defining files the image was built from, so
 # the dashboard can compare them against a mounted checkout and refuse an in-place

@@ -7,6 +7,7 @@ import { Card, CardHeader, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/Dialogs'
 import { useToast } from '../components/Toast'
 import { formatDateTime } from '../lib/format'
+import { waitForServiceThenReload } from '../lib/restart'
 
 function isOpsResult(value: unknown): value is OpsResult {
   if (!value || typeof value !== 'object') return false
@@ -79,6 +80,8 @@ export default function OpsPage() {
       setTask(body)
       if (action === 'restart') {
         toast.info('重启已排队', '当前响应结束后执行，连接会短暂中断')
+        queryClient.cancelQueries()
+        void waitForServiceThenReload()
       } else {
         toast.success('代码已更新')
         await queryClient.invalidateQueries({ queryKey: ['ops-logs'] })
@@ -130,7 +133,7 @@ export default function OpsPage() {
         <Card hover className="p-5">
           <div className="flex items-center gap-2.5">
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-good/15 text-good"><GitPullRequestArrow size={16} /></span>
-            <h3 className="text-sm font-semibold text-text">更新代码</h3>
+            <h3 className="text-sm font-semibold text-text">准备更新</h3>
           </div>
           <p className="mt-2 text-xs leading-relaxed text-muted">
             {gitPullCapability?.reason ?? '正在检测受控 Git 工作区…'}
@@ -140,7 +143,7 @@ export default function OpsPage() {
             disabled={!gitPullAvailable}
             className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {capabilitiesQuery.isLoading ? '检测中…' : gitPullAvailable ? '拉取更新' : '由宿主机更新'}
+            {capabilitiesQuery.isLoading ? '检测中…' : gitPullAvailable ? '分阶段准备更新' : '由宿主机更新'}
           </button>
         </Card>
         <Card hover className="p-5">
@@ -245,9 +248,9 @@ export default function OpsPage() {
       />
       <ConfirmDialog
         open={confirmAction === 'pull'}
-        title="拉取最新代码？"
-        body="将执行 git pull --ff-only。仅 fast-forward 更新，不会自动合并冲突。"
-        confirmLabel="确认拉取"
+        title="准备最新版本？"
+        body="将获取远端版本并写入独立发布目录；运行中的代码不会改变，重启时才原子切换。仅接受 fast-forward 更新。"
+        confirmLabel="确认准备"
         onConfirm={() => void runAction('pull')}
         onCancel={() => setConfirmAction(null)}
       />
