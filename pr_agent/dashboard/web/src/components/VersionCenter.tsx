@@ -8,30 +8,27 @@ import type { OpsCapabilities, OpsResult, VersionInfo } from '../lib/types'
 import { waitForServiceThenReload } from '../lib/restart'
 import { useToast } from './Toast'
 
-function CommitLine({ label, sha, subject, tone }: {
-  label: string
-  sha: string | null | undefined
-  subject: string | null | undefined
-  tone?: 'accent'
+function StatusLine({ tone, children }: {
+  tone: 'good' | 'accent' | 'warn'
+  children: React.ReactNode
 }) {
+  const cls =
+    tone === 'accent'
+      ? 'border-accent/30 bg-accent/10 text-accent'
+      : tone === 'warn'
+        ? 'border-warn/30 bg-warn/10 text-warn'
+        : 'border-good/30 bg-good/10 text-good'
   return (
-    <div className="flex items-start justify-between gap-3 py-2">
-      <span className="shrink-0 text-xs text-muted">{label}</span>
-      <div className="min-w-0 text-right">
-        <span className={`font-mono text-xs ${tone === 'accent' ? 'text-accent' : 'text-text'}`}>
-          {sha ?? '—'}
-        </span>
-        {subject && <p className="truncate text-[11px] text-muted" title={subject}>{subject}</p>}
-      </div>
+    <div className={`flex items-start gap-2 rounded-lg border px-4 py-3 text-xs font-medium leading-relaxed ${cls}`}>
+      {children}
     </div>
   )
 }
 
 /**
- * Version & update panel, rendered as a card anchored under the sidebar version
- * label (not a full-screen modal). When staged in-panel updates are not enabled
- * (the default, host-managed deployment) it shows a calm "host-managed" note
- * rather than a restart button and an inapplicable "no Docker endpoint" reason.
+ * Version & update panel — a card anchored under the sidebar version label.
+ * Commercial framing: it leads with the product version and only surfaces update
+ * details when an update actually exists. No commit hashes or branch names.
  */
 export function VersionCenter({ onClose, version }: {
   onClose: () => void
@@ -53,15 +50,12 @@ export function VersionCenter({ onClose, version }: {
   })
 
   const info = updateQuery.data
-  // Staged in-panel updates are opt-in; when off, the deployment is host-managed
-  // and the restart/update controls (and their Docker-endpoint reason) do not apply.
   const featureEnabled = info?.available === true
   const restartAvailable = capabilitiesQuery.data?.restart.available === true
   const updateAvailable = info?.update_available === true
   const staged = info?.staged === true
-  const pending = info?.pending ?? null
   const rebuildRequired = capabilitiesQuery.data?.rebuild_required === true
-    || pending?.rebuild_required === true
+    || info?.pending?.rebuild_required === true
   const aheadOnly = info?.checked === true && !updateAvailable && !info.diverged
     && (info.ahead ?? 0) > 0
 
@@ -82,12 +76,12 @@ export function VersionCenter({ onClose, version }: {
       if (!result.started || !result.completed || result.exit_code !== 0) {
         throw new ApiError(200, (result.output ?? []).slice(-1)[0] || '更新未完成')
       }
-      toast.success('新版本已准备', (result.output ?? []).slice(-1)[0] || '重启后生效')
+      toast.success('新版本已准备', '重启后生效')
       await Promise.all([updateQuery.refetch(), capabilitiesQuery.refetch()])
       setPhase('idle')
     } catch (error) {
       setPhase('idle')
-      toast.error('更新失败', error instanceof ApiError ? error.message : '请检查受控 Git 工作区')
+      toast.error('更新失败', error instanceof ApiError ? error.message : '请稍后重试')
     }
   }
 
@@ -96,20 +90,18 @@ export function VersionCenter({ onClose, version }: {
       await api.post<OpsResult>('/api/v1/dashboard/ops/restart')
       setPhase('restarting')
       toast.info('正在重启', '服务恢复后会自动刷新，无需重新登录')
-      // stop background polling so it doesn't spam errors during downtime
       queryClient.cancelQueries()
       void waitForServiceThenReload()
     } catch (error) {
-      toast.error('重启未发起', error instanceof ApiError ? error.message : '请检查受控 Docker 端点')
+      toast.error('重启未发起', error instanceof ApiError ? error.message : '请稍后重试')
     }
   }
 
   return (
     <>
-      {/* Click-catcher: dismiss on outside click, but no dimming — this is a
-          lightweight dropdown card, not a modal. Always mounted so the trigger
-          underneath cannot be clicked; during a restart it blocks interaction
-          without dismissing, keeping the service-recovery polling effect alive. */}
+      {/* Click-catcher: dismiss on outside click, no dimming. Always mounted so the
+          trigger underneath cannot be clicked; during a restart it blocks without
+          dismissing, keeping the service-recovery polling effect alive. */}
       <div
         className="fixed inset-0 z-40"
         onClick={phase === 'restarting' ? undefined : onClose}
@@ -118,7 +110,7 @@ export function VersionCenter({ onClose, version }: {
       <div
         role="dialog"
         aria-label="版本与更新"
-        className="animate-fade-in fixed left-3 top-[58px] z-50 w-[340px] max-w-[calc(100vw-1.5rem)] rounded-xl border border-line bg-surface-1 p-5 shadow-2xl"
+        className="animate-fade-in fixed left-3 top-[58px] z-50 w-[320px] max-w-[calc(100vw-1.5rem)] rounded-xl border border-line bg-surface-1 p-5 shadow-2xl"
       >
         {phase === 'restarting' ? (
           <div className="flex flex-col items-center py-6 text-center">
@@ -169,66 +161,27 @@ export function VersionCenter({ onClose, version }: {
               </p>
             ) : (
               <>
-                <div className="mt-4 rounded-lg border border-line bg-surface-2/50 px-4 py-1.5">
-                  {info?.checked ? (
-                    <>
-                      <CommitLine label="当前版本" sha={info.current?.sha} subject={info.current?.subject} />
-                      <div className="border-t border-line/60" />
-                      <CommitLine
-                        label="最新版本"
-                        sha={info.latest?.sha}
-                        subject={info.latest?.subject}
-                        tone={updateAvailable ? 'accent' : undefined}
-                      />
-                      {pending && (
-                        <>
-                          <div className="border-t border-line/60" />
-                          <CommitLine label="已准备" sha={pending.sha} subject={pending.subject} tone="accent" />
-                        </>
-                      )}
-                    </>
+                <div className="mt-4">
+                  {!info?.checked ? (
+                    <p className="rounded-lg border border-line bg-surface-2/50 px-4 py-3 text-xs text-muted">
+                      {info?.reason ?? '暂时无法检查更新。'}
+                    </p>
+                  ) : updateAvailable ? (
+                    <StatusLine tone="accent"><Sparkles size={14} /> 发现新版本，可立即更新</StatusLine>
+                  ) : staged && rebuildRequired ? (
+                    <StatusLine tone="warn">⚠ 新版本已准备，但本次更新需由维护者在服务器完成</StatusLine>
+                  ) : staged ? (
+                    <StatusLine tone="good"><CheckCircle2 size={14} /> 新版本已准备，重启后生效</StatusLine>
+                  ) : info.diverged ? (
+                    <StatusLine tone="warn">⚠ 版本与远端不一致，请联系维护者处理</StatusLine>
+                  ) : rebuildRequired ? (
+                    <StatusLine tone="warn">⚠ 运行环境与最新版本不一致，请联系维护者处理</StatusLine>
+                  ) : aheadOnly ? (
+                    <StatusLine tone="warn">⚠ 存在尚未发布的改动</StatusLine>
                   ) : (
-                    <p className="py-4 text-sm text-muted">{info?.reason ?? '暂时无法检查更新。'}</p>
+                    <StatusLine tone="good"><CheckCircle2 size={14} /> 已是最新版本</StatusLine>
                   )}
                 </div>
-
-                {info?.checked && (
-                  <div className="mt-3">
-                    {updateAvailable ? (
-                      <p className="flex items-center gap-1.5 text-xs font-medium text-accent">
-                        <CircleArrowUp size={14} />
-                        发现新版本，落后 {info.behind} 个提交
-                      </p>
-                    ) : staged && rebuildRequired ? (
-                      <p className="text-xs font-medium text-warn">
-                        ⚠ 新版本 {pending?.sha} 已准备，但改动了依赖/构建文件，重启不生效——
-                        请在宿主机执行 <code className="font-mono">git pull --ff-only &amp;&amp; docker compose up -d --build</code>
-                      </p>
-                    ) : staged ? (
-                      <p className="flex items-center gap-1.5 text-xs font-medium text-good">
-                        <CheckCircle2 size={14} /> 新版本 {pending?.sha} 已准备，重启后生效
-                      </p>
-                    ) : info.diverged ? (
-                      <p className="text-xs font-medium text-warn">
-                        ⚠ 本地与远端已分叉（本地领先 {info.ahead}、落后 {info.behind}），
-                        无法一键 fast-forward 更新，请在宿主机处理
-                      </p>
-                    ) : rebuildRequired ? (
-                      <p className="text-xs font-medium text-warn">
-                        ⚠ 运行镜像与检出依赖不一致，重启已被禁用——
-                        请在宿主机执行 <code className="font-mono">git pull --ff-only &amp;&amp; docker compose up -d --build</code>
-                      </p>
-                    ) : aheadOnly ? (
-                      <p className="text-xs font-medium text-warn">
-                        ⚠ 本地领先远端 {info.ahead} 个提交（有未推送的本地改动），与远端不一致
-                      </p>
-                    ) : (
-                      <p className="flex items-center gap-1.5 text-xs text-good">
-                        <CheckCircle2 size={14} /> 已是最新版本
-                      </p>
-                    )}
-                  </div>
-                )}
 
                 <div className="mt-5 flex items-center justify-between gap-2.5">
                   <button
@@ -243,7 +196,7 @@ export function VersionCenter({ onClose, version }: {
                     {updateAvailable && (
                       <button
                         onClick={() => void runUpdate()}
-                        disabled={phase === 'updating' || updateQuery.isFetching || !info?.available}
+                        disabled={phase === 'updating' || updateQuery.isFetching}
                         className="flex items-center gap-1.5 rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-accent active:scale-[0.98] disabled:opacity-50"
                       >
                         {phase === 'updating'
@@ -255,7 +208,7 @@ export function VersionCenter({ onClose, version }: {
                       onClick={() => void runRestart()}
                       disabled={!restartAvailable || phase === 'updating' || updateQuery.isFetching || rebuildRequired}
                       title={rebuildRequired
-                        ? '依赖与运行镜像不一致，重启会因缺少新依赖导入失败并进入重启循环，请在宿主机重建镜像'
+                        ? '本次更新需由维护者在服务器完成'
                         : (restartAvailable ? '' : capabilitiesQuery.data?.restart.reason)}
                       className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-semibold transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
                         staged && !rebuildRequired
@@ -264,15 +217,10 @@ export function VersionCenter({ onClose, version }: {
                       }`}
                     >
                       <RefreshCw size={14} />
-                      {rebuildRequired ? '需宿主机重建' : staged ? '重启以生效' : '重启'}
+                      {staged ? '重启以生效' : '重启'}
                     </button>
                   </div>
                 </div>
-                {!restartAvailable && capabilitiesQuery.data && (
-                  <p className="mt-2 text-right text-[11px] text-muted">
-                    {capabilitiesQuery.data.restart.reason}
-                  </p>
-                )}
               </>
             )}
           </>

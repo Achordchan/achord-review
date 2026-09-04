@@ -4,10 +4,43 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/dashboard/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light dark" />
     <title>achord-review 控制面板</title>
-    <script type="module" crossorigin src="/dashboard/assets/index-Blw_FopG.js"></script>
-    <link rel="stylesheet" crossorigin href="/dashboard/assets/index-c0bzYwQ6.css">
+    <script>
+      // Apply the saved theme before first paint to avoid a flash of the wrong theme.
+      (function () {
+        try {
+          var t = localStorage.getItem('dashboard-theme');
+          if (t !== 'light' && t !== 'dark') t = 'dark';
+          document.documentElement.setAttribute('data-theme', t);
+          document.documentElement.style.colorScheme = t;
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
+    <style>
+      /* Light theme overrides. Kept as static HTML (not Tailwind-processed) so the
+         --color-* redefinitions survive; the attribute selector outranks @theme's
+         :root, so utilities flip at runtime when data-theme="light". */
+      :root[data-theme="light"] {
+        --color-surface-0: #f5f6f8;
+        --color-surface-1: #ffffff;
+        --color-surface-2: #eef1f5;
+        --color-surface-3: #e3e7ee;
+        --color-line: #d7dce4;
+        --color-accent: #4f74f0;
+        --color-accent-strong: #3a5fe0;
+        --color-good: #12a150;
+        --color-warn: #b9770e;
+        --color-bad: #d1382f;
+        --color-info: #2563eb;
+        --color-muted: #5b6472;
+        --color-text: #1a2130;
+      }
+    </style>
+    <script type="module" crossorigin src="/dashboard/assets/index-DDG-BMrc.js"></script>
+    <link rel="stylesheet" crossorigin href="/dashboard/assets/index-DhaM9k2d.css">
   </head>
   <body>
     <div id="root"></div>

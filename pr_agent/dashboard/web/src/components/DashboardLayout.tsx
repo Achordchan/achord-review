@@ -4,13 +4,14 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Activity, Beaker, FlaskConical, GitPullRequestArrow, LayoutDashboard,
-  LogOut, Settings, ShieldCheck, TerminalSquare, X,
+  LogOut, Moon, Settings, ShieldCheck, Sun, TerminalSquare, X,
 } from 'lucide-react'
 import { useAuth } from '../lib/auth'
 import { api } from '../lib/api'
 import type { VersionInfo } from '../lib/types'
 import { ComingSoonBadge } from './badges'
 import { VersionCenter } from './VersionCenter'
+import { getStoredTheme, setTheme, type Theme } from '../lib/theme'
 import { useToast } from './Toast'
 
 type NavItem = {
@@ -94,6 +95,13 @@ export default function DashboardLayout() {
   const [pendingItem, setPendingItem] = useState<NavItem | null>(null)
   const [logoutPending, setLogoutPending] = useState(false)
   const [versionOpen, setVersionOpen] = useState(false)
+  const [theme, setThemeState] = useState<Theme>(() => getStoredTheme())
+
+  const toggleTheme = () => {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark'
+    setTheme(next)
+    setThemeState(next)
+  }
   // Read-only view of the update-check cache: lights up the "有更新" dot once
   // the user has opened the panel; never triggers a git fetch on its own.
   const cachedUpdate = useQuery({
@@ -203,6 +211,14 @@ export default function DashboardLayout() {
                 {model.replace(/^openai\//, '')}
               </span>
             )}
+            <button
+              onClick={toggleTheme}
+              title={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
+              aria-label="切换主题"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-line bg-surface-2 text-muted transition-colors hover:text-text"
+            >
+              {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            </button>
           </div>
         </header>
         <main className="min-h-0 flex-1 overflow-y-auto">
