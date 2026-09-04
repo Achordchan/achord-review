@@ -667,6 +667,37 @@ class TestProtectedRoutes:
         assert resp.json()["data"]["restart_started"] is False
         assert client.get("/api/v1/dashboard/auth/me", headers=auth).status_code == 200
 
+    def test_config_put_forwards_extra_fields_including_provider(self, client, monkeypatch):
+        # ConfigUpdateRequest uses extra="allow", so non-declared fields such as
+        # custom_llm_provider must reach the engine over the full PUT round trip,
+        # not be dropped by Pydantic. (model/api_base/etc. ride the same path.)
+        captured = {}
+
+        class RecordingEngine:
+            def read(self):
+                return {"available": False, "path": None, "values": {}}
+
+            def write(self, fields, on_saved=None):
+                captured.update(fields)
+                if on_saved is not None:
+                    on_saved({}, ("stub-config",))
+                return True, []
+
+            @contextmanager
+            def auth_read_lock(self):
+                yield
+
+        monkeypatch.setattr(dashboard_api, "get_config_engine", lambda: RecordingEngine())
+        auth = _auth_header(client)
+        resp = client.put(
+            "/api/v1/dashboard/config",
+            headers={**auth, "Sec-Fetch-Site": "same-origin"},
+            json={"model": "gpt-5.6-sol", "custom_llm_provider": "openai", "restart": False})
+        assert resp.status_code == 200, resp.text
+        assert captured.get("custom_llm_provider") == "openai"
+        assert captured.get("model") == "gpt-5.6-sol"
+        assert "restart" not in captured  # popped before the engine write
+
     def test_config_restart_acceptance_is_not_reported_as_completion(
             self, client, storage, monkeypatch):
         executed = []

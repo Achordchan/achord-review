@@ -594,13 +594,16 @@ async def get_upstream_models(request: Request, dashboard_session: Optional[str]
                         if resp.status_code != 200:
                             last_error = f"{url} 返回 HTTP {resp.status_code}"
                             continue
-                        payload = b""
+                        # Bounded bytearray: reject a chunk before appending, so a
+                        # compressed/streamed body cannot allocate past the cap, and
+                        # accumulation stays amortized O(1) rather than recopying.
+                        payload = bytearray()
                         too_large = False
                         async for chunk in resp.aiter_bytes():
-                            payload += chunk
-                            if len(payload) > _UPSTREAM_MAX_RESPONSE_BYTES:
+                            if len(payload) + len(chunk) > _UPSTREAM_MAX_RESPONSE_BYTES:
                                 too_large = True
                                 break
+                            payload.extend(chunk)
                     if too_large:
                         last_error = f"{url} 响应过大"
                         continue
@@ -608,7 +611,7 @@ async def get_upstream_models(request: Request, dashboard_session: Optional[str]
                     last_error = f"请求失败：{e}"
                     continue
                 try:
-                    models = _parse_model_ids(json.loads(payload))
+                    models = _parse_model_ids(json.loads(bytes(payload)))
                 except ValueError:
                     last_error = f"{url} 返回的不是有效 JSON"
                     continue
