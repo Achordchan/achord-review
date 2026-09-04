@@ -1,6 +1,7 @@
 """Tests for the dashboard storage layer (pr_agent/dashboard/storage.py)."""
 
 import os
+import sqlite3
 import stat
 import time
 
@@ -686,6 +687,125 @@ class TestSharedAuthState:
             max_attempts=5, max_rows=100)
         assert final["locked_out"] is True
         assert final["authenticated"] is False
+
+
+class TestStorageResilience:
+    def test_connection_does_not_use_wal(self, storage):
+        # WAL's shared-memory index is the failure mode we are avoiding; a rollback
+        # journal must be in effect (no -wal/-shm sidecars).
+        with storage._connect() as conn:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() in ("truncate", "delete", "persist", "memory", "off")
+        assert mode.lower() != "wal"
+
+    def test_read_self_heals_from_an_execute_time_corruption(self, storage, monkeypatch):
+        storage.create_review(repo_name="a/b", pr_number=1, pr_url="http://x")
+        real_connect = storage._connect
+        calls = {"n": 0}
+        closed = []
+
+        class PoisonConn:
+            def execute(self, *args, **kwargs):
+                raise sqlite3.DatabaseError("database disk image is malformed")
+
+            def close(self):
+                closed.append(True)
+
+        def flaky_connect(*args, **kwargs):
+            calls["n"] += 1
+            # First connection fails at execute() time, mimicking a poisoned view;
+            # the retry gets a real, healthy connection.
+            return PoisonConn() if calls["n"] == 1 else real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(storage, "_connect", flaky_connect)
+        rows = storage._read("SELECT COUNT(*) AS c FROM reviews", strict=True)
+
+        assert calls["n"] == 2  # first attempt failed at execute(), retried fresh
+        assert closed == [True]  # the poisoned connection was closed before the retry
+        assert rows[0]["c"] == 1
+
+    def test_read_does_not_retry_a_non_corruption_error(self, storage, monkeypatch):
+        calls = {"n": 0}
+
+        def broken_connect(*args, **kwargs):
+            calls["n"] += 1
+            raise sqlite3.OperationalError("no such table: reviews")
+
+        monkeypatch.setattr(storage, "_connect", broken_connect)
+        assert storage._read("SELECT 1") == []
+        assert calls["n"] == 1  # a non-corruption error is not retried
+
+    def test_journal_migration_retries_when_pragma_returns_wal(self, storage, monkeypatch):
+        # A worker still holding WAL makes the pragma return "wal" unchanged;
+        # the migration must retry rather than trust a connection still on WAL.
+        monkeypatch.setattr(storage_module.time, "sleep", lambda *_: None)
+        results = iter([("wal",), ("wal",), ("truncate",)])
+
+        class FakeConn:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, sql):
+                self.calls += 1
+                assert "journal_mode=TRUNCATE" in sql
+
+                class Cur:
+                    def fetchone(_self):
+                        return next(results)
+
+                return Cur()
+
+        conn = FakeConn()
+        storage._apply_rollback_journal(conn)
+        assert conn.calls == 3  # retried past the two "wal" responses
+
+    def test_journal_migration_retries_on_busy_then_succeeds(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module.time, "sleep", lambda *_: None)
+        state = {"n": 0}
+
+        class FakeConn:
+            def execute(self, sql):
+                state["n"] += 1
+                if state["n"] == 1:
+                    raise sqlite3.OperationalError("database is locked")
+
+                class Cur:
+                    def fetchone(_self):
+                        return ("truncate",)
+
+                return Cur()
+
+        storage._apply_rollback_journal(FakeConn())
+        assert state["n"] == 2  # a busy error is retried, then the switch takes
+
+    def test_journal_migration_raises_when_stuck_on_wal(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module.time, "sleep", lambda *_: None)
+
+        class FakeConn:
+            def execute(self, sql):
+                class Cur:
+                    def fetchone(_self):
+                        return ("wal",)
+
+                return Cur()
+
+        with pytest.raises(sqlite3.OperationalError) as exc:
+            storage._apply_rollback_journal(FakeConn())
+        # "locked" lets _write's bounded retry back off instead of giving up.
+        assert "locked" in str(exc.value).lower()
+
+    def test_journal_migration_does_not_retry_unrelated_error(self, storage, monkeypatch):
+        monkeypatch.setattr(storage_module.time, "sleep", lambda *_: None)
+        state = {"n": 0}
+
+        class FakeConn:
+            def execute(self, sql):
+                state["n"] += 1
+                raise sqlite3.OperationalError("disk I/O error")
+
+        with pytest.raises(sqlite3.OperationalError):
+            storage._apply_rollback_journal(FakeConn())
+        assert state["n"] == 1  # a non-lock error is fatal, not retried
 
 
 class TestStoragePermissions:
