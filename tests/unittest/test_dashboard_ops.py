@@ -1371,6 +1371,9 @@ def test_git_pull_rebuilds_a_release_missing_its_completion_marker(monkeypatch, 
     subprocess.run(["git", "clone", str(remote), str(writer)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(writer), "config", "user.email", "t@e"], check=True)
     subprocess.run(["git", "-C", str(writer), "config", "user.name", "T"], check=True)
+    # The bare remote's default branch may be `master`, so check out `main` explicitly
+    # before committing rather than trusting the clone's checked-out branch.
+    subprocess.run(["git", "-C", str(writer), "checkout", "main"], check=True, capture_output=True)
     (writer / "value.txt").write_text("new\n")
     subprocess.run(["git", "-C", str(writer), "commit", "-qam", "new"], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(writer), "push", "-q"], check=True, capture_output=True)
