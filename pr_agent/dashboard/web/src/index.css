@@ -31,6 +31,7 @@ body {
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: #2a3448; border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
+:root[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c4ccd8; }
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(4px); }
@@ -53,6 +54,10 @@ body {
   background-size: 200% 100%;
   animation: shimmer 1.4s infinite;
   border-radius: 8px;
+}
+:root[data-theme="light"] .skeleton {
+  background: linear-gradient(90deg, #e6e9ef 25%, #f2f4f7 50%, #e6e9ef 75%);
+  background-size: 200% 100%;
 }
 
 /* Markdown report view — echoes the GitHub comment rendering */
