@@ -4,7 +4,7 @@ Dashboard persistence on a single SQLite file.
 The database is an isolated local file (/app/data/review.db in the container):
 no external Postgres/Redis connection, zero coupling with anything else on the
 host. Each process serializes its own writers and SQLite coordinates access
-between gunicorn workers through WAL/file locking. Public entry points swallow
+between gunicorn workers through a rollback journal and file locking. Public entry points swallow
 storage errors where the caller can safely degrade, so dashboard persistence
 must never break the webhook review flow.
 """
@@ -206,8 +206,19 @@ def _bounded_review_issues(issues: Iterable[Dict[str, Any]]) -> List[Dict[str, A
     return bounded
 
 
+def _is_recoverable_corruption(error: Exception) -> bool:
+    """Whether a read error looks like a transient per-connection corruption view.
+
+    "database disk image is malformed" / "database corruption" can be reported by a
+    connection whose page cache or mmap view went stale even though the file on disk
+    is intact — a fresh connection then reads it correctly.
+    """
+    message = str(error).lower()
+    return "malformed" in message or "disk image" in message or "database corrupt" in message
+
+
 class DashboardStorage:
-    """Thread-safe SQLite access with single-writer serialization and WAL reads."""
+    """Thread-safe SQLite access with single-writer serialization over a rollback journal."""
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or DEFAULT_DB_PATH
@@ -220,7 +231,11 @@ class DashboardStorage:
         conn = sqlite3.connect(self.db_path, timeout=timeout_seconds)
         try:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
+            # Rollback journal, not WAL: WAL's per-process memory-mapped -shm index
+            # can be corrupted by mmap page reclaim under memory pressure, making a
+            # worker read "database disk image is malformed" on a healthy file. A
+            # rollback journal has no shared memory, so it avoids that failure mode.
+            conn.execute("PRAGMA journal_mode=TRUNCATE")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
             self._protect_storage_permissions()
@@ -299,7 +314,7 @@ class DashboardStorage:
     def _protect_storage_permissions(self) -> None:
         """Keep the database and SQLite sidecars owner-readable only."""
         os.chmod(self.db_path, 0o600)
-        for path in (f"{self.db_path}-wal", f"{self.db_path}-shm"):
+        for path in (f"{self.db_path}-journal", f"{self.db_path}-wal", f"{self.db_path}-shm"):
             try:
                 os.chmod(path, 0o600)
             except FileNotFoundError:
@@ -358,16 +373,24 @@ class DashboardStorage:
         return None
 
     def _read(self, sql: str, params: tuple = (), *, strict: bool = False) -> List[Dict[str, Any]]:
-        try:
-            with self._connect() as conn:
-                rows = conn.execute(sql, params).fetchall()
-            self._protect_storage_permissions()
-            return [dict(row) for row in rows]
-        except Exception as e:
-            get_logger().warning(f"Dashboard storage read failed, error: {e}")
-            if strict:
-                raise DashboardStorageReadError("dashboard storage read failed") from e
-            return []
+        error: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                with self._connect() as conn:
+                    rows = conn.execute(sql, params).fetchall()
+                self._protect_storage_permissions()
+                return [dict(row) for row in rows]
+            except Exception as e:
+                error = e
+                # Self-heal: a corruption-class error can be a stale per-connection
+                # view of a healthy file; a brand-new connection usually recovers.
+                if attempt == 0 and _is_recoverable_corruption(e):
+                    continue
+                break
+        get_logger().warning(f"Dashboard storage read failed, error: {error}")
+        if strict:
+            raise DashboardStorageReadError("dashboard storage read failed") from error
+        return []
 
     def _transaction(self, operation: Callable[[sqlite3.Connection], None], label: str,
                      timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS,

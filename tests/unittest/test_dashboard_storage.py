@@ -1,6 +1,7 @@
 """Tests for the dashboard storage layer (pr_agent/dashboard/storage.py)."""
 
 import os
+import sqlite3
 import stat
 import time
 
@@ -676,6 +677,44 @@ class TestSharedAuthState:
             max_attempts=5, max_rows=100)
         assert final["locked_out"] is True
         assert final["authenticated"] is False
+
+
+class TestStorageResilience:
+    def test_connection_does_not_use_wal(self, storage):
+        # WAL's shared-memory index is the failure mode we are avoiding; a rollback
+        # journal must be in effect (no -wal/-shm sidecars).
+        with storage._connect() as conn:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() in ("truncate", "delete", "persist", "memory", "off")
+        assert mode.lower() != "wal"
+
+    def test_read_self_heals_from_a_transient_corruption(self, storage, monkeypatch):
+        storage.create_review(repo_name="a/b", pr_number=1, pr_url="http://x")
+        real_connect = storage._connect
+        calls = {"n": 0}
+
+        def flaky_connect(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise sqlite3.DatabaseError("database disk image is malformed")
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(storage, "_connect", flaky_connect)
+        rows = storage._read("SELECT COUNT(*) AS c FROM reviews", strict=True)
+
+        assert calls["n"] == 2  # first attempt failed, retried on a fresh connection
+        assert rows[0]["c"] == 1
+
+    def test_read_does_not_retry_a_non_corruption_error(self, storage, monkeypatch):
+        calls = {"n": 0}
+
+        def broken_connect(*args, **kwargs):
+            calls["n"] += 1
+            raise sqlite3.OperationalError("no such table: reviews")
+
+        monkeypatch.setattr(storage, "_connect", broken_connect)
+        assert storage._read("SELECT 1") == []
+        assert calls["n"] == 1  # a non-corruption error is not retried
 
 
 class TestStoragePermissions:
