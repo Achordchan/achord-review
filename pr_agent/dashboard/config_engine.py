@@ -113,9 +113,10 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
                         + ", ".join(sorted(REASONING_EFFORTS)))
                     continue
             if name == "custom_llm_provider":
-                # A LiteLLM provider token: lowercase, single word, no separators.
+                # A LiteLLM provider token: lowercase word, hyphens/underscores
+                # allowed (e.g. openai, text-completion-openai), but no path/scheme.
                 value = value.strip().lower()
-                if value and not re.fullmatch(r"[a-z0-9_]+", value):
+                if value and not re.fullmatch(r"[a-z0-9_-]+", value):
                     errors.append("custom_llm_provider must be a single provider token, e.g. openai")
                     continue
             clean[name] = value

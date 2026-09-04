@@ -196,6 +196,11 @@ class TestWrite:
         assert values["model"] == "gpt-5.6-sol"
         assert values["custom_llm_provider"] == "openai"
 
+    def test_custom_llm_provider_allows_hyphenated_token(self, engine):
+        ok, errors = engine.write({"custom_llm_provider": "text-completion-openai"})
+        assert ok, errors
+        assert engine.read()["values"]["custom_llm_provider"] == "text-completion-openai"
+
     def test_custom_llm_provider_rejects_non_token(self, engine):
         ok, errors = engine.write({"custom_llm_provider": "openai/gpt"})
         assert not ok

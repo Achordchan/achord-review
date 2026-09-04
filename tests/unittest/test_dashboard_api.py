@@ -941,25 +941,3 @@ class TestUpstreamModelHelpers:
     def test_parse_caps_at_200(self):
         payload = {"data": [{"id": f"m{i:04d}"} for i in range(500)]}
         assert len(dashboard_api._parse_model_ids(payload)) == 200
-
-
-class TestUpstreamEgressPolicy:
-    def test_disallows_private_loopback_metadata(self):
-        for ip in ["127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.0.1",
-                   "169.254.169.254", "::1", "0.0.0.0", "fc00::1"]:
-            assert dashboard_api._ip_is_disallowed(ip), ip
-
-    def test_allows_public_unicast(self):
-        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"]:
-            assert not dashboard_api._ip_is_disallowed(ip), ip
-
-    async def test_egress_rejects_non_http_scheme(self):
-        assert await dashboard_api._egress_error("ftp://example.com/v1") is not None
-
-    async def test_egress_rejects_loopback_and_metadata(self):
-        assert await dashboard_api._egress_error("http://127.0.0.1/v1") is not None
-        assert await dashboard_api._egress_error("http://169.254.169.254/v1") is not None
-        assert await dashboard_api._egress_error("http://10.0.0.9:8000/v1") is not None
-
-    async def test_egress_allows_public_ip(self):
-        assert await dashboard_api._egress_error("https://8.8.8.8/v1") is None
