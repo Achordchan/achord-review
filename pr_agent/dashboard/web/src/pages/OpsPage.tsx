@@ -86,8 +86,16 @@ export default function OpsPage() {
         queryClient.cancelQueries()
         void waitForServiceThenReload()
       } else {
-        toast.success('新版本已准备', '在版本面板点“重启以生效”即可切换')
         await queryClient.invalidateQueries({ queryKey: ['ops-logs'] })
+        // A staged update that changed a dependency-defining file cannot be applied
+        // by an in-place restart (that button is hidden); direct the operator to a
+        // host-side rebuild instead of an impossible restart.
+        const caps = await capabilitiesQuery.refetch()
+        if (caps.data?.rebuild_required === true) {
+          toast.info('新版本已准备，需在服务器重建', '本次更新改动了依赖，请由维护者在宿主机重建后生效')
+        } else {
+          toast.success('新版本已准备', '在版本面板点“重启以生效”即可切换')
+        }
       }
     } catch (error) {
       const failedTask = error instanceof ApiError && isOpsResult(error.data) && error.data.started

@@ -70,7 +70,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // or redirect straight back, so stay unauthenticated and surface the error.
     // Use a direct fetch so it does not trip the global 401-invalidation.
     let session: SessionInfo | null = null
-    let rejected = false
+    let sawRejection = false // at least one definitive 401
+    let sawTransient = false // at least one network / 5xx failure
     for (let attempt = 0; attempt < 3 && session === null; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, 200))
       try {
@@ -80,16 +81,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         })
         if (res.ok) {
           session = ((await res.json()) as { data?: SessionInfo }).data ?? null
-          rejected = false
+        } else if (res.status === 401) {
+          sawRejection = true
         } else {
-          // Persist a 401 as a rejection; treat 5xx/other as transient and retry.
-          rejected = res.status === 401
+          sawTransient = true // 5xx / other: transient, keep retrying
         }
       } catch {
-        rejected = false // network error: transient, keep retrying
+        sawTransient = true // network error: transient, keep retrying
       }
     }
-    if (session === null && rejected) {
+    // Reject only when the session was never confirmed and every failure was a
+    // definitive 401: the cookie was not accepted (rejected, proxy-stripped, or the
+    // session invalidated), so entering would only fail on the next call. A single
+    // transient failure keeps the optimistic entry the retry loop is there to allow.
+    if (session === null && sawRejection && !sawTransient) {
       setState((prev) => ({ ...prev, authenticated: false, loading: false }))
       toast.error('登录会话未能确认', '会话 Cookie 未被接受，请重试或检查反向代理设置')
       return
@@ -100,7 +105,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       model: session?.model ?? '',
       version: session?.version ?? '',
     })
-  }, [toast])
+    // Entered without metadata after transient failures; refresh once the session
+    // settles so model/version do not stay blank until the next reload.
+    if (session === null) void refresh().catch(() => undefined)
+  }, [toast, refresh])
 
   const logout = useCallback(async () => {
     await api.post('/api/v1/dashboard/auth/logout')
