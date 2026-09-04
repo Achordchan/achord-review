@@ -50,7 +50,14 @@ export default function ConfigPage() {
     if (fetchingModels) return
     setFetchingModels(true)
     try {
-      const body = await api.get<{ models: string[] }>('/api/v1/dashboard/config/upstream-models')
+      // Send the api_base being edited (and a newly-typed key, if any) so the
+      // lookup targets the relay in the form — not stale saved settings — during
+      // first-time setup or a relay switch. keySecret is empty ⇒ backend uses the
+      // stored key; the masked display value is never sent back.
+      const body = await api.post<{ models: string[] }>(
+        '/api/v1/dashboard/config/upstream-models',
+        { api_base: values.api_base ?? '', key: keySecret },
+      )
       setUpstreamModels(body.models ?? [])
       toast.success('已获取上游模型', `共 ${body.models?.length ?? 0} 个，可在模型输入框下拉选择`)
     } catch (err) {

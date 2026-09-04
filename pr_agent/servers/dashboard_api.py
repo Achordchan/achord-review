@@ -11,6 +11,7 @@ front end can wire them up before the backing features ship.
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import threading
@@ -519,6 +520,20 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
                message=message)
 
 
+_UPSTREAM_TOTAL_DEADLINE_SECONDS = 12.0
+_UPSTREAM_PER_REQUEST_TIMEOUT_SECONDS = 6.0
+_UPSTREAM_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+
+
+class UpstreamModelsRequest(BaseModel):
+    # Optional overrides so the panel can query the relay currently being edited
+    # (first-time setup / relay switch) before the config is saved; empty means
+    # fall back to the persisted config. `key` is only the newly-typed secret —
+    # the panel never sends back the masked stored value.
+    api_base: str = ""
+    key: str = ""
+
+
 def _upstream_model_urls(api_base: str) -> list:
     """Candidate model-listing endpoints for an OpenAI-compatible relay.
 
@@ -556,40 +571,70 @@ def _parse_model_ids(payload: Any) -> list:
     return sorted(unique)[:200]
 
 
-@router.get("/config/upstream-models")
-async def get_upstream_models(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+@router.post("/config/upstream-models")
+async def get_upstream_models(body: UpstreamModelsRequest, request: Request,
+                             dashboard_session: Optional[str] = Cookie(None)):
     """List models the configured relay advertises, so the operator can pick one
-    instead of typing it. Uses the live api_base/key, never the masked GET value."""
+    instead of typing it. Prefers the api_base/key being edited in the form (so
+    first-time setup and relay switches work before saving), falling back to the
+    persisted config; never uses the masked GET key. Admin-only and same-origin,
+    so hitting the operator-supplied base is no more privileged than the api_base
+    they already set for reviews."""
     await require_auth(request, dashboard_session)
-    api_base = str(get_settings().get("openai.api_base", "") or "").strip()
-    api_key = str(get_settings().get("openai.key", "") or "").strip()
+    require_same_origin(request)
+    api_base = (body.api_base or "").strip() or str(get_settings().get("openai.api_base", "") or "").strip()
+    api_key = (body.key or "").strip() or str(get_settings().get("openai.key", "") or "").strip()
     if not api_base:
         raise HTTPException(status_code=400, detail="未配置中继 API Base，无法获取上游模型")
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+
     last_error = "上游未返回可用模型列表"
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+
+    async def _fetch() -> list:
+        nonlocal last_error
+        timeout = httpx.Timeout(_UPSTREAM_PER_REQUEST_TIMEOUT_SECONDS)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             for url in _upstream_model_urls(api_base):
                 try:
-                    resp = await client.get(url, headers=headers)
+                    async with client.stream("GET", url, headers=headers) as resp:
+                        if resp.status_code != 200:
+                            last_error = f"{url} 返回 HTTP {resp.status_code}"
+                            continue
+                        payload = b""
+                        too_large = False
+                        async for chunk in resp.aiter_bytes():
+                            payload += chunk
+                            if len(payload) > _UPSTREAM_MAX_RESPONSE_BYTES:
+                                too_large = True
+                                break
+                    if too_large:
+                        last_error = f"{url} 响应过大"
+                        continue
                 except httpx.HTTPError as e:
                     last_error = f"请求失败：{e}"
                     continue
-                if resp.status_code != 200:
-                    last_error = f"{url} 返回 HTTP {resp.status_code}"
-                    continue
                 try:
-                    models = _parse_model_ids(resp.json())
+                    models = _parse_model_ids(json.loads(payload))
                 except ValueError:
                     last_error = f"{url} 返回的不是有效 JSON"
                     continue
                 if models:
-                    return _ok({"models": models})
+                    return models
                 last_error = f"{url} 未返回模型列表"
+        return []
+
+    # A total deadline over the whole fallback loop: the per-request timeout alone
+    # would let several stalling candidates stack into a minute-long hang.
+    try:
+        models = await asyncio.wait_for(_fetch(), timeout=_UPSTREAM_TOTAL_DEADLINE_SECONDS)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="获取上游模型超时，请检查中继端点") from None
     except Exception as e:  # never leak an internal trace to the panel
-        raise HTTPException(status_code=502, detail=f"获取上游模型失败：{e}")
+        raise HTTPException(status_code=502, detail=f"获取上游模型失败：{e}") from e
+    if models:
+        return _ok({"models": models})
     raise HTTPException(status_code=502, detail=last_error[:300])
 
 
