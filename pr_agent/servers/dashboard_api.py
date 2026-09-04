@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Cookie, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictBool
@@ -516,6 +517,80 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
                     (warning for warning in errors if "hot reload failed" in warning), ""),
                 "persistence_warning": persistence_warning},
                message=message)
+
+
+def _upstream_model_urls(api_base: str) -> list:
+    """Candidate model-listing endpoints for an OpenAI-compatible relay.
+
+    Bases are written either with the version segment (…/v1) or without it, and
+    relays expose the catalog as /models or, occasionally, /model — so try the
+    plausible combinations in order rather than guessing one.
+    """
+    base = api_base.strip().rstrip("/")
+    if base.endswith("/v1"):
+        return [f"{base}/models", f"{base}/model"]
+    return [f"{base}/v1/models", f"{base}/v1/model", f"{base}/models", f"{base}/model"]
+
+
+def _parse_model_ids(payload: Any) -> list:
+    """Extract model ids from an OpenAI-style (or list/`models`) response, capped."""
+    if isinstance(payload, dict):
+        items = payload.get("data") or payload.get("models") or []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        items = []
+    ids = []
+    for item in items:
+        if isinstance(item, dict):
+            value = item.get("id") or item.get("name")
+        elif isinstance(item, str):
+            value = item
+        else:
+            value = None
+        if isinstance(value, str) and value.strip():
+            ids.append(value.strip())
+    # De-duplicate, keep stable order, and cap so a huge catalog can't flood the UI.
+    seen = set()
+    unique = [m for m in ids if not (m in seen or seen.add(m))]
+    return sorted(unique)[:200]
+
+
+@router.get("/config/upstream-models")
+async def get_upstream_models(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+    """List models the configured relay advertises, so the operator can pick one
+    instead of typing it. Uses the live api_base/key, never the masked GET value."""
+    await require_auth(request, dashboard_session)
+    api_base = str(get_settings().get("openai.api_base", "") or "").strip()
+    api_key = str(get_settings().get("openai.key", "") or "").strip()
+    if not api_base:
+        raise HTTPException(status_code=400, detail="未配置中继 API Base，无法获取上游模型")
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    last_error = "上游未返回可用模型列表"
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            for url in _upstream_model_urls(api_base):
+                try:
+                    resp = await client.get(url, headers=headers)
+                except httpx.HTTPError as e:
+                    last_error = f"请求失败：{e}"
+                    continue
+                if resp.status_code != 200:
+                    last_error = f"{url} 返回 HTTP {resp.status_code}"
+                    continue
+                try:
+                    models = _parse_model_ids(resp.json())
+                except ValueError:
+                    last_error = f"{url} 返回的不是有效 JSON"
+                    continue
+                if models:
+                    return _ok({"models": models})
+                last_error = f"{url} 未返回模型列表"
+    except Exception as e:  # never leak an internal trace to the panel
+        raise HTTPException(status_code=502, detail=f"获取上游模型失败：{e}")
+    raise HTTPException(status_code=502, detail=last_error[:300])
 
 
 # --------------------------------------------------------------------- ops

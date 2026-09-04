@@ -15,6 +15,7 @@ import fcntl
 import glob
 import math
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -52,6 +53,10 @@ STRING_FIELDS = {
     "reasoning_effort": ("config", "reasoning_effort"),
     "api_base": ("openai", "api_base"),
     "key": ("openai", "key"),
+    # LiteLLM provider override: set to "openai" so a bare model name (no
+    # "openai/" prefix) is routed to the OpenAI-compatible relay above instead of
+    # being provider-inferred from the model name. Empty = infer from the name.
+    "custom_llm_provider": ("litellm", "custom_llm_provider"),
     "extra_instructions": ("pr_reviewer", "extra_instructions"),
 }
 INT_FIELDS = {
@@ -106,6 +111,12 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
                     errors.append(
                         "reasoning_effort must be one of: "
                         + ", ".join(sorted(REASONING_EFFORTS)))
+                    continue
+            if name == "custom_llm_provider":
+                # A LiteLLM provider token: lowercase, single word, no separators.
+                value = value.strip().lower()
+                if value and not re.fullmatch(r"[a-z0-9_]+", value):
+                    errors.append("custom_llm_provider must be a single provider token, e.g. openai")
                     continue
             clean[name] = value
         elif name in INT_FIELDS:

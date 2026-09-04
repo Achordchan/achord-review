@@ -188,6 +188,23 @@ class TestWrite:
         assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
         assert after.st_mode & 0o777 == 0o600
 
+    def test_custom_llm_provider_round_trips_and_normalizes(self, engine):
+        ok, errors = engine.write({"model": "gpt-5.6-sol", "custom_llm_provider": " OpenAI "})
+        assert ok, errors
+        values = engine.read()["values"]
+        # bare model name is accepted (no openai/ prefix required), provider lowercased
+        assert values["model"] == "gpt-5.6-sol"
+        assert values["custom_llm_provider"] == "openai"
+
+    def test_custom_llm_provider_rejects_non_token(self, engine):
+        ok, errors = engine.write({"custom_llm_provider": "openai/gpt"})
+        assert not ok
+        assert any("custom_llm_provider" in e for e in errors)
+
+    def test_custom_llm_provider_allows_empty(self, engine):
+        ok, errors = engine.write({"custom_llm_provider": ""})
+        assert ok, errors
+
     def test_empty_key_keeps_secret(self, engine):
         before = engine.read()["values"]["key"]
         ok, _ = engine.write({"key": ""})

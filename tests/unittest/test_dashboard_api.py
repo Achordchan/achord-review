@@ -914,3 +914,30 @@ class TestProtectedRoutes:
     def test_unknown_route_404(self, client):
         auth = _auth_header(client)
         assert client.get("/api/v1/dashboard/nothing/here", headers=auth).status_code == 404
+
+
+class TestUpstreamModelHelpers:
+    def test_urls_with_version_segment(self):
+        assert dashboard_api._upstream_model_urls("https://relay/v1/") == [
+            "https://relay/v1/models", "https://relay/v1/model"]
+
+    def test_urls_without_version_segment(self):
+        assert dashboard_api._upstream_model_urls("https://relay") == [
+            "https://relay/v1/models", "https://relay/v1/model",
+            "https://relay/models", "https://relay/model"]
+
+    def test_parse_openai_data_shape(self):
+        payload = {"data": [{"id": "gpt-5.6-sol"}, {"id": "o4-mini"}]}
+        assert dashboard_api._parse_model_ids(payload) == ["gpt-5.6-sol", "o4-mini"]
+
+    def test_parse_dedupes_sorts_and_ignores_junk(self):
+        payload = {"data": [{"id": "b"}, {"id": "b"}, {"name": "a"}, {}, "c", 5]}
+        assert dashboard_api._parse_model_ids(payload) == ["a", "b", "c"]
+
+    def test_parse_bare_list_and_models_key(self):
+        assert dashboard_api._parse_model_ids(["x", "y"]) == ["x", "y"]
+        assert dashboard_api._parse_model_ids({"models": [{"id": "z"}]}) == ["z"]
+
+    def test_parse_caps_at_200(self):
+        payload = {"data": [{"id": f"m{i:04d}"} for i in range(500)]}
+        assert len(dashboard_api._parse_model_ids(payload)) == 200

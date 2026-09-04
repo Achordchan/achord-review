@@ -53,6 +53,7 @@ export type ConfigValues = {
   reasoning_effort: string
   api_base: string
   key: string
+  custom_llm_provider: string
   extra_instructions: string
   ai_timeout: number | null
   max_model_tokens: number | null
