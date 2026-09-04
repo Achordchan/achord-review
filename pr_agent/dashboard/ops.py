@@ -27,6 +27,12 @@ REPO_DIR = os.environ.get("ACHORD_REVIEW_REPO_DIR", "").strip()
 RELEASES_DIR = os.environ.get("ACHORD_REVIEW_RELEASES_DIR", "").strip()
 UPDATE_REF = os.environ.get("ACHORD_REVIEW_UPDATE_REF", "@{u}").strip() or "@{u}"
 CONFIG_DIR = os.environ.get("ACHORD_REVIEW_CONFIG_DIR", "").strip()
+# The mounted source checkout that owns the Git metadata for every release
+# worktree. The launcher stages the image's own revision from it on boot.
+SOURCE_DIR = os.environ.get("ACHORD_REVIEW_SOURCE_DIR", "").strip()
+# Superseded releases kept for a host-side rollback; older worktrees are removed
+# at boot so the persistent releases volume stays bounded.
+RELEASE_RETENTION = 1
 # Socket-free self-restart: terminate the gunicorn master (PID 1) and let the
 # container's `restart: unless-stopped` policy bring a fresh process up, which
 # re-imports code from the mounted checkout. Opt-in, because it is only safe
@@ -46,6 +52,11 @@ DEPS_FILES = (
     "deploy/achord-review/run-staged-release.sh",
 )
 DEPS_BAKED_DIR = os.environ.get("ACHORD_DEPS_BAKED_DIR", "/app/.deps-baked")
+# A per-build stamp written by the Dockerfile after the code is added. A stamp the
+# launcher has not seen before means the operator rebuilt the image, and the
+# rebuilt source checkout - not any earlier staged release - is what must run.
+IMAGE_BUILD_ID_FILE = "build-id"
+IMAGE_BUILD_MARKER = ".image-build-id"
 GIT_PULL_TIMEOUT_SECONDS = 120
 GIT_FETCH_TIMEOUT_SECONDS = 45
 GIT_PREFLIGHT_TIMEOUT_SECONDS = 5
@@ -161,10 +172,12 @@ def _run_bounded_command(argv: List[str], cwd: str, timeout_seconds: int,
 class _RestartTicket:
     """Transfer the held operations lock into an after-response restart task."""
 
-    def __init__(self, lock_context, lock_file, mode: str = "docker"):
+    def __init__(self, lock_context, lock_file, mode: str = "docker",
+                 pending: Optional[str] = None):
         self.lock_context = lock_context
         self.lock_file = lock_file
         self.mode = mode
+        self.pending = pending
 
 
 def _self_restart_capability() -> Optional[Dict[str, Any]]:
@@ -221,11 +234,13 @@ def prepare_restart() -> tuple[Dict[str, Any], Optional[_RestartTicket]]:
     if not capability["available"]:
         lock_context.__exit__(None, None, None)
         return _not_started(capability["reason"]), None
-    try:
-        activated_release = _activate_pending_release()
-    except OSError as e:
+    # The switch itself happens in execute_restart, immediately before the restart is
+    # initiated, so a restart that fails to start can roll it back. Only the
+    # preconditions are checked here, where a failure can still be reported.
+    pending = _pending_release()
+    if pending is not None and not os.path.islink(REPO_DIR.rstrip(os.sep)):
         lock_context.__exit__(None, None, None)
-        return _not_started(f"待发布版本切换失败，重启未发起：{e}"), None
+        return _not_started("活动代码路径不是可原子切换的符号链接，重启未发起"), None
     mode = capability.get("mode", "docker")
     scheduled_note = ("重启已排队：将在当前响应后退出进程，由容器重启策略自动拉起"
                       if mode == "self"
@@ -238,42 +253,60 @@ def prepare_restart() -> tuple[Dict[str, Any], Optional[_RestartTicket]]:
         "mode": mode,
         "output": [scheduled_note],
     }
-    if activated_release:
-        result["output"].insert(0, f"已原子切换到待发布版本 {os.path.basename(activated_release)}")
-    return result, _RestartTicket(lock_context, lock_file, mode)
+    if pending:
+        result["output"].insert(
+            0, f"重启发起时将原子切换到待发布版本 {os.path.basename(pending)[:12]}")
+    return result, _RestartTicket(lock_context, lock_file, mode, pending=pending)
 
 
 def execute_restart(ticket: _RestartTicket) -> None:
-    """Restart from a post-response background task, via Docker or a self-exit."""
+    """Restart from a post-response background task, via Docker or a self-exit.
+
+    A pending release is switched in only here, right before the restart is
+    initiated. If initiation fails synchronously (Docker refuses, PID 1 cannot be
+    signaled), the previous target and the pending marker are restored so the
+    still-serving old process and the `current` link never disagree.
+    """
+    activation: Optional[_Activation] = None
     try:
+        if ticket.pending:
+            activation = _activate_pending_release()
         if ticket.mode == "self":
-            _execute_self_restart()
-            return
-        result = _run_bounded_command(
-            ["docker", "restart", "--timeout", "30", CONTAINER_NAME],
-            cwd="/", timeout_seconds=RESTART_COMMAND_TIMEOUT_SECONDS,
-            lock_file=ticket.lock_file)
-        if result.get("exit_code") not in (0, None):
-            get_logger().warning(
-                f"Scheduled dashboard restart failed with exit code {result['exit_code']}")
+            initiated = _execute_self_restart()
+        else:
+            result = _run_bounded_command(
+                ["docker", "restart", "--timeout", "30", CONTAINER_NAME],
+                cwd="/", timeout_seconds=RESTART_COMMAND_TIMEOUT_SECONDS,
+                lock_file=ticket.lock_file)
+            initiated = result.get("exit_code") == 0
+            if not initiated:
+                get_logger().warning(
+                    f"Scheduled dashboard restart failed with exit code {result.get('exit_code')}")
+        if not initiated and activation is not None:
+            _rollback_activation(activation)
     except Exception as e:
         get_logger().warning(f"Scheduled dashboard restart failed, error: {e}")
+        if activation is not None:
+            _rollback_activation(activation)
     finally:
         ticket.lock_context.__exit__(None, None, None)
 
 
-def _execute_self_restart() -> None:
+def _execute_self_restart() -> bool:
     """Gracefully terminate the gunicorn master (PID 1) so the policy respawns us.
 
     The container's `restart: unless-stopped` starts a fresh process that, under
     `preload_app`, re-imports the application from the mounted checkout — this is
     how a pulled code update actually takes effect. Needs no Docker socket.
+    Returns whether the signal was delivered.
     """
     get_logger().info("Dashboard self-restart: signaling gunicorn master (PID 1) to exit")
     try:
         os.kill(1, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError) as e:
         get_logger().warning(f"Dashboard self-restart could not signal PID 1, error: {e}")
+        return False
+    return True
 
 
 def git_pull_capability() -> Dict[str, Any]:
@@ -296,6 +329,11 @@ def git_pull_capability() -> Dict[str, Any]:
         os.makedirs(RELEASES_DIR, mode=0o700, exist_ok=True)
     except OSError:
         return {"available": False, "reason": "受控发布目录不可写。"}
+    # A staged release only inherits the production settings and credentials
+    # through this link; without it a switch would boot an unconfigured service.
+    if not CONFIG_DIR or not os.path.isdir(CONFIG_DIR):
+        return {"available": False,
+                "reason": "未配置持久化配置目录（ACHORD_REVIEW_CONFIG_DIR），分阶段更新未启用。"}
     return {"available": True, "reason": "已连接受控 Git 工作区，更新会先写入独立发布目录。"}
 
 
@@ -340,9 +378,10 @@ def _write_pending_release(path: str) -> None:
 
 def _ensure_release_config_link(release_path: str) -> None:
     """Attach the stable deployment config without exposing it to Git."""
-    if not CONFIG_DIR:
-        return
+    if not CONFIG_DIR or not os.path.isdir(CONFIG_DIR):
+        raise OSError("未配置持久化配置目录，无法为发布版本挂接 settings_prod")
     settings_path = os.path.join(release_path, "pr_agent", "settings_prod")
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
     if os.path.lexists(settings_path):
         if (os.path.islink(settings_path)
                 and os.path.realpath(settings_path) == os.path.realpath(CONFIG_DIR)):
@@ -351,23 +390,174 @@ def _ensure_release_config_link(release_path: str) -> None:
     os.symlink(CONFIG_DIR, settings_path)
 
 
-def _activate_pending_release() -> Optional[str]:
-    """Atomically redirect the stable current symlink to a prepared worktree."""
-    pending = _pending_release()
-    if pending is None:
-        return None
+class _Activation:
+    """What an atomic switch replaced, so a failed restart can undo it."""
+
+    def __init__(self, release: str, previous: Optional[str], was_pending: bool):
+        self.release = release
+        self.previous = previous
+        self.was_pending = was_pending
+
+
+def _switch_active_release(target: str) -> Optional[str]:
+    """Atomically point the stable current symlink at target; return the old target."""
     active_link = REPO_DIR.rstrip(os.sep)
-    if not os.path.islink(active_link):
+    previous = os.readlink(active_link) if os.path.islink(active_link) else None
+    if previous is None and os.path.lexists(active_link):
         raise OSError("活动代码路径不是可原子切换的符号链接")
     temporary_link = f"{active_link}.{os.getpid()}.tmp"
     try:
-        os.symlink(pending, temporary_link)
+        os.symlink(target, temporary_link)
         os.replace(temporary_link, active_link)
-        os.unlink(_pending_marker_path())
     finally:
         with suppress(FileNotFoundError):
             os.unlink(temporary_link)
-    return pending
+    return previous
+
+
+def _activate_pending_release() -> Optional[_Activation]:
+    """Atomically redirect the stable current symlink to the prepared worktree."""
+    pending = _pending_release()
+    if pending is None:
+        return None
+    previous = _switch_active_release(pending)
+    os.unlink(_pending_marker_path())
+    return _Activation(pending, previous, was_pending=True)
+
+
+def _rollback_activation(activation: _Activation) -> None:
+    """Restore the previous target and pending marker after a failed restart."""
+    try:
+        if activation.previous is not None:
+            _switch_active_release(activation.previous)
+        if activation.was_pending:
+            _write_pending_release(activation.release)
+        get_logger().warning(
+            f"Dashboard restart did not start; rolled `current` back to {activation.previous}")
+    except OSError as e:
+        get_logger().error(f"Dashboard release rollback failed, error: {e}")
+
+
+def _release_admin_dir() -> str:
+    """The checkout whose Git metadata registers every release worktree."""
+    return SOURCE_DIR or REPO_DIR
+
+
+def _discard_release_worktree(release_path: str) -> None:
+    """Remove a worktree and its registration so the same revision can be retried."""
+    admin = _release_admin_dir()
+    with suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(
+            ["git", "-C", admin, "worktree", "remove", "--force", release_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=GIT_PREFLIGHT_TIMEOUT_SECONDS, check=False)
+    shutil.rmtree(release_path, ignore_errors=True)
+    with suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(
+            ["git", "-C", admin, "worktree", "prune"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=GIT_PREFLIGHT_TIMEOUT_SECONDS, check=False)
+
+
+def _is_revision(name: str) -> bool:
+    return len(name) == 40 and all(c in "0123456789abcdef" for c in name.lower())
+
+
+def _ensure_release_worktree(revision: str) -> str:
+    """Return the release directory for revision, creating the worktree if needed."""
+    release_path = os.path.join(RELEASES_DIR, revision)
+    if os.path.isdir(release_path):
+        rc, existing = _git_text_at(release_path, ["rev-parse", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+        if rc != 0 or existing != revision:
+            raise OSError(f"发布目录 {revision[:12]} 已存在但不是预期版本")
+    else:
+        proc = subprocess.run(
+            ["git", "-C", _release_admin_dir(), "worktree", "add", "--detach", release_path, revision],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            timeout=GIT_PULL_TIMEOUT_SECONDS, check=False)
+        if proc.returncode != 0:
+            _discard_release_worktree(release_path)
+            raise OSError(f"无法准备发布版本 {revision[:12]}：{(proc.stdout or '').strip()[:200]}")
+    _ensure_release_config_link(release_path)
+    return release_path
+
+
+def _read_marker(path: str) -> Optional[str]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip() or None
+    except OSError:
+        return None
+
+
+def prune_releases(keep: Optional[str] = None) -> List[str]:
+    """Remove superseded release worktrees beyond RELEASE_RETENTION.
+
+    The active target, the pending release and `keep` are never removed; the
+    newest RELEASE_RETENTION other releases stay for a host-side rollback. Only
+    called at boot, when no process is serving from a superseded worktree.
+    """
+    protected = {p for p in (
+        os.path.realpath(REPO_DIR) if os.path.islink(REPO_DIR.rstrip(os.sep)) else None,
+        _pending_release(), keep and os.path.realpath(keep)) if p}
+    candidates = []
+    for name in os.listdir(RELEASES_DIR):
+        path = os.path.join(RELEASES_DIR, name)
+        if not _is_revision(name) or not os.path.isdir(path) or os.path.realpath(path) in protected:
+            continue
+        candidates.append((os.path.getmtime(path), path))
+    candidates.sort(reverse=True)
+    removed = []
+    for _, path in candidates[RELEASE_RETENTION:]:
+        _discard_release_worktree(path)
+        removed.append(path)
+    return removed
+
+
+def reconcile_boot_release() -> str:
+    """Decide which release the launcher boots and make `current` point at it.
+
+    Runs before Gunicorn in the release launcher. Priority order:
+    1. A rebuilt image (fresh build stamp) runs the source checkout's HEAD - the
+       revision it was built from - and discards any older pending release, so a
+       host `git pull --ff-only && docker compose up -d --build` always takes
+       effect even without a marker and never boots a stale staged revision.
+    2. Otherwise a pending release whose dependencies match the image is
+       activated (a dependency-changing update left it waiting for this rebuild).
+    3. Otherwise the existing `current` target keeps running.
+    Returns the activated release path.
+    """
+    if not (REPO_DIR and RELEASES_DIR and SOURCE_DIR):
+        raise OSError("release launcher requires REPO_DIR, RELEASES_DIR and SOURCE_DIR")
+    os.makedirs(RELEASES_DIR, mode=0o700, exist_ok=True)
+    active_link = REPO_DIR.rstrip(os.sep)
+    build_id = _read_marker(os.path.join(DEPS_BAKED_DIR, IMAGE_BUILD_ID_FILE))
+    seen_build_id = _read_marker(os.path.join(RELEASES_DIR, IMAGE_BUILD_MARKER))
+    rebuilt = build_id is not None and build_id != seen_build_id
+    if rebuilt or not os.path.islink(active_link):
+        rc, source_head = _git_text_at(SOURCE_DIR, ["rev-parse", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+        if rc != 0 or not _is_revision(source_head):
+            raise OSError("无法解析源码检出的 HEAD，发布启动器无法确定要运行的版本")
+        release = _ensure_release_worktree(source_head)
+        _switch_active_release(release)
+        pending = _pending_release()
+        if pending is not None and os.path.realpath(pending) != os.path.realpath(release):
+            get_logger().warning(
+                f"Discarding pending release {os.path.basename(pending)[:12]}: the image was "
+                f"rebuilt from {source_head[:12]}")
+        with suppress(FileNotFoundError):
+            os.unlink(_pending_marker_path())
+        if build_id is not None:
+            marker = os.path.join(RELEASES_DIR, IMAGE_BUILD_MARKER)
+            with open(f"{marker}.tmp", "w", encoding="utf-8") as handle:
+                handle.write(build_id + "\n")
+            os.replace(f"{marker}.tmp", marker)
+    elif _pending_release() is not None and not rebuild_required():
+        _activate_pending_release()
+    active = os.path.realpath(active_link)
+    _ensure_release_config_link(active)
+    prune_releases()
+    return active
 
 
 def _compute_deps_fingerprint(base_dir: str) -> Optional[str]:
@@ -459,7 +649,9 @@ def git_pull() -> Dict[str, Any]:
                     ["git", "-C", REPO_DIR, "worktree", "add", "--detach", release_path, revision],
                     cwd=REPO_DIR, timeout_seconds=GIT_PULL_TIMEOUT_SECONDS, lock_file=lock_file)
                 if stage.get("exit_code") != 0 or not stage.get("completed"):
-                    shutil.rmtree(release_path, ignore_errors=True)
+                    # Drop the registration too, or a retry of the same revision
+                    # fails on a path Git still considers an existing worktree.
+                    _discard_release_worktree(release_path)
                     return stage
                 _ensure_release_config_link(release_path)
                 result = stage
@@ -517,6 +709,8 @@ def check_update() -> Dict[str, Any]:
         "ahead": None,
         "diverged": False,
         "update_available": False,
+        "pending": None,
+        "staged": False,
     }
     if not capability["available"]:
         return result
@@ -579,6 +773,24 @@ def check_update() -> Dict[str, Any]:
                 result["reason"] = "本地与远端已分叉，无法 fast-forward 更新，请在宿主机处理。"
             else:
                 result["update_available"] = int(behind) > 0
+            # The live HEAD deliberately stays put until restart, so a prepared
+            # release must be reported as such instead of re-offered as an update.
+            pending = _pending_release()
+            if pending is not None:
+                pending_rc, pending_rev = _git_text_at(
+                    pending, ["rev-parse", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                latest_rc, latest_full = _git_text(["rev-parse", comparison_ref], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                _, pending_subject = _git_text_at(
+                    pending, ["log", "-1", "--format=%s"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+                if pending_rc == 0 and _is_revision(pending_rev):
+                    result["pending"] = {
+                        "sha": pending_rev[:7],
+                        "subject": pending_subject or None,
+                        "rebuild_required": rebuild_required(),
+                    }
+                    if latest_rc == 0 and pending_rev == latest_full:
+                        result["staged"] = True
+                        result["update_available"] = False
             result["checked"] = True
             return result
         except (OSError, subprocess.TimeoutExpired) as e:

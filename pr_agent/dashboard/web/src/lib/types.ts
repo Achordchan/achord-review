@@ -104,6 +104,9 @@ export type VersionInfo = {
   ahead: number | null
   diverged: boolean
   update_available: boolean
+  /** A staged release waiting for restart; `staged` when it already is the latest. */
+  pending: (VersionCommit & { rebuild_required: boolean }) | null
+  staged: boolean
 }
 export type DiagnoseResult = {
   ok: boolean

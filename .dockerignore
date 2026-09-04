@@ -11,3 +11,5 @@ deploy/achord-review/config/
 deploy/achord-review/config.toml
 deploy/achord-review/config.toml.bak*
 deploy/achord-review/data/
+# Persistent release worktrees of the opt-in in-panel update flow
+deploy/achord-review/releases/

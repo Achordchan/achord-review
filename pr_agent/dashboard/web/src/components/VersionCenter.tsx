@@ -33,8 +33,7 @@ export function VersionCenter({ onClose, version }: {
 }) {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [phase, setPhase] = useState<'idle' | 'updating' | 'updated' | 'restarting'>('idle')
-  const [depsChanged, setDepsChanged] = useState(false)
+  const [phase, setPhase] = useState<'idle' | 'updating' | 'restarting'>('idle')
 
   const updateQuery = useQuery({
     queryKey: ['ops-check-update'],
@@ -50,9 +49,14 @@ export function VersionCenter({ onClose, version }: {
   const info = updateQuery.data
   const restartAvailable = capabilitiesQuery.data?.restart.available === true
   const updateAvailable = info?.update_available === true
-  // Rebuild-required is server-authoritative, so it survives a reopen even after
-  // the local depsChanged flag has reset; either one blocks an in-place restart.
-  const rebuildRequired = depsChanged || capabilitiesQuery.data?.rebuild_required === true
+  // The server reports a prepared release separately from "update available", so
+  // the panel never re-offers a revision that is already staged for restart.
+  const staged = info?.staged === true
+  const pending = info?.pending ?? null
+  // Rebuild-required is server-authoritative (computed against the staged release),
+  // so it survives a reopen; it blocks an in-place restart.
+  const rebuildRequired = capabilitiesQuery.data?.rebuild_required === true
+    || pending?.rebuild_required === true
   const aheadOnly = info?.checked === true && !updateAvailable && !info.diverged
     && (info.ahead ?? 0) > 0
 
@@ -68,10 +72,14 @@ export function VersionCenter({ onClose, version }: {
     setPhase('updating')
     try {
       const result = await api.post<OpsResult>('/api/v1/dashboard/ops/git-pull')
-      setDepsChanged(result.dependencies_changed === true)
-      toast.success('代码已更新', (result.output ?? []).slice(-1)[0] || '重启后生效')
+      // The backend maps a not-started / failed OpsResult to 503 / 500, but never
+      // trust a 200 alone: only a completed, zero-exit result means staging happened.
+      if (!result.started || !result.completed || result.exit_code !== 0) {
+        throw new ApiError(200, (result.output ?? []).slice(-1)[0] || '更新未完成')
+      }
+      toast.success('新版本已准备', (result.output ?? []).slice(-1)[0] || '重启后生效')
       await Promise.all([updateQuery.refetch(), capabilitiesQuery.refetch()])
-      setPhase('updated')
+      setPhase('idle')
     } catch (error) {
       setPhase('idle')
       toast.error('更新失败', error instanceof ApiError ? error.message : '请检查受控 Git 工作区')
@@ -138,6 +146,12 @@ export function VersionCenter({ onClose, version }: {
                     subject={info.latest?.subject}
                     tone={updateAvailable ? 'accent' : undefined}
                   />
+                  {pending && (
+                    <>
+                      <div className="border-t border-line/60" />
+                      <CommitLine label="已准备" sha={pending.sha} subject={pending.subject} tone="accent" />
+                    </>
+                  )}
                 </>
               ) : (
                 <p className="py-4 text-sm text-muted">{info?.reason ?? '暂时无法检查更新。'}</p>
@@ -151,14 +165,14 @@ export function VersionCenter({ onClose, version }: {
                     <CircleArrowUp size={14} />
                     发现新版本，落后 {info.behind} 个提交
                   </p>
-                ) : phase === 'updated' && depsChanged ? (
+                ) : staged && rebuildRequired ? (
                   <p className="text-xs font-medium text-warn">
-                    ⚠ 代码已拉取，但本次更新改动了依赖/构建文件，重启不生效——
+                    ⚠ 新版本 {pending?.sha} 已准备，但改动了依赖/构建文件，重启不生效——
                     请在宿主机执行 <code className="font-mono">git pull --ff-only &amp;&amp; docker compose up -d --build</code>
                   </p>
-                ) : phase === 'updated' ? (
+                ) : staged ? (
                   <p className="flex items-center gap-1.5 text-xs font-medium text-good">
-                    <CheckCircle2 size={14} /> 代码已拉取，重启后生效
+                    <CheckCircle2 size={14} /> 新版本 {pending?.sha} 已准备，重启后生效
                   </p>
                 ) : info.diverged ? (
                   <p className="text-xs font-medium text-warn">
@@ -210,13 +224,13 @@ export function VersionCenter({ onClose, version }: {
                     ? '依赖与运行镜像不一致，重启会因缺少新依赖导入失败并进入重启循环，请在宿主机重建镜像'
                     : (restartAvailable ? '' : capabilitiesQuery.data?.restart.reason)}
                   className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-semibold transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
-                    phase === 'updated' && !rebuildRequired
+                    staged && !rebuildRequired
                       ? 'bg-accent-strong text-white hover:bg-accent'
                       : 'border border-line text-text hover:bg-surface-2'
                   }`}
                 >
                   <RefreshCw size={14} />
-                  {rebuildRequired ? '需宿主机重建' : phase === 'updated' ? '重启以生效' : '重启'}
+                  {rebuildRequired ? '需宿主机重建' : staged ? '重启以生效' : '重启'}
                 </button>
               </div>
             </div>

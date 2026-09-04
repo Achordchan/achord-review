@@ -133,14 +133,23 @@ image and the API routes share the webhook process).
 - **In-panel updates are opt-in**, because the shipped image bakes its code in rather than
   running from managed releases. To enable the sub2api-style "check → one-click update →
   restart" flow, uncomment the opt-in `command`, the source/releases/config mounts, and all
-  six opt-in environment variables in `docker-compose.yml`. The launcher creates an initial
+  six opt-in environment variables in `docker-compose.yml` (`ACHORD_REVIEW_CONFIG_DIR` is
+  mandatory: staging is refused without a persistent config directory). The launcher creates an initial
   detached worktree under `./releases` and runs from its stable `current` symlink. **Check
   update** fetches and compares `origin/main`; **one-click update** prepares a second detached
-  worktree without modifying the running release; **restart** atomically redirects `current`
-  only after the API response is ready, then self-exits so the fresh process imports the new
-  release. The old process keeps absolute paths to its original Python and static files, so
-  no request can combine a new frontend with the old backend. The browser polls the service
-  back up and reloads automatically; the HttpOnly cookie and SQLite session survive.
+  worktree without modifying the running release, and the panel then shows it as
+  *prepared* rather than re-offering the same update; **restart** atomically redirects
+  `current` at the moment the restart is initiated (rolled back if the restart cannot
+  start), then self-exits so the fresh process imports the new release. The old process
+  keeps absolute paths to its original Python and static files, so no request can combine a
+  new frontend with the old backend. The browser polls the service back up and reloads
+  automatically; the HttpOnly cookie and SQLite session survive.
+- **The host always wins.** Each image build carries a fresh stamp; on the first boot of a
+  rebuilt image the launcher runs the source checkout's `HEAD` (what the image was built
+  from), discards any older pending release, and prunes superseded worktrees down to the
+  active one plus one rollback. So `git pull --ff-only && docker compose up -d --build` on
+  the host takes effect with no panel involvement, and a stale staged revision can never
+  boot on a newer image. `./releases` is ignored by Git and by the Docker build context.
 - **The one limit, surfaced honestly:** a restart only re-imports Python — it cannot
   install packages. When a pull changes `requirements.txt` / `pyproject.toml` / the
   Dockerfile or release configuration, the panel detects it and tells you to update

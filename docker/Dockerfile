@@ -22,6 +22,11 @@ ENV PYTHONPATH=/app
 
 FROM base AS github_app
 ADD pr_agent pr_agent
+# Per-build stamp for the release launcher: a stamp it has not seen means the
+# image was rebuilt, so the rebuilt source checkout - not an older staged
+# release - is what must run. Placed after the code so a cached, identical
+# build keeps its stamp.
+RUN python -c "import uuid; print(uuid.uuid4())" > /app/.deps-baked/build-id
 CMD ["python", "-m", "gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-c", "pr_agent/servers/gunicorn_config.py", "--forwarded-allow-ips", "*", "pr_agent.servers.github_app:app"]
 
 FROM base AS bitbucket_app

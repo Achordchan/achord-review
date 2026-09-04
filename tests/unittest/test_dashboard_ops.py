@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import os
 import signal
 import subprocess
 import sys
@@ -14,6 +15,11 @@ from pr_agent.dashboard import ops
 @pytest.fixture(autouse=True)
 def _isolated_ops_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "OPS_LOCK_PATH", str(tmp_path / "dashboard-ops.lock"))
+    # Staged releases refuse to run without the persistent config directory.
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setattr(ops, "CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(ops, "SOURCE_DIR", "")
 
 
 def test_git_pull_returns_completed_output(monkeypatch, tmp_path):
@@ -811,7 +817,7 @@ def test_prepare_restart_is_blocked_when_a_rebuild_is_required(monkeypatch):
     assert unexpected == []
 
 
-def test_prepare_restart_atomically_activates_pending_release(monkeypatch, tmp_path):
+def _pending_release_layout(tmp_path, monkeypatch):
     releases = tmp_path / "releases"
     old_release = releases / "old"
     new_release = releases / "new"
@@ -826,14 +832,63 @@ def test_prepare_restart_atomically_activates_pending_release(monkeypatch, tmp_p
     monkeypatch.setattr(
         ops, "restart_capability",
         lambda: {"available": True, "mode": "self", "reason": "ready"})
+    return releases, old_release, new_release, active
+
+
+def test_prepare_restart_defers_the_switch_until_restart_initiation(monkeypatch, tmp_path):
+    releases, old_release, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
 
     result, ticket = ops.prepare_restart()
 
+    # The response only announces the switch; `current` still serves the old release.
     assert result["started"] is True
+    assert active.resolve() == old_release.resolve()
+    assert (releases / ".pending-release").exists()
+    assert ticket is not None and ticket.pending == str(new_release.resolve())
+    ticket.lock_context.__exit__(None, None, None)
+
+
+def test_execute_restart_switches_atomically_when_the_signal_is_delivered(monkeypatch, tmp_path):
+    releases, _, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(ops.os, "kill", lambda pid, sig: None)
+    _, ticket = ops.prepare_restart()
+
+    ops.execute_restart(ticket)
+
     assert active.resolve() == new_release.resolve()
     assert not (releases / ".pending-release").exists()
-    assert ticket is not None
-    ticket.lock_context.__exit__(None, None, None)
+
+
+def test_execute_restart_rolls_back_when_restart_cannot_be_initiated(monkeypatch, tmp_path):
+    releases, old_release, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+
+    def _refuse(pid, sig):
+        raise PermissionError("not PID 1's parent")
+
+    monkeypatch.setattr(ops.os, "kill", _refuse)
+    _, ticket = ops.prepare_restart()
+
+    ops.execute_restart(ticket)
+
+    # The old process keeps serving, so `current` and the marker must match it again.
+    assert active.resolve() == old_release.resolve()
+    assert (releases / ".pending-release").read_text().strip() == str(new_release.resolve())
+
+
+def test_execute_restart_rolls_back_when_docker_restart_fails(monkeypatch, tmp_path):
+    releases, old_release, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        ops, "restart_capability",
+        lambda: {"available": True, "mode": "docker", "reason": "ready"})
+    monkeypatch.setattr(
+        ops, "_run_bounded_command",
+        lambda *a, **k: {"started": True, "completed": True, "exit_code": 1, "output": ["denied"]})
+    _, ticket = ops.prepare_restart()
+
+    ops.execute_restart(ticket)
+
+    assert active.resolve() == old_release.resolve()
+    assert (releases / ".pending-release").exists()
 
 
 def test_git_pull_stages_without_mutating_live_worktree(monkeypatch, tmp_path):
@@ -864,7 +919,6 @@ def test_git_pull_stages_without_mutating_live_worktree(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(current))
     monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
     monkeypatch.setattr(ops, "UPDATE_REF", "origin/main")
-    monkeypatch.setattr(ops, "CONFIG_DIR", "")
     monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(source))
 
     result = ops.git_pull()
@@ -874,6 +928,154 @@ def test_git_pull_stages_without_mutating_live_worktree(monkeypatch, tmp_path):
     assert (source / "value.txt").read_text() == "old\n"
     assert pending is not None
     assert (tmp_path / "releases" / result["release"] / "value.txt").read_text() == "new\n"
+    settings_link = tmp_path / "releases" / result["release"] / "pr_agent" / "settings_prod"
+    assert settings_link.is_symlink() and settings_link.resolve() == (tmp_path / "config").resolve()
+
+    # The prepared release is reported as staged, not re-offered as an update.
+    info = ops.check_update()
+    assert info["checked"] is True
+    assert info["staged"] is True
+    assert info["update_available"] is False
+    assert info["pending"]["sha"] == result["release"][:7]
+    assert info["pending"]["subject"] == "new"
+
+
+def _staged_repo(tmp_path):
+    """A bare remote, a source clone on `main`, and a releases dir with `current`."""
+    remote = tmp_path / "remote.git"
+    source = tmp_path / "source"
+    releases = tmp_path / "releases"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(remote), str(source)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+    releases.mkdir()
+    return remote, source, releases
+
+
+def _commit(source, text):
+    (source / "value.txt").write_text(text + "\n")
+    subprocess.run(["git", "-C", str(source), "add", "value.txt"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", text], check=True, capture_output=True)
+    return subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _boot_env(monkeypatch, tmp_path, source, releases, build_id):
+    baked = tmp_path / "baked"
+    baked.mkdir(exist_ok=True)
+    (baked / "build-id").write_text(build_id + "\n")
+    for name in ("requirements.txt", "pyproject.toml"):
+        (baked / name).write_text("")
+        (source / name).write_text("")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+
+
+def test_git_pull_unregisters_a_failed_worktree_so_the_revision_can_be_retried(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    revision = _commit(source, "one")
+    (releases / "current").symlink_to(source)
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "rebuild_required", lambda: False)
+    monkeypatch.setattr(
+        ops, "_git_text",
+        lambda args, timeout: (0, "") if args[:1] in (["fetch"], ["merge-base"]) else (0, revision))
+    real_run = ops._run_bounded_command
+
+    def _register_then_time_out(argv, cwd, timeout_seconds, lock_file=None):
+        # Git registered the worktree, then the command was killed mid-checkout.
+        result = real_run(argv, cwd, timeout_seconds, lock_file)
+        return {**result, "exit_code": None, "timed_out": True}
+
+    monkeypatch.setattr(ops, "_run_bounded_command", _register_then_time_out)
+    failed = ops.git_pull()
+    assert failed["exit_code"] is None
+    registered = subprocess.run(["git", "-C", str(source), "worktree", "list", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+    assert str(releases / revision) not in registered
+
+    monkeypatch.setattr(ops, "_run_bounded_command", real_run)
+    retried = ops.git_pull()
+
+    assert retried["exit_code"] == 0
+    assert retried["release"] == revision
+
+
+def test_reconcile_boot_runs_the_rebuilt_source_head_over_a_stale_pending_release(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    r1 = _commit(source, "r1")
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    assert os.path.basename(ops.reconcile_boot_release()) == r1
+    # R1 was staged as rebuild-required; the operator then pulls R2 and rebuilds.
+    (releases / ".pending-release").write_text(str(releases / r1) + "\n")
+    r2 = _commit(source, "r2")
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-2")
+
+    active = ops.reconcile_boot_release()
+
+    assert os.path.basename(active) == r2
+    assert (releases / "current").resolve() == (releases / r2).resolve()
+    assert not (releases / ".pending-release").exists()
+    assert (releases / ".image-build-id").read_text().strip() == "build-2"
+
+
+def test_reconcile_boot_keeps_the_running_release_when_the_image_is_unchanged(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    _commit(source, "r1")
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    ops.reconcile_boot_release()
+    # A code-only in-panel update moved `current` ahead of the source checkout.
+    r2 = _commit(source, "r2")
+    subprocess.run(["git", "-C", str(source), "reset", "-q", "--hard", "HEAD~1"], check=True)
+    subprocess.run(["git", "-C", str(source), "worktree", "add", "--detach", str(releases / r2), r2],
+                   check=True, capture_output=True)
+    ops._switch_active_release(str(releases / r2))
+
+    active = ops.reconcile_boot_release()
+
+    # A plain container restart must not roll the service back to the source HEAD.
+    assert os.path.basename(active) == r2
+
+
+def test_reconcile_boot_prunes_superseded_releases_but_keeps_a_rollback(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    revisions = [_commit(source, f"r{i}") for i in range(4)]
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    for index, revision in enumerate(revisions[:-1]):
+        subprocess.run(["git", "-C", str(source), "worktree", "add", "--detach",
+                        str(releases / revision), revision], check=True, capture_output=True)
+        os.utime(releases / revision, (index, index))
+
+    active = ops.reconcile_boot_release()
+
+    remaining = sorted(name for name in os.listdir(releases) if ops._is_revision(name))
+    assert os.path.basename(active) == revisions[-1]
+    # Active plus the newest superseded release survive; the two oldest are gone.
+    assert remaining == sorted([revisions[-1], revisions[-2]])
+    registered = subprocess.run(["git", "-C", str(source), "worktree", "list", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+    assert revisions[0] not in registered
+
+
+def test_git_pull_capability_requires_a_persistent_config_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(tmp_path / "releases"))
+    monkeypatch.setattr(ops, "CONFIG_DIR", "")
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="true\n"))
+
+    result = ops.git_pull_capability()
+
+    assert result["available"] is False
+    assert "ACHORD_REVIEW_CONFIG_DIR" in result["reason"]
 
 
 def test_rebuild_required_flags_removal_of_all_dependency_files(monkeypatch, tmp_path):

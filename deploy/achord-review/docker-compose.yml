@@ -22,13 +22,16 @@ services:
     # In-panel updates (opt-in): start through the release launcher. It creates
     # a detached initial worktree and runs from the stable `current` symlink.
     # Updates are staged in another worktree and the symlink changes atomically
-    # only after the restart response is ready, so live Python/static files are
-    # never modified in place. Uncomment together with the update mounts/env below.
+    # only when the restart is initiated, so live Python/static files are never
+    # modified in place. A host rebuild always wins: the launcher detects the new
+    # image and runs the rebuilt source HEAD, discarding any older staged release,
+    # then prunes superseded worktrees. Uncomment together with the mounts/env below.
     #command: ["/bin/sh", "/app/source/deploy/achord-review/run-staged-release.sh"]
-    # The panel runs `git pull` as the container user. As root (the default) fetched
-    # objects become root-owned in the mounted checkout — fine when that checkout is
-    # root-managed (the shipped /opt/achord-review is). If a non-root host user owns
-    # it, map the container to that user's UID:GID so host-side git stays writable:
+    # The panel runs `git fetch`/`worktree add` as the container user. As root (the
+    # default) fetched objects become root-owned in the mounted checkout — fine when
+    # that checkout is root-managed (the shipped /opt/achord-review is). If a non-root
+    # host user owns it, map the container to that user's UID:GID so host-side git
+    # stays writable:
     #user: "1000:1000"
     ports:
       - "127.0.0.1:33001:3000"
@@ -42,6 +45,7 @@ services:
       #- ../..:/app/source
       #- ./releases:/app/releases
       # Releases use this stable config path instead of a checkout-relative mount.
+      # Required for staged updates: without it the panel refuses to stage.
       #- ./config:/app/config
     environment:
       # Keep at least two workers (the gunicorn default) so a slow provider call
