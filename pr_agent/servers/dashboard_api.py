@@ -527,15 +527,6 @@ _UPSTREAM_PER_REQUEST_TIMEOUT_SECONDS = 6.0
 _UPSTREAM_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
 
-class UpstreamModelsRequest(BaseModel):
-    # Optional overrides so the panel can query the relay currently being edited
-    # (first-time setup / relay switch) before the config is saved; empty means
-    # fall back to the persisted config. `key` is only the newly-typed secret —
-    # the panel never sends back the masked stored value.
-    api_base: str = ""
-    key: str = ""
-
-
 def _ip_is_disallowed(ip: str) -> bool:
     """Reject anything not a globally-routable unicast address: loopback,
     private, link-local (incl. 169.254.169.254 metadata), reserved, multicast."""
@@ -558,7 +549,11 @@ async def _egress_error(url: str) -> Optional[str]:
     host = parts.hostname
     if not host:
         return "无效的中继地址"
-    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        # A malformed or out-of-range port makes .port raise, before any handler.
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return "无效的中继地址（端口非法）"
     try:
         infos = await asyncio.get_event_loop().getaddrinfo(
             host, port, proto=socket.IPPROTO_TCP)
@@ -610,29 +605,22 @@ def _parse_model_ids(payload: Any) -> list:
 
 
 @router.post("/config/upstream-models")
-async def get_upstream_models(body: UpstreamModelsRequest, request: Request,
-                             dashboard_session: Optional[str] = Cookie(None)):
-    """List models the configured relay advertises, so the operator can pick one
-    instead of typing it. Prefers the api_base/key being edited in the form (so
-    first-time setup and relay switches work before saving), falling back to the
-    persisted config; never uses the masked GET key. Admin-only and same-origin,
-    so hitting the operator-supplied base is no more privileged than the api_base
-    they already set for reviews."""
+async def get_upstream_models(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+    """List models the SAVED relay advertises, so the operator can pick one instead
+    of typing it. Discovery targets only the persisted api_base/key — the panel
+    saves the relay first, then fetches — so a per-request body can never point the
+    server at an arbitrary host or leak the stored key to a different one. The base
+    here is the same operator-configured relay the review engine already connects
+    to; egress is still validated (public unicast only) and redirects are refused
+    as defense-in-depth. Per-connection IP pinning against DNS rebinding of the
+    operator's own configured relay is out of scope: an admin who can persist a
+    base can already point reviews there."""
     await require_auth(request, dashboard_session)
     require_same_origin(request)
-    persisted_base = str(get_settings().get("openai.api_base", "") or "").strip()
-    persisted_key = str(get_settings().get("openai.key", "") or "").strip()
-    req_base = (body.api_base or "").strip()
-    req_key = (body.key or "").strip()
-    # The persisted key is only ever sent to the persisted base. If the form points
-    # at a different base, authenticate solely with a freshly-supplied key (or none)
-    # so switching to a keyless/untrusted relay cannot leak the stored credential.
-    if req_base and req_base != persisted_base:
-        api_base, api_key = req_base, req_key
-    else:
-        api_base, api_key = (req_base or persisted_base), (req_key or persisted_key)
+    api_base = str(get_settings().get("openai.api_base", "") or "").strip()
+    api_key = str(get_settings().get("openai.key", "") or "").strip()
     if not api_base:
-        raise HTTPException(status_code=400, detail="未配置中继 API Base，无法获取上游模型")
+        raise HTTPException(status_code=400, detail="请先保存中继 API Base，再获取上游模型")
     egress_error = await _egress_error(api_base)
     if egress_error:
         raise HTTPException(status_code=400, detail=egress_error)

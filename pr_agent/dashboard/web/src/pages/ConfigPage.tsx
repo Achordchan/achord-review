@@ -50,18 +50,13 @@ export default function ConfigPage() {
     if (fetchingModels) return
     setFetchingModels(true)
     try {
-      // Send the api_base being edited (and a newly-typed key, if any) so the
-      // lookup targets the relay in the form — not stale saved settings — during
-      // first-time setup or a relay switch. keySecret is empty ⇒ backend uses the
-      // stored key; the masked display value is never sent back.
-      const body = await api.post<{ models: string[] }>(
-        '/api/v1/dashboard/config/upstream-models',
-        { api_base: values.api_base ?? '', key: keySecret },
-      )
+      // Discovery targets the SAVED relay (never a per-request base), so save the
+      // relay first; the backend returns a clear 400 if none is configured yet.
+      const body = await api.post<{ models: string[] }>('/api/v1/dashboard/config/upstream-models')
       setUpstreamModels(body.models ?? [])
       toast.success('已获取上游模型', `共 ${body.models?.length ?? 0} 个，可在模型输入框下拉选择`)
     } catch (err) {
-      toast.error('获取上游模型失败', err instanceof ApiError ? err.message : '请检查中继 API Base 与密钥')
+      toast.error('获取上游模型失败', err instanceof ApiError ? err.message : '请先保存中继配置再获取')
     } finally {
       setFetchingModels(false)
     }
