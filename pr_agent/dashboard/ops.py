@@ -627,19 +627,41 @@ def reconcile_boot_release() -> str:
         if rc != 0 or not _is_revision(source_head):
             raise OSError("无法解析源码检出的 HEAD，发布启动器无法确定要运行的版本")
         release = _ensure_release_worktree(source_head)
-        _switch_active_release(release)
-        pending = _pending_release()
-        if pending is not None and os.path.realpath(pending) != os.path.realpath(release):
+        # A fresh build stamp is not on its own proof the image was built from this
+        # HEAD: the checkout may have advanced to a dependency-changing commit after
+        # the build. Verify the release's dependency fingerprint against the image's
+        # baked copy before booting it, or Gunicorn would run new code against the
+        # image's old packages and loop under `restart: unless-stopped`.
+        baked_fp = _compute_deps_fingerprint(DEPS_BAKED_DIR)
+        release_fp = _compute_deps_fingerprint(release)
+        if baked_fp is not None and release_fp is not None and baked_fp == release_fp:
+            _switch_active_release(release)
+            pending = _pending_release()
+            if pending is not None and os.path.realpath(pending) != os.path.realpath(release):
+                get_logger().warning(
+                    f"Discarding pending release {os.path.basename(pending)[:12]}: the image was "
+                    f"rebuilt from {source_head[:12]}")
+            with suppress(FileNotFoundError):
+                os.unlink(_pending_marker_path())
+            if build_id is not None:
+                marker = os.path.join(RELEASES_DIR, IMAGE_BUILD_MARKER)
+                with open(f"{marker}.tmp", "w", encoding="utf-8") as handle:
+                    handle.write(build_id + "\n")
+                os.replace(f"{marker}.tmp", marker)
+        elif not os.path.islink(active_link):
+            # First boot with nothing already serving: fail closed rather than run a
+            # checkout whose dependencies the image lacks.
+            raise OSError(
+                f"源码 HEAD {source_head[:12]} 的依赖与镜像烘焙的不一致，"
+                "请从当前检出重建镜像（docker compose up -d --build）后再启动")
+        else:
+            # A rebuilt image whose baked dependencies do not match the mounted HEAD:
+            # keep the running release, leave the build stamp unconsumed so a corrected
+            # rebuild is still detected, and stage HEAD for that rebuild.
             get_logger().warning(
-                f"Discarding pending release {os.path.basename(pending)[:12]}: the image was "
-                f"rebuilt from {source_head[:12]}")
-        with suppress(FileNotFoundError):
-            os.unlink(_pending_marker_path())
-        if build_id is not None:
-            marker = os.path.join(RELEASES_DIR, IMAGE_BUILD_MARKER)
-            with open(f"{marker}.tmp", "w", encoding="utf-8") as handle:
-                handle.write(build_id + "\n")
-            os.replace(f"{marker}.tmp", marker)
+                f"Rebuilt image dependencies do not match source HEAD {source_head[:12]}; "
+                "keeping the current release and staging HEAD as pending until a matching rebuild")
+            _write_pending_release(release)
     elif _pending_release() is not None and not rebuild_required():
         _activate_pending_release()
     active = os.path.realpath(active_link)

@@ -993,16 +993,26 @@ def _commit(source, text):
 
 
 def _boot_env(monkeypatch, tmp_path, source, releases, build_id):
+    # The image bakes no dependency files here, and neither do the committed
+    # releases, so every fingerprint is the shared "all missing" digest — a release
+    # is provenance-compatible with the image unless a test commits a dependency
+    # file that diverges from the baked copy.
     baked = tmp_path / "baked"
     baked.mkdir(exist_ok=True)
     (baked / "build-id").write_text(build_id + "\n")
-    for name in ("requirements.txt", "pyproject.toml"):
-        (baked / name).write_text("")
-        (source / name).write_text("")
     monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
     monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
     monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
     monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+
+
+def _commit_dep(source, filename, text):
+    (source / filename).write_text(text)
+    subprocess.run(["git", "-C", str(source), "add", filename], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", f"dep {filename}"],
+                   check=True, capture_output=True)
+    return subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
 
 
 def test_git_pull_unregisters_a_failed_worktree_so_the_revision_can_be_retried(monkeypatch, tmp_path):
@@ -1246,3 +1256,54 @@ def test_activation_rolls_the_link_back_when_the_marker_cannot_be_removed(monkey
     # `current` never outruns the process serving it; the marker is still there.
     assert active.resolve() == old_release.resolve()
     assert (releases / ".pending-release").read_text().strip() == str(new_release)
+
+
+def test_reconcile_boot_fails_closed_when_first_boot_head_deps_differ(monkeypatch, tmp_path):
+    # Image built from deps "a==1", but the mounted checkout's HEAD needs "b==2":
+    # booting it would run new code against the image's old packages, so on a first
+    # boot (nothing already serving) the launcher must refuse rather than loop.
+    _, source, releases = _staged_repo(tmp_path)
+    _commit_dep(source, "requirements.txt", "b==2\n")
+    baked = tmp_path / "baked"
+    baked.mkdir()
+    (baked / "build-id").write_text("build-1\n")
+    (baked / "requirements.txt").write_text("a==1\n")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+
+    with pytest.raises(OSError):
+        ops.reconcile_boot_release()
+
+    # The build stamp is not consumed, so a corrected rebuild is still detected.
+    assert not (releases / ".image-build-id").exists()
+    assert not (releases / "current").exists()
+
+
+def test_reconcile_boot_keeps_current_when_a_rebuilt_head_is_dep_incompatible(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    a = _commit_dep(source, "requirements.txt", "a==1\n")
+    baked = tmp_path / "baked"
+    baked.mkdir()
+    (baked / "build-id").write_text("build-1\n")
+    (baked / "requirements.txt").write_text("a==1\n")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+    assert os.path.basename(ops.reconcile_boot_release()) == a
+
+    # The checkout advances to a dependency-changing commit and the stamp changes,
+    # but the image's baked deps still match A, not B.
+    b = _commit_dep(source, "requirements.txt", "b==2\n")
+    (baked / "build-id").write_text("build-2\n")
+
+    active = ops.reconcile_boot_release()
+
+    # B is refused; the compatible release A keeps serving; B waits as pending; and
+    # the build-2 stamp is left unconsumed so the corrected rebuild still activates.
+    assert os.path.basename(active) == a
+    assert (releases / "current").resolve() == (releases / a).resolve()
+    assert (releases / ".image-build-id").read_text().strip() == "build-1"
+    assert ops._pending_release() == str((releases / b).resolve())
