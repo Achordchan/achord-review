@@ -139,6 +139,10 @@ CREATE INDEX IF NOT EXISTS idx_dashboard_login_attempts_time ON dashboard_login_
 _MAX_RETRY = 3
 _DEFAULT_DB_TIMEOUT_SECONDS = 10
 _AUDIT_DB_TIMEOUT_SECONDS = 0.5
+# Leaving WAL needs a brief exclusive lock; during a rolling deploy an old worker
+# can still hold it, so bound how long a fresh connection retries the migration.
+_JOURNAL_MIGRATION_ATTEMPTS = 5
+_JOURNAL_MIGRATION_BACKOFF_SECONDS = 0.1
 
 
 class DashboardStorageReadError(RuntimeError):
@@ -238,7 +242,7 @@ class DashboardStorage:
             # can be corrupted by mmap page reclaim under memory pressure, making a
             # worker read "database disk image is malformed" on a healthy file. A
             # rollback journal has no shared memory, so it avoids that failure mode.
-            conn.execute("PRAGMA journal_mode=TRUNCATE")
+            self._apply_rollback_journal(conn)
             # FULL, not NORMAL: with a rollback journal only FULL guarantees the file
             # cannot be corrupted by a power loss mid-write (WAL made NORMAL safe).
             # The dashboard's write volume is tiny, so the extra fsync is negligible.
@@ -249,6 +253,41 @@ class DashboardStorage:
         except Exception:
             conn.close()
             raise
+
+    @staticmethod
+    def _apply_rollback_journal(conn: sqlite3.Connection) -> None:
+        """Switch the connection off WAL, verifying the transition actually took.
+
+        A database created in WAL mode records that in its header, so a fresh
+        connection opens in WAL and keeps using the process-shared ``-shm`` index
+        this fix exists to abandon. Leaving WAL needs a brief exclusive lock, so
+        while a rolling deploy still has another worker holding the file the
+        pragma can raise ``SQLITE_BUSY`` or silently return ``wal`` unchanged.
+        SQLite reports the resulting mode as the pragma's result row, so check it
+        and retry a bounded number of times rather than trusting a connection
+        that is still on WAL — otherwise the corruption fix is silently skipped.
+        """
+        last_mode: Optional[str] = None
+        for attempt in range(_JOURNAL_MIGRATION_ATTEMPTS):
+            try:
+                row = conn.execute("PRAGMA journal_mode=TRUNCATE").fetchone()
+                last_mode = (row[0] if row else "").lower()
+                if last_mode != "wal":
+                    return
+            except sqlite3.OperationalError as e:
+                # Only a lock/busy error is worth retrying; anything else is fatal.
+                message = str(e).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                last_mode = "wal"
+            if attempt < _JOURNAL_MIGRATION_ATTEMPTS - 1:
+                time.sleep(_JOURNAL_MIGRATION_BACKOFF_SECONDS * (attempt + 1))
+        # Fail loud instead of returning a connection that is silently still on
+        # WAL. The "locked" token lets _write's bounded retry back off and try
+        # again once the worker holding the WAL lock exits.
+        raise sqlite3.OperationalError(
+            f"database is locked: could not migrate off WAL journaling (still {last_mode!r}); "
+            "another connection holds the WAL lock")
 
     def initialize(self) -> None:
         directory = os.path.dirname(self.db_path)
