@@ -188,26 +188,67 @@ def _self_restart_capability() -> Optional[Dict[str, Any]]:
             "reason": "将通过退出进程、由容器重启策略自动拉起（无需 Docker 端点）。"}
 
 
-def restart_capability() -> Dict[str, Any]:
-    """Report how a restart can happen: a Docker endpoint, or a socket-free self-exit."""
+def _own_container_id() -> str:
+    """Best-effort id of the container this process runs in, for self-verification.
+
+    Docker records the full 64-hex container id in the cgroup and mount paths, and
+    (unless overridden) uses its first 12 chars as the hostname. Any of these lets
+    a `docker inspect` result be matched against the running container.
+    """
+    for source in ("/proc/self/mountinfo", "/proc/self/cgroup"):
+        try:
+            with open(source, encoding="utf-8") as handle:
+                blob = handle.read()
+        except OSError:
+            continue
+        for token in blob.replace("/", " ").replace("-", " ").split():
+            candidate = token.strip()
+            if len(candidate) == 64 and all(c in "0123456789abcdef" for c in candidate.lower()):
+                return candidate.lower()
+    return (os.environ.get("HOSTNAME", "") or "").strip().lower()
+
+
+def _docker_target_is_self() -> Optional[bool]:
+    """Whether `docker inspect CONTAINER_NAME` names this very container.
+
+    Returns True/False when it can be decided, or None when the Docker endpoint is
+    unusable (so the caller falls back rather than treating it as a mismatch).
+    """
     try:
-        preflight = subprocess.run(
-            ["docker", "inspect", CONTAINER_NAME], stdout=subprocess.PIPE,
+        inspection = subprocess.run(
+            ["docker", "inspect", "-f", "{{.Id}}", CONTAINER_NAME], stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, timeout=DOCKER_PREFLIGHT_TIMEOUT_SECONDS,
             check=False)
-    except subprocess.TimeoutExpired:
-        preflight = None
-    except OSError:
-        preflight = None
-    if preflight is not None and preflight.returncode == 0:
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if inspection.returncode != 0:
+        return None
+    target = (inspection.stdout or "").strip().lower()
+    own = _own_container_id()
+    if not target or not own:
+        return False
+    return target.startswith(own) or own.startswith(target)
+
+
+def restart_capability() -> Dict[str, Any]:
+    """Report how a restart can happen: a Docker endpoint, or a socket-free self-exit.
+
+    Docker mode is offered only when the inspected `CONTAINER_NAME` is verified to be
+    this running container — a stale or mistargeted name must never let a restart hit
+    an unrelated container after `current` has already been switched.
+    """
+    target_is_self = _docker_target_is_self()
+    if target_is_self is True:
         return {"available": True, "mode": "docker",
                 "reason": "已连接受控 Docker 端点，重启将在响应后执行。"}
-    # Docker endpoint absent or unusable — fall back to a self-exit if enabled.
+    # Docker endpoint absent, unusable, or naming another container — fall back.
     self_restart = _self_restart_capability()
     if self_restart is not None:
         return self_restart
-    if preflight is not None and preflight.returncode != 0:
-        return {"available": False, "reason": (preflight.stdout or "Docker 端点不可用").strip()[:300]}
+    if target_is_self is False:
+        return {"available": False,
+                "reason": (f"受控容器名 {CONTAINER_NAME} 指向的不是当前服务容器，"
+                           "重启已禁用；请核对 ACHORD_REVIEW_CONTAINER 或启用自重启。")}
     return {"available": False, "reason": "未配置受控 Docker 端点，重启由宿主机管理。"}
 
 

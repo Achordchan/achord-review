@@ -124,7 +124,8 @@ def test_restart_prepares_ticket_without_running_command(monkeypatch):
     monkeypatch.setattr(
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
-            args=args[0], returncode=0, stdout="container found"))
+            args=args[0], returncode=0, stdout="c" * 64 + "\n"))
+    monkeypatch.setattr(ops, "_own_container_id", lambda: "c" * 12)
     commands = []
     monkeypatch.setattr(
         ops, "_run_bounded_command", lambda *args, **kwargs: commands.append(args))
@@ -675,15 +676,45 @@ def test_check_update_surfaces_fetch_failure(monkeypatch, tmp_path):
 
 
 def test_restart_capability_prefers_docker_when_endpoint_is_live(monkeypatch):
+    container_id = "f" * 64
     monkeypatch.setattr(
         ops.subprocess, "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="[]"))
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=container_id + "\n"))
+    monkeypatch.setattr(ops, "_own_container_id", lambda: container_id[:12])
     monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
 
     capability = ops.restart_capability()
 
     assert capability["available"] is True
     assert capability["mode"] == "docker"
+
+
+def test_restart_capability_refuses_docker_for_a_mistargeted_container(monkeypatch):
+    # The name resolves, but to a different container than the one we run in.
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="a" * 64 + "\n"))
+    monkeypatch.setattr(ops, "_own_container_id", lambda: "b" * 12)
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", False)
+
+    capability = ops.restart_capability()
+
+    assert capability["available"] is False
+    assert ops.CONTAINER_NAME in capability["reason"]
+
+
+def test_restart_capability_falls_back_to_self_when_the_target_is_not_self(monkeypatch):
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="a" * 64 + "\n"))
+    monkeypatch.setattr(ops, "_own_container_id", lambda: "b" * 12)
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
+
+    capability = ops.restart_capability()
+
+    # A mistargeted Docker name must not shadow the safe self-exit path.
+    assert capability["available"] is True
+    assert capability["mode"] == "self"
 
 
 def test_restart_capability_falls_back_to_self_exit_without_docker(monkeypatch):
