@@ -137,6 +137,15 @@ export default function ReviewDetailPage() {
         )}
       </Card>
 
+      {data.markdown_output && (
+        <Card>
+          <CardHeader title="审查报告" description="发布到 GitHub 的同款 Markdown 内容" />
+          <div className="px-5 py-4">
+            <MarkdownView content={data.markdown_output} />
+          </div>
+        </Card>
+      )}
+
       <Card>
         <CardHeader
           title={`Findings（${issues.length}）`}
@@ -175,15 +184,6 @@ export default function ReviewDetailPage() {
           </ul>
         )}
       </Card>
-
-      {data.markdown_output && (
-        <Card>
-          <CardHeader title="审查报告" description="发布到 GitHub 的同款 Markdown 内容" />
-          <div className="px-5 py-4">
-            <MarkdownView content={data.markdown_output} />
-          </div>
-        </Card>
-      )}
 
       {data.raw_prediction && (
         <Collapsible title="原始 AI 输出（Raw Prediction）">

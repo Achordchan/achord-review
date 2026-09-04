@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { ExternalLink, RotateCcw, Search } from 'lucide-react'
+import { ExternalLink, RefreshCw, RotateCcw, Search } from 'lucide-react'
 import { api } from '../lib/api'
 import type { ReviewListData, ReviewRow } from '../lib/types'
 import { Card, Skeleton } from '../components/ui'
@@ -84,6 +84,15 @@ export default function ReviewsPage() {
           >
             {VERDICT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
+          <button
+            onClick={() => void refetch()}
+            disabled={isFetching}
+            title="刷新"
+            aria-label="刷新"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-line text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={isFetching ? 'animate-spin' : ''} />
+          </button>
         </div>
       </div>
 
