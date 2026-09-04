@@ -37,6 +37,26 @@ class TestIgnoreFilter:
         filtered_files = filter_ignored(files)
         assert filtered_files == expected, f"Expected {[file.filename for file in expected]}, but got {[file.filename for file in filtered_files]}."
 
+    def test_double_star_glob_matches_root_and_nested(self, monkeypatch):
+        """A `**/`-prefixed glob must ignore its target at the repository root as
+        well as nested: translate_globs_to_regexes adds a stripped root variant,
+        so `**/package-lock.json` also excludes a root-level `package-lock.json`.
+        """
+        monkeypatch.setattr(global_settings.ignore, 'glob',
+                            ['**/node_modules/**', '**/package-lock.json', '**/*.png'])
+        names = [
+            'package-lock.json',            # root lockfile
+            'sub/package-lock.json',        # nested lockfile
+            'node_modules/react/index.js',  # root node_modules
+            'a/node_modules/x.js',          # nested node_modules
+            'logo.png',                     # root asset
+            'assets/logo.png',              # nested asset
+            'src/main.ts',                  # kept
+        ]
+        files = [type('', (object,), {'filename': n})() for n in names]
+        kept = [f.filename for f in filter_ignored(files)]
+        assert kept == ['src/main.ts'], f"Expected only src/main.ts kept, got {kept}."
+
     def test_regex_ignores(self, monkeypatch):
         """
         Test files are ignored when regex patterns are specified.

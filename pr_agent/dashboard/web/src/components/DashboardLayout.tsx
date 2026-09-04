@@ -89,7 +89,7 @@ function ComingSoonCard({ item, onClose }: { item: NavItem; onClose: () => void 
 }
 
 export default function DashboardLayout() {
-  const { model, version, logout } = useAuth()
+  const { version, logout } = useAuth()
   const navigate = useNavigate()
   const toast = useToast()
   const [pendingItem, setPendingItem] = useState<NavItem | null>(null)
@@ -120,12 +120,14 @@ export default function DashboardLayout() {
       return next
     })
   }
-  // Read-only view of the update-check cache: lights up the "有更新" dot once
-  // the user has opened the panel; never triggers a git fetch on its own.
+  // Check once per load so a page refresh surfaces a new version; the signal dot
+  // then invites the user to open the panel. Shared cache with VersionCenter, so
+  // opening the panel reuses this result instead of a second git fetch.
   const cachedUpdate = useQuery({
     queryKey: ['ops-check-update'],
     queryFn: () => api.get<VersionInfo>('/api/v1/dashboard/ops/check-update'),
-    enabled: false,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
   })
   const updateAvailable = cachedUpdate.data?.update_available === true
 
@@ -172,7 +174,7 @@ export default function DashboardLayout() {
                 onClick={() => setVersionOpen((open) => !open)}
                 className="flex items-center gap-1 text-left text-[11px] leading-tight text-muted transition-colors hover:text-accent"
               >
-                控制面板 v{version} · {updateAvailable ? '有新版本' : '检查更新'}
+                控制面板 v{version}
                 {updateAvailable && (
                   <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-label="有新版本" />
                 )}
@@ -248,12 +250,6 @@ export default function DashboardLayout() {
             服务运行中
           </div>
           <div className="flex items-center gap-2">
-            {model && (
-              <span className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-xs text-muted">
-                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-                {model.replace(/^openai\//, '')}
-              </span>
-            )}
             <button
               onClick={toggleTheme}
               title={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}

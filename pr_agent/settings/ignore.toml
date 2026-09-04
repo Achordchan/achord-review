@@ -3,7 +3,23 @@
 glob = [
     # Ignore files and directories matching these glob patterns.
     # See https://docs.python.org/3/library/glob.html
+    # Deliberately conservative: deployed/executed build output (compiled bundles,
+    # dist/, *.min.js) and dependency lockfiles are NOT ignored here — code or a
+    # supply-chain change hidden only in a committed artifact must still reach
+    # review. Only vendored dependencies and non-executable binary assets, which
+    # the model cannot meaningfully read anyway, are excluded.
     'vendor/**',
+    '**/node_modules/**',
+    # Binary assets the model cannot review (raster images, fonts, PDFs) — not
+    # executable source, so ignoring them hides no reviewable behavior.
+    '**/*.png',
+    '**/*.jpg',
+    '**/*.jpeg',
+    '**/*.gif',
+    '**/*.ico',
+    '**/*.pdf',
+    '**/*.woff',
+    '**/*.woff2',
 ]
 regex = [
     # Ignore files and directories matching these regex patterns.

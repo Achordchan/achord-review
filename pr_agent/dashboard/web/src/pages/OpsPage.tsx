@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, GitPullRequestArrow, HeartPulse, RefreshCcw, Terminal } from 'lucide-react'
+import { Activity, HeartPulse, RefreshCcw, Terminal } from 'lucide-react'
 import { api, ApiError } from '../lib/api'
 import type { AuditLogListData, DiagnoseResult, OpsCapabilities, OpsResult } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
@@ -42,9 +42,9 @@ function InlineProbe({ name, result }: { name: string; result?: Record<string, u
 export default function OpsPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
-  const [confirmAction, setConfirmAction] = useState<'restart' | 'pull' | null>(null)
-  const [result, setResult] = useState<{ action: 'restart' | 'pull'; task: OpsResult } | null>(null)
-  const [running, setRunning] = useState<'restart' | 'pull' | null>(null)
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [result, setResult] = useState<OpsResult | null>(null)
+  const [running, setRunning] = useState(false)
   const [diagnose, setDiagnose] = useState<DiagnoseResult | null>(null)
   const [diagnosing, setDiagnosing] = useState(false)
 
@@ -64,50 +64,33 @@ export default function OpsPage() {
     queryKey: ['ops-capabilities'],
     queryFn: () => api.get<OpsCapabilities>('/api/v1/dashboard/ops/capabilities'),
   })
-  const gitPullCapability = capabilitiesQuery.data?.git_pull
-  const gitPullAvailable = gitPullCapability?.available === true
   const restartCapability = capabilitiesQuery.data?.restart
   const restartAvailable = restartCapability?.available === true
 
-  const runAction = async (action: 'restart' | 'pull') => {
+  // Updates are prepared and applied from the version panel; this page only
+  // restarts and self-checks, so the two never overlap on the same result card.
+  const runRestart = async () => {
     if (running) return
-    setConfirmAction(null)
+    setConfirmRestart(false)
     setResult(null)
-    setRunning(action)
+    setRunning(true)
     try {
-      const body = action === 'restart'
-        ? await api.post<OpsResult>('/api/v1/dashboard/ops/restart')
-        : await api.post<OpsResult>('/api/v1/dashboard/ops/git-pull')
-      // Store the action and its result together so a result can never be shown
-      // under the wrong card.
-      setResult({ action, task: body })
-      if (action === 'restart') {
-        toast.info('重启已排队', '当前响应结束后执行，连接会短暂中断')
-        queryClient.cancelQueries()
-        void waitForServiceThenReload()
-      } else {
-        await queryClient.invalidateQueries({ queryKey: ['ops-logs'] })
-        // A staged update that changed a dependency-defining file cannot be applied
-        // by an in-place restart (that button is hidden); direct the operator to a
-        // host-side rebuild instead of an impossible restart.
-        const caps = await capabilitiesQuery.refetch()
-        if (caps.data?.rebuild_required === true) {
-          toast.info('新版本已准备，需在服务器重建', '本次更新改动了依赖，请由维护者在宿主机重建后生效')
-        } else {
-          toast.success('新版本已准备', '在版本面板点“重启以生效”即可切换')
-        }
-      }
+      const body = await api.post<OpsResult>('/api/v1/dashboard/ops/restart')
+      setResult(body)
+      toast.info('重启已排队', '当前响应结束后执行，连接会短暂中断')
+      queryClient.cancelQueries()
+      void waitForServiceThenReload()
     } catch (error) {
       const failedTask = error instanceof ApiError && isOpsResult(error.data) && error.data.started
         ? error.data
         : null
-      setResult(failedTask ? { action, task: failedTask } : null)
+      setResult(failedTask)
       toast.error(
         failedTask ? '操作执行失败' : '指令未下发',
         error instanceof ApiError ? error.message : '请检查运行环境与服务状态',
       )
     } finally {
-      setRunning(null)
+      setRunning(false)
     }
   }
 
@@ -122,16 +105,14 @@ export default function OpsPage() {
     }
   }
 
-  const pullTask = result?.action === 'pull' ? result.task : null
-  const restartTask = result?.action === 'restart' ? result.task : null
-  const opStarted = (task: OpsResult) => task.started && task.completed && task.exit_code === 0
+  const restartTask = result
 
   return (
     <div className="space-y-4">
       <h1 className="text-xl font-semibold text-text">一键运维</h1>
 
       {/* Each action shows its own result inline, so nothing pops in as a separate card. */}
-      <div className="grid items-start gap-4 md:grid-cols-3">
+      <div className="grid items-start gap-4 md:grid-cols-2">
         <Card hover className="p-5">
           <div className="flex items-center gap-2.5">
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent/15 text-accent"><RefreshCcw size={16} /></span>
@@ -141,8 +122,8 @@ export default function OpsPage() {
             {restartCapability?.reason ?? '正在检测受控 Docker 端点…'}
           </p>
           <button
-            onClick={() => setConfirmAction('restart')}
-            disabled={!restartAvailable || running !== null}
+            onClick={() => setConfirmRestart(true)}
+            disabled={!restartAvailable || running}
             className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {capabilitiesQuery.isLoading ? '检测中…' : restartAvailable ? '重启容器' : '由宿主机重启'}
@@ -161,46 +142,6 @@ export default function OpsPage() {
                   <summary className="cursor-pointer text-muted hover:text-text">查看输出</summary>
                   <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-muted">
                     {restartTask.output.join('\n')}
-                  </pre>
-                </details>
-              )}
-            </div>
-          )}
-        </Card>
-
-        <Card hover className="p-5">
-          <div className="flex items-center gap-2.5">
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-good/15 text-good"><GitPullRequestArrow size={16} /></span>
-            <h3 className="text-sm font-semibold text-text">准备更新</h3>
-          </div>
-          <p className="mt-2 text-xs leading-relaxed text-muted">
-            {gitPullAvailable
-              ? '拉取远端最新代码到独立发布目录，不影响正在运行的服务；准备完成后，在版本面板点“重启以生效”即可切换。'
-              : (gitPullCapability?.reason ?? '正在检测受控 Git 工作区…')}
-          </p>
-          <button
-            onClick={() => setConfirmAction('pull')}
-            disabled={!gitPullAvailable || running !== null}
-            className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {capabilitiesQuery.isLoading ? '检测中…' : gitPullAvailable ? '分阶段准备更新' : '由宿主机更新'}
-          </button>
-          {pullTask && (
-            <div className="mt-3 rounded-lg border border-line bg-surface-2/50 p-3 text-xs">
-              <p className={opStarted(pullTask) ? 'font-medium text-good' : 'font-medium text-bad'}>
-                {!pullTask.started
-                  ? '更新未发起'
-                  : !pullTask.completed
-                    ? '指令已下发'
-                    : opStarted(pullTask)
-                      ? '新版本已准备完成'
-                      : `执行失败（exit ${pullTask.exit_code ?? '?'}）`}
-              </p>
-              {pullTask.output.length > 0 && (
-                <details className="mt-1.5">
-                  <summary className="cursor-pointer text-muted hover:text-text">查看输出</summary>
-                  <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-muted">
-                    {pullTask.output.join('\n')}
                   </pre>
                 </details>
               )}
@@ -280,21 +221,13 @@ export default function OpsPage() {
       </Card>
 
       <ConfirmDialog
-        open={confirmAction === 'restart'}
+        open={confirmRestart}
         title="重启 achord-review 容器？"
         body="操作会先返回并写入审计，再重启服务。当前审查可能被终止，确认继续吗？"
         danger
         confirmLabel="确认重启"
-        onConfirm={() => void runAction('restart')}
-        onCancel={() => setConfirmAction(null)}
-      />
-      <ConfirmDialog
-        open={confirmAction === 'pull'}
-        title="准备最新版本？"
-        body="将获取远端版本并写入独立发布目录；运行中的代码不会改变，重启时才原子切换。仅接受 fast-forward 更新。"
-        confirmLabel="确认准备"
-        onConfirm={() => void runAction('pull')}
-        onCancel={() => setConfirmAction(null)}
+        onConfirm={() => void runRestart()}
+        onCancel={() => setConfirmRestart(false)}
       />
     </div>
   )

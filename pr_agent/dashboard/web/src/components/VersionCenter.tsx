@@ -132,9 +132,20 @@ export function VersionCenter({ onClose, version }: {
                   <p className="text-xs text-muted">控制面板 v{version}</p>
                 </div>
               </div>
-              <button onClick={onClose} className="rounded-md p-1 text-muted hover:text-text" aria-label="关闭">
-                <X size={16} />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => void updateQuery.refetch()}
+                  disabled={updateQuery.isFetching || phase === 'updating'}
+                  className="rounded-md p-1 text-muted transition-colors hover:text-text disabled:opacity-50"
+                  aria-label="重新检查更新"
+                  title="重新检查"
+                >
+                  <RefreshCw size={15} className={updateQuery.isFetching ? 'animate-spin' : ''} />
+                </button>
+                <button onClick={onClose} className="rounded-md p-1 text-muted hover:text-text" aria-label="关闭">
+                  <X size={16} />
+                </button>
+              </div>
             </div>
 
             {updateQuery.isLoading ? (
@@ -183,16 +194,10 @@ export function VersionCenter({ onClose, version }: {
                   )}
                 </div>
 
-                <div className="mt-5 flex items-center justify-between gap-2.5">
-                  <button
-                    onClick={() => void updateQuery.refetch()}
-                    disabled={updateQuery.isFetching || phase === 'updating'}
-                    className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-xs font-medium text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50"
-                  >
-                    <RefreshCw size={13} className={updateQuery.isFetching ? 'animate-spin' : ''} />
-                    重新检查
-                  </button>
-                  <div className="flex items-center gap-2.5">
+                {/* Actions only when there is one to take; re-checking now lives as
+                    the header icon, so the row is absent when the panel is idle. */}
+                {(updateAvailable || (staged && !rebuildRequired)) && (
+                  <div className="mt-5 flex items-center justify-end gap-2.5">
                     {updateAvailable && (
                       <button
                         onClick={() => void runUpdate()}
@@ -218,7 +223,7 @@ export function VersionCenter({ onClose, version }: {
                       </button>
                     )}
                   </div>
-                </div>
+                )}
               </>
             )}
           </>
