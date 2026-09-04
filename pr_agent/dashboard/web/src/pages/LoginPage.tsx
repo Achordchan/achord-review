@@ -76,9 +76,6 @@ export default function LoginPage() {
             {submitting ? '验证中…' : '登 录'}
           </button>
         </form>
-        <p className="mt-4 text-center text-xs text-muted">
-          口令在 config.toml 的 [dashboard] admin_password 中设置
-        </p>
       </div>
     </div>
   )

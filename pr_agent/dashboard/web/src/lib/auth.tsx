@@ -60,11 +60,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (password: string) => {
     const body = await api.post<{ authenticated: boolean }>('/api/v1/dashboard/auth/login', { password })
-    if (body.authenticated) {
-      setState((prev) => ({ ...prev, authenticated: true, loading: false }))
-      await refresh()
+    if (!body.authenticated) return
+    // The login is confirmed, so mark the session authenticated now. Fetching
+    // model/version is best-effort: the freshly-set session cookie is not always
+    // readable on the very next request, and a transient 401 there must not bounce
+    // a real login back to the form. Use a direct fetch (with a short retry) so it
+    // does not trip the global 401-invalidation in the api layer.
+    let session: SessionInfo | null = null
+    for (let attempt = 0; attempt < 3 && session === null; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 200))
+      try {
+        const res = await fetch('/api/v1/dashboard/auth/me', {
+          credentials: 'same-origin',
+          headers: { Accept: 'application/json' },
+        })
+        if (res.ok) session = ((await res.json()) as { data?: SessionInfo }).data ?? null
+      } catch {
+        // keep retrying
+      }
     }
-  }, [refresh])
+    setState({
+      authenticated: true,
+      loading: false,
+      model: session?.model ?? '',
+      version: session?.version ?? '',
+    })
+  }, [])
 
   const logout = useCallback(async () => {
     await api.post('/api/v1/dashboard/auth/logout')

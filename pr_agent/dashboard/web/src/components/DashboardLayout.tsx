@@ -3,8 +3,8 @@ import type { ReactNode } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Activity, Beaker, FlaskConical, GitPullRequestArrow, LayoutDashboard,
-  LogOut, Moon, Settings, ShieldCheck, Sun, TerminalSquare, X,
+  Activity, Beaker, ChevronsLeft, ChevronsRight, FlaskConical, GitPullRequestArrow,
+  LayoutDashboard, LogOut, Moon, Settings, ShieldCheck, Sun, TerminalSquare, X,
 } from 'lucide-react'
 import { useAuth } from '../lib/auth'
 import { api } from '../lib/api'
@@ -96,11 +96,29 @@ export default function DashboardLayout() {
   const [logoutPending, setLogoutPending] = useState(false)
   const [versionOpen, setVersionOpen] = useState(false)
   const [theme, setThemeState] = useState<Theme>(() => getStoredTheme())
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('dashboard-sidebar') === 'collapsed'
+    } catch {
+      return false
+    }
+  })
 
   const toggleTheme = () => {
     const next: Theme = theme === 'dark' ? 'light' : 'dark'
     setTheme(next)
     setThemeState(next)
+  }
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem('dashboard-sidebar', next ? 'collapsed' : 'expanded')
+      } catch {
+        // preference simply won't persist
+      }
+      return next
+    })
   }
   // Read-only view of the update-check cache: lights up the "有更新" dot once
   // the user has opened the panel; never triggers a git fetch on its own.
@@ -134,23 +152,33 @@ export default function DashboardLayout() {
   return (
     <div className="flex h-full">
       {/* sidebar */}
-      <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-surface-1">
-        <div className="flex items-center gap-2.5 px-5 py-5">
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-strong text-sm font-bold text-white">
-            A
-          </span>
-          <div>
-            <p className="text-sm font-semibold leading-tight text-text">achord-review</p>
-            <button
-              onClick={() => setVersionOpen((open) => !open)}
-              className="flex items-center gap-1 text-left text-[11px] leading-tight text-muted transition-colors hover:text-accent"
-            >
-              控制面板 v{version} · {updateAvailable ? '有新版本' : '检查更新'}
-              {updateAvailable && (
-                <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-label="有新版本" />
-              )}
-            </button>
-          </div>
+      <aside className={`flex shrink-0 flex-col border-r border-line bg-surface-1 transition-[width] duration-200 ${collapsed ? 'w-16' : 'w-60'}`}>
+        <div className={`flex items-center gap-2.5 py-5 ${collapsed ? 'justify-center px-0' : 'px-5'}`}>
+          <button
+            onClick={() => setVersionOpen((open) => !open)}
+            title="版本与更新"
+            className="relative shrink-0"
+            aria-label="版本与更新"
+          >
+            <img src="/dashboard/favicon.svg" alt="achord-review" className="h-8 w-8" />
+            {updateAvailable && (
+              <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-accent ring-2 ring-surface-1" aria-label="有新版本" />
+            )}
+          </button>
+          {!collapsed && (
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold leading-tight text-text">achord-review</p>
+              <button
+                onClick={() => setVersionOpen((open) => !open)}
+                className="flex items-center gap-1 text-left text-[11px] leading-tight text-muted transition-colors hover:text-accent"
+              >
+                控制面板 v{version} · {updateAvailable ? '有新版本' : '检查更新'}
+                {updateAvailable && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-label="有新版本" />
+                )}
+              </button>
+            </div>
+          )}
         </div>
         <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-2">
           {NAV_ITEMS.map((item) =>
@@ -158,21 +186,27 @@ export default function DashboardLayout() {
               <button
                 key={item.to}
                 onClick={() => handleNavClick(item)}
-                className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-muted opacity-50 transition-all hover:bg-surface-2 hover:opacity-80"
+                title={collapsed ? item.label : undefined}
+                className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm text-muted opacity-50 transition-all hover:bg-surface-2 hover:opacity-80 ${collapsed ? 'justify-center' : ''}`}
               >
                 <span className="shrink-0">{item.icon}</span>
-                <span className="flex-1">{item.label}</span>
-                <span className="rounded border border-dashed border-muted/40 px-1 py-px text-[10px] text-muted">
-                  {item.phase}
-                </span>
+                {!collapsed && (
+                  <>
+                    <span className="flex-1">{item.label}</span>
+                    <span className="rounded border border-dashed border-muted/40 px-1 py-px text-[10px] text-muted">
+                      {item.phase}
+                    </span>
+                  </>
+                )}
               </button>
             ) : (
               <NavLink
                 key={item.to}
                 to={item.to}
                 end={item.to === '/dashboard'}
+                title={collapsed ? item.label : undefined}
                 className={({ isActive }) =>
-                  `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-all ${
+                  `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-all ${collapsed ? 'justify-center' : ''} ${
                     isActive
                       ? 'bg-accent/15 font-medium text-accent'
                       : 'text-muted hover:bg-surface-2 hover:text-text'
@@ -180,19 +214,28 @@ export default function DashboardLayout() {
                 }
               >
                 <span className="shrink-0">{item.icon}</span>
-                <span className="flex-1">{item.label}</span>
+                {!collapsed && <span className="flex-1">{item.label}</span>}
               </NavLink>
             ),
           )}
         </nav>
-        <div className="border-t border-line p-3">
+        <div className="space-y-0.5 border-t border-line p-3">
+          <button
+            onClick={toggleCollapsed}
+            title={collapsed ? '展开侧栏' : '收起侧栏'}
+            className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-text ${collapsed ? 'justify-center' : ''}`}
+          >
+            {collapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}
+            {!collapsed && <span className="flex-1 text-left">收起侧栏</span>}
+          </button>
           <button
             onClick={() => void handleLogout()}
             disabled={logoutPending}
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50"
+            title={collapsed ? '退出登录' : undefined}
+            className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50 ${collapsed ? 'justify-center' : ''}`}
           >
             <LogOut size={16} />
-            {logoutPending ? '退出中…' : '退出登录'}
+            {!collapsed && (logoutPending ? '退出中…' : '退出登录')}
           </button>
         </div>
       </aside>
