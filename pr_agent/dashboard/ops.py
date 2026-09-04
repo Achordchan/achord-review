@@ -11,6 +11,7 @@ import asyncio
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -194,24 +195,42 @@ def _self_restart_capability() -> Optional[Dict[str, Any]]:
             "reason": "将通过退出进程、由容器重启策略自动拉起（无需 Docker 端点）。"}
 
 
-def _own_container_id() -> str:
-    """Best-effort id of the container this process runs in, for self-verification.
+# The 64-hex container id sits in a container-specific path segment: the bind of
+# /etc/hostname (`/containers/<id>/`), a cgroup v1 `/docker/<id>` line, or a
+# systemd `docker-<id>.scope`. overlay2 mountinfo also carries 64-hex *layer* ids
+# elsewhere, so these segments are matched first and the bare-hash scan is only a
+# fallback when no container-specific segment is present.
+_CONTAINER_ID_RE = re.compile(r"(?:/containers/|/docker[-/]|docker-)([0-9a-f]{64})")
+_HEX64_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
 
-    Docker records the full 64-hex container id in the cgroup and mount paths, and
-    (unless overridden) uses its first 12 chars as the hostname. Any of these lets
-    a `docker inspect` result be matched against the running container.
+
+def _extract_container_ids(blob: str) -> set:
+    """Container ids in a cgroup/mountinfo blob: specific segments, else any hash."""
+    specific = _CONTAINER_ID_RE.findall(blob)
+    if specific:
+        return {candidate.lower() for candidate in specific}
+    return {candidate.lower() for candidate in _HEX64_RE.findall(blob)}
+
+
+def _own_container_ids() -> set:
+    """Candidate ids for the container this process runs in, for self-verification.
+
+    Returns every plausible id rather than one arbitrary hash, so an inspected id
+    can be matched against any of them — on overlay2 the first 64-hex token in
+    mountinfo is a layer id, not the container, and returning it alone would make a
+    valid Docker target look like a different container and wrongly disable restart.
     """
+    candidates: set = set()
     for source in ("/proc/self/mountinfo", "/proc/self/cgroup"):
         try:
             with open(source, encoding="utf-8") as handle:
-                blob = handle.read()
+                candidates |= _extract_container_ids(handle.read())
         except OSError:
             continue
-        for token in blob.replace("/", " ").replace("-", " ").split():
-            candidate = token.strip()
-            if len(candidate) == 64 and all(c in "0123456789abcdef" for c in candidate.lower()):
-                return candidate.lower()
-    return (os.environ.get("HOSTNAME", "") or "").strip().lower()
+    hostname = (os.environ.get("HOSTNAME", "") or "").strip().lower()
+    if hostname:
+        candidates.add(hostname)
+    return candidates
 
 
 def _docker_target_is_self() -> Optional[bool]:
@@ -230,10 +249,10 @@ def _docker_target_is_self() -> Optional[bool]:
     if inspection.returncode != 0:
         return None
     target = (inspection.stdout or "").strip().lower()
-    own = _own_container_id()
+    own = _own_container_ids()
     if not target or not own:
         return False
-    return target.startswith(own) or own.startswith(target)
+    return any(target.startswith(c) or c.startswith(target) for c in own)
 
 
 def restart_capability() -> Dict[str, Any]:

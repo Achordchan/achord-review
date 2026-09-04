@@ -2,7 +2,14 @@ const HEALTH_URL = '/api/v1/dashboard/auth/me'
 
 async function serviceIsUp(): Promise<boolean> {
   try {
-    const res = await fetch(HEALTH_URL, { cache: 'no-store', credentials: 'same-origin' })
+    // Bound every probe: a proxy that accepts the connection during shutdown but
+    // never answers would otherwise hang this fetch forever, and the recovery loop
+    // awaits it — so maxWaitMs (and the fallback reload) would never be reached.
+    const res = await fetch(HEALTH_URL, {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      signal: AbortSignal.timeout(5_000),
+    })
     return res.status < 500
   } catch {
     return false

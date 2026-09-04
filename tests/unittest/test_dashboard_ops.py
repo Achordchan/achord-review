@@ -125,7 +125,7 @@ def test_restart_prepares_ticket_without_running_command(monkeypatch):
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args=args[0], returncode=0, stdout="c" * 64 + "\n"))
-    monkeypatch.setattr(ops, "_own_container_id", lambda: "c" * 12)
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {"c" * 12})
     commands = []
     monkeypatch.setattr(
         ops, "_run_bounded_command", lambda *args, **kwargs: commands.append(args))
@@ -680,7 +680,7 @@ def test_restart_capability_prefers_docker_when_endpoint_is_live(monkeypatch):
     monkeypatch.setattr(
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=container_id + "\n"))
-    monkeypatch.setattr(ops, "_own_container_id", lambda: container_id[:12])
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {container_id[:12]})
     monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
 
     capability = ops.restart_capability()
@@ -694,7 +694,7 @@ def test_restart_capability_refuses_docker_for_a_mistargeted_container(monkeypat
     monkeypatch.setattr(
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="a" * 64 + "\n"))
-    monkeypatch.setattr(ops, "_own_container_id", lambda: "b" * 12)
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {"b" * 12})
     monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", False)
 
     capability = ops.restart_capability()
@@ -707,7 +707,7 @@ def test_restart_capability_falls_back_to_self_when_the_target_is_not_self(monke
     monkeypatch.setattr(
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="a" * 64 + "\n"))
-    monkeypatch.setattr(ops, "_own_container_id", lambda: "b" * 12)
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {"b" * 12})
     monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
 
     capability = ops.restart_capability()
@@ -1423,3 +1423,30 @@ def test_check_update_fetches_the_comparison_refs_own_remote(monkeypatch, tmp_pa
     # The multi-remote checkout must fetch `upstream`, not Git's default `origin`.
     assert fetched == [["fetch", "--quiet", "upstream"]]
     assert result["update_available"] is True
+
+
+def test_extract_container_ids_prefers_the_container_path_over_overlay_layers():
+    layer = "a" * 64
+    container = "b" * 64
+    blob = (
+        f"41 30 0:35 / /var/lib/docker/overlay2/{layer}/merged rw shared\n"
+        f"52 41 0:36 /{container}/hostname /etc/hostname rw,relatime\n"
+        f"53 41 0:36 / /var/lib/docker/containers/{container}/mounts rw\n")
+
+    assert ops._extract_container_ids(blob) == {container}
+
+
+def test_extract_container_ids_falls_back_to_any_hash_without_a_container_path():
+    only = "c" * 64
+    assert ops._extract_container_ids(f"anon path with {only} inside") == {only}
+
+
+def test_docker_target_is_self_matches_the_real_id_past_overlay_noise(monkeypatch):
+    container = "b" * 64
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=container + "\n"))
+    # A layer hash sorts first, but the real container id is also a candidate.
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {"a" * 64, container})
+
+    assert ops._docker_target_is_self() is True
