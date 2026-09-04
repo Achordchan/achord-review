@@ -43,8 +43,8 @@ export default function OpsPage() {
   const toast = useToast()
   const queryClient = useQueryClient()
   const [confirmAction, setConfirmAction] = useState<'restart' | 'pull' | null>(null)
-  const [task, setTask] = useState<OpsResult | null>(null)
-  const [taskAction, setTaskAction] = useState<'restart' | 'pull' | null>(null)
+  const [result, setResult] = useState<{ action: 'restart' | 'pull'; task: OpsResult } | null>(null)
+  const [running, setRunning] = useState<'restart' | 'pull' | null>(null)
   const [diagnose, setDiagnose] = useState<DiagnoseResult | null>(null)
   const [diagnosing, setDiagnosing] = useState(false)
 
@@ -70,14 +70,17 @@ export default function OpsPage() {
   const restartAvailable = restartCapability?.available === true
 
   const runAction = async (action: 'restart' | 'pull') => {
+    if (running) return
     setConfirmAction(null)
-    setTask(null)
-    setTaskAction(action)
+    setResult(null)
+    setRunning(action)
     try {
       const body = action === 'restart'
         ? await api.post<OpsResult>('/api/v1/dashboard/ops/restart')
         : await api.post<OpsResult>('/api/v1/dashboard/ops/git-pull')
-      setTask(body)
+      // Store the action and its result together so a result can never be shown
+      // under the wrong card.
+      setResult({ action, task: body })
       if (action === 'restart') {
         toast.info('重启已排队', '当前响应结束后执行，连接会短暂中断')
         queryClient.cancelQueries()
@@ -90,11 +93,13 @@ export default function OpsPage() {
       const failedTask = error instanceof ApiError && isOpsResult(error.data) && error.data.started
         ? error.data
         : null
-      setTask(failedTask)
+      setResult(failedTask ? { action, task: failedTask } : null)
       toast.error(
         failedTask ? '操作执行失败' : '指令未下发',
         error instanceof ApiError ? error.message : '请检查运行环境与服务状态',
       )
+    } finally {
+      setRunning(null)
     }
   }
 
@@ -109,7 +114,9 @@ export default function OpsPage() {
     }
   }
 
-  const pullTask = taskAction === 'pull' ? task : null
+  const pullTask = result?.action === 'pull' ? result.task : null
+  const restartTask = result?.action === 'restart' ? result.task : null
+  const opStarted = (task: OpsResult) => task.started && task.completed && task.exit_code === 0
 
   return (
     <div className="space-y-4">
@@ -127,11 +134,30 @@ export default function OpsPage() {
           </p>
           <button
             onClick={() => setConfirmAction('restart')}
-            disabled={!restartAvailable}
+            disabled={!restartAvailable || running !== null}
             className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {capabilitiesQuery.isLoading ? '检测中…' : restartAvailable ? '重启容器' : '由宿主机重启'}
           </button>
+          {restartTask && (
+            <div className="mt-3 rounded-lg border border-line bg-surface-2/50 p-3 text-xs">
+              <p className={restartTask.started && restartTask.exit_code !== null && restartTask.exit_code !== 0 ? 'font-medium text-bad' : 'font-medium text-good'}>
+                {!restartTask.started
+                  ? '重启未发起'
+                  : restartTask.completed && restartTask.exit_code !== 0 && restartTask.exit_code !== null
+                    ? `执行失败（exit ${restartTask.exit_code}）`
+                    : '重启已排队'}
+              </p>
+              {restartTask.output.length > 0 && (
+                <details className="mt-1.5">
+                  <summary className="cursor-pointer text-muted hover:text-text">查看输出</summary>
+                  <pre className="mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-muted">
+                    {restartTask.output.join('\n')}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )}
         </Card>
 
         <Card hover className="p-5">
@@ -146,19 +172,21 @@ export default function OpsPage() {
           </p>
           <button
             onClick={() => setConfirmAction('pull')}
-            disabled={!gitPullAvailable}
+            disabled={!gitPullAvailable || running !== null}
             className="mt-4 w-full rounded-lg border border-line py-2 text-xs font-medium text-text transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {capabilitiesQuery.isLoading ? '检测中…' : gitPullAvailable ? '分阶段准备更新' : '由宿主机更新'}
           </button>
           {pullTask && (
             <div className="mt-3 rounded-lg border border-line bg-surface-2/50 p-3 text-xs">
-              <p className={pullTask.exit_code !== null && pullTask.exit_code !== 0 ? 'font-medium text-bad' : 'font-medium text-good'}>
-                {!pullTask.completed
-                  ? '指令已下发'
-                  : pullTask.exit_code === 0 || pullTask.exit_code === null
-                    ? '新版本已准备完成'
-                    : `执行失败（exit ${pullTask.exit_code}）`}
+              <p className={opStarted(pullTask) ? 'font-medium text-good' : 'font-medium text-bad'}>
+                {!pullTask.started
+                  ? '更新未发起'
+                  : !pullTask.completed
+                    ? '指令已下发'
+                    : opStarted(pullTask)
+                      ? '新版本已准备完成'
+                      : `执行失败（exit ${pullTask.exit_code ?? '?'}）`}
               </p>
               {pullTask.output.length > 0 && (
                 <details className="mt-1.5">

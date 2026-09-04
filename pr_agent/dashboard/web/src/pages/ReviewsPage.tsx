@@ -133,7 +133,7 @@ export default function ReviewsPage() {
                       </Link>
                       <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted">
                         <a
-                          href={repoHtmlUrl(row.repo_name)}
+                          href={repoHtmlUrl(row.pr_url, row.repo_name)}
                           target="_blank"
                           rel="noreferrer"
                           className="truncate hover:text-accent"
@@ -142,7 +142,7 @@ export default function ReviewsPage() {
                           {row.repo_name}
                         </a>
                         <a
-                          href={prHtmlUrl(row.repo_name, row.pr_number)}
+                          href={prHtmlUrl(row.pr_url, row.repo_name, row.pr_number)}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex shrink-0 items-center gap-0.5 hover:text-accent"
