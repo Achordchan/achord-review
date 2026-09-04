@@ -10,7 +10,7 @@ import { useAuth } from '../lib/auth'
 import { api } from '../lib/api'
 import type { VersionInfo } from '../lib/types'
 import { ComingSoonBadge } from './badges'
-import { VersionBadge, VersionCenter } from './VersionCenter'
+import { VersionCenter } from './VersionCenter'
 import { useToast } from './Toast'
 
 type NavItem = {
@@ -134,10 +134,13 @@ export default function DashboardLayout() {
           <div>
             <p className="text-sm font-semibold leading-tight text-text">achord-review</p>
             <button
-              onClick={() => setVersionOpen(true)}
-              className="text-left text-[11px] leading-tight text-muted transition-colors hover:text-accent"
+              onClick={() => setVersionOpen((open) => !open)}
+              className="flex items-center gap-1 text-left text-[11px] leading-tight text-muted transition-colors hover:text-accent"
             >
-              控制面板 v{version} · 检查更新
+              控制面板 v{version} · {updateAvailable ? '有新版本' : '检查更新'}
+              {updateAvailable && (
+                <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-label="有新版本" />
+              )}
             </button>
           </div>
         </div>
@@ -200,11 +203,6 @@ export default function DashboardLayout() {
                 {model.replace(/^openai\//, '')}
               </span>
             )}
-            <VersionBadge
-              version={version}
-              updateAvailable={updateAvailable}
-              onClick={() => setVersionOpen(true)}
-            />
           </div>
         </header>
         <main className="min-h-0 flex-1 overflow-y-auto">
