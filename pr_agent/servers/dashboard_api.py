@@ -11,7 +11,6 @@ front end can wire them up before the backing features ship.
 import asyncio
 import hashlib
 import hmac
-import json
 import os
 import secrets
 import threading
@@ -20,7 +19,6 @@ from contextlib import contextmanager
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
-import httpx
 from fastapi import APIRouter, BackgroundTasks, Cookie, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictBool
@@ -518,119 +516,6 @@ async def put_config(body: ConfigUpdateRequest, request: Request,
                     (warning for warning in errors if "hot reload failed" in warning), ""),
                 "persistence_warning": persistence_warning},
                message=message)
-
-
-_UPSTREAM_TOTAL_DEADLINE_SECONDS = 12.0
-_UPSTREAM_PER_REQUEST_TIMEOUT_SECONDS = 6.0
-_UPSTREAM_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
-
-
-def _upstream_model_urls(api_base: str) -> list:
-    """Candidate model-listing endpoints for an OpenAI-compatible relay.
-
-    Bases are written either with the version segment (…/v1) or without it, and
-    relays expose the catalog as /models or, occasionally, /model — so try the
-    plausible combinations in order rather than guessing one.
-    """
-    base = api_base.strip().rstrip("/")
-    if base.endswith("/v1"):
-        return [f"{base}/models", f"{base}/model"]
-    return [f"{base}/v1/models", f"{base}/v1/model", f"{base}/models", f"{base}/model"]
-
-
-def _parse_model_ids(payload: Any) -> list:
-    """Extract model ids from an OpenAI-style (or list/`models`) response, capped."""
-    if isinstance(payload, dict):
-        items = payload.get("data") or payload.get("models") or []
-    elif isinstance(payload, list):
-        items = payload
-    else:
-        items = []
-    ids = []
-    for item in items:
-        if isinstance(item, dict):
-            value = item.get("id") or item.get("name")
-        elif isinstance(item, str):
-            value = item
-        else:
-            value = None
-        if isinstance(value, str) and value.strip():
-            ids.append(value.strip())
-    # De-duplicate, keep stable order, and cap so a huge catalog can't flood the UI.
-    seen = set()
-    unique = [m for m in ids if not (m in seen or seen.add(m))]
-    return sorted(unique)[:200]
-
-
-@router.post("/config/upstream-models")
-async def get_upstream_models(request: Request, dashboard_session: Optional[str] = Cookie(None)):
-    """List models the SAVED relay advertises, so the operator can pick one instead
-    of typing it. Discovery targets only the persisted api_base/key — the panel
-    saves the relay first, then fetches — so a per-request body can never point the
-    server at an arbitrary host or leak the stored key to a different one. The base
-    is the same operator-configured relay the review engine already connects to, so
-    it is trusted the same way (no egress filtering): private/loopback service
-    addresses like http://litellm:4000 common in Docker/K8s must work here exactly
-    as they do for reviews. require_same_origin still blocks cross-site triggering."""
-    await require_auth(request, dashboard_session)
-    require_same_origin(request)
-    api_base = str(get_settings().get("openai.api_base", "") or "").strip()
-    api_key = str(get_settings().get("openai.key", "") or "").strip()
-    if not api_base:
-        raise HTTPException(status_code=400, detail="请先保存中继 API Base，再获取上游模型")
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    last_error = "上游未返回可用模型列表"
-
-    async def _fetch() -> list:
-        nonlocal last_error
-        timeout = httpx.Timeout(_UPSTREAM_PER_REQUEST_TIMEOUT_SECONDS)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            for url in _upstream_model_urls(api_base):
-                try:
-                    async with client.stream("GET", url, headers=headers) as resp:
-                        if resp.status_code != 200:
-                            last_error = f"{url} 返回 HTTP {resp.status_code}"
-                            continue
-                        # Bounded bytearray: reject a chunk before appending, so a
-                        # compressed/streamed body cannot allocate past the cap, and
-                        # accumulation stays amortized O(1) rather than recopying.
-                        payload = bytearray()
-                        too_large = False
-                        async for chunk in resp.aiter_bytes():
-                            if len(payload) + len(chunk) > _UPSTREAM_MAX_RESPONSE_BYTES:
-                                too_large = True
-                                break
-                            payload.extend(chunk)
-                    if too_large:
-                        last_error = f"{url} 响应过大"
-                        continue
-                except httpx.HTTPError as e:
-                    last_error = f"请求失败：{e}"
-                    continue
-                try:
-                    models = _parse_model_ids(json.loads(bytes(payload)))
-                except ValueError:
-                    last_error = f"{url} 返回的不是有效 JSON"
-                    continue
-                if models:
-                    return models
-                last_error = f"{url} 未返回模型列表"
-        return []
-
-    # A total deadline over the whole fallback loop: the per-request timeout alone
-    # would let several stalling candidates stack into a minute-long hang.
-    try:
-        models = await asyncio.wait_for(_fetch(), timeout=_UPSTREAM_TOTAL_DEADLINE_SECONDS)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="获取上游模型超时，请检查中继端点") from None
-    except Exception as e:  # never leak an internal trace to the panel
-        raise HTTPException(status_code=502, detail=f"获取上游模型失败：{e}") from e
-    if models:
-        return _ok({"models": models})
-    raise HTTPException(status_code=502, detail=last_error[:300])
 
 
 # --------------------------------------------------------------------- ops

@@ -43,24 +43,6 @@ export default function ConfigPage() {
   const saveInFlight = useRef(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
   const [newGlob, setNewGlob] = useState('')
-  const [upstreamModels, setUpstreamModels] = useState<string[]>([])
-  const [fetchingModels, setFetchingModels] = useState(false)
-
-  const fetchUpstreamModels = async () => {
-    if (fetchingModels) return
-    setFetchingModels(true)
-    try {
-      // Discovery targets the SAVED relay (never a per-request base), so save the
-      // relay first; the backend returns a clear 400 if none is configured yet.
-      const body = await api.post<{ models: string[] }>('/api/v1/dashboard/config/upstream-models')
-      setUpstreamModels(body.models ?? [])
-      toast.success('已获取上游模型', `共 ${body.models?.length ?? 0} 个，可在模型输入框下拉选择`)
-    } catch (err) {
-      toast.error('获取上游模型失败', err instanceof ApiError ? err.message : '请先保存中继配置再获取')
-    } finally {
-      setFetchingModels(false)
-    }
-  }
 
   useEffect(() => {
     if (data?.values) {
@@ -192,27 +174,7 @@ export default function ConfigPage() {
           <CardHeader title="模型" description="审查引擎使用的 LLM 与推理参数" />
           <div className="space-y-4 p-5">
             <Field label="模型" hint="直接填模型名（如 gpt-5.6-sol），无需 openai/ 前缀。若中继非官方 OpenAI，请在「中继与密钥」把 Provider 适配设为 openai。">
-              <div className="flex items-center gap-2">
-                <input
-                  className={inputClass}
-                  list="upstream-models"
-                  value={values.model ?? ''}
-                  onChange={(e) => set('model', e.target.value)}
-                />
-                <button
-                  type="button"
-                  onClick={() => void fetchUpstreamModels()}
-                  disabled={fetchingModels}
-                  className="mt-1.5 shrink-0 whitespace-nowrap rounded-lg border border-line px-3 py-2.5 text-xs font-medium text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50"
-                >
-                  {fetchingModels ? '获取中…' : '获取上游模型'}
-                </button>
-              </div>
-              {upstreamModels.length > 0 && (
-                <datalist id="upstream-models">
-                  {upstreamModels.map((m) => <option key={m} value={m} />)}
-                </datalist>
-              )}
+              <input className={inputClass} value={values.model ?? ''} onChange={(e) => set('model', e.target.value)} />
             </Field>
             <Field label="推理强度" hint="支持 none / minimal / low / medium / high / xhigh / max">
               <select className={inputClass} value={values.reasoning_effort ?? ''} onChange={(e) => set('reasoning_effort', e.target.value)}>
