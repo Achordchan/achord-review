@@ -11,6 +11,9 @@ ADD requirements.txt .
 ADD docker/Dockerfile /app/.deps-baked/docker/Dockerfile
 ADD deploy/achord-review/docker-compose.yml /app/.deps-baked/deploy/achord-review/docker-compose.yml
 ADD deploy/achord-review/run-staged-release.sh /app/.deps-baked/deploy/achord-review/run-staged-release.sh
+# Bake the boot reconciler too: it runs from the image, so its fingerprint must
+# be part of the rebuild-required check (a staged change to it needs a rebuild).
+ADD pr_agent/dashboard/ops.py /app/.deps-baked/pr_agent/dashboard/ops.py
 ADD docs docs
 # Keep a copy of the dependency-/build-defining files the image was built from, so
 # the dashboard can compare them against a mounted checkout and refuse an in-place

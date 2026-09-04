@@ -50,6 +50,12 @@ DEPS_FILES = (
     "docker/Dockerfile",
     "deploy/achord-review/docker-compose.yml",
     "deploy/achord-review/run-staged-release.sh",
+    # The boot reconciler runs from the image's baked copy, not the staged release
+    # (the launcher imports it before switching `current`). So a staged update that
+    # only changes reconciliation would be declared restart-safe while the restart
+    # still executes the old logic. Fingerprint it too, so any change to it requires
+    # a host rebuild that actually bakes the new reconciler in.
+    "pr_agent/dashboard/ops.py",
 )
 DEPS_BAKED_DIR = os.environ.get("ACHORD_DEPS_BAKED_DIR", "/app/.deps-baked")
 # A per-build stamp written by the Dockerfile after the code is added. A stamp the
@@ -541,8 +547,11 @@ def _discard_release_worktree(release_path: str) -> None:
             timeout=GIT_PREFLIGHT_TIMEOUT_SECONDS, check=False)
     shutil.rmtree(release_path, ignore_errors=True)
     with suppress(OSError, subprocess.TimeoutExpired):
+        # `--expire now` is required: without it Git keeps a just-missing worktree
+        # registered until its expiry window, so a retry of the same revision fails
+        # as already registered even though the directory is gone.
         subprocess.run(
-            ["git", "-C", admin, "worktree", "prune"],
+            ["git", "-C", admin, "worktree", "prune", "--expire", "now"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=GIT_PREFLIGHT_TIMEOUT_SECONDS, check=False)
 
@@ -551,22 +560,49 @@ def _is_revision(name: str) -> bool:
     return len(name) == 40 and all(c in "0123456789abcdef" for c in name.lower())
 
 
+def _release_complete_marker(release_path: str) -> str:
+    return os.path.join(release_path, ".release-complete")
+
+
+def _release_is_complete(release_path: str) -> bool:
+    """Whether a release directory finished its checkout, not just its registration."""
+    return os.path.exists(_release_complete_marker(release_path))
+
+
+def _mark_release_complete(release_path: str) -> None:
+    """Record completion only after a full checkout, so a partial one is never reused."""
+    marker = _release_complete_marker(release_path)
+    with open(f"{marker}.tmp", "w", encoding="utf-8") as handle:
+        handle.write("ok\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(f"{marker}.tmp", marker)
+
+
 def _ensure_release_worktree(revision: str) -> str:
-    """Return the release directory for revision, creating the worktree if needed."""
+    """Return the release directory for revision, creating the worktree if needed.
+
+    A directory is reused only when its checkout actually finished (a completion
+    marker written after `git worktree add`), not merely because Git registered it
+    and `rev-parse` resolves. An interrupted or wrong-revision directory is discarded
+    and rebuilt, so a half-written worktree is never activated.
+    """
     release_path = os.path.join(RELEASES_DIR, revision)
     if os.path.isdir(release_path):
         rc, existing = _git_text_at(release_path, ["rev-parse", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
-        if rc != 0 or existing != revision:
-            raise OSError(f"发布目录 {revision[:12]} 已存在但不是预期版本")
-    else:
-        proc = subprocess.run(
-            ["git", "-C", _release_admin_dir(), "worktree", "add", "--detach", release_path, revision],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            timeout=GIT_PULL_TIMEOUT_SECONDS, check=False)
-        if proc.returncode != 0:
-            _discard_release_worktree(release_path)
-            raise OSError(f"无法准备发布版本 {revision[:12]}：{(proc.stdout or '').strip()[:200]}")
+        if rc == 0 and existing == revision and _release_is_complete(release_path):
+            _ensure_release_config_link(release_path)
+            return release_path
+        _discard_release_worktree(release_path)
+    proc = subprocess.run(
+        ["git", "-C", _release_admin_dir(), "worktree", "add", "--detach", release_path, revision],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        timeout=GIT_PULL_TIMEOUT_SECONDS, check=False)
+    if proc.returncode != 0:
+        _discard_release_worktree(release_path)
+        raise OSError(f"无法准备发布版本 {revision[:12]}：{(proc.stdout or '').strip()[:200]}")
     _ensure_release_config_link(release_path)
+    _mark_release_complete(release_path)
     return release_path
 
 
@@ -749,11 +785,17 @@ def git_pull() -> Dict[str, Any]:
             if ancestor_rc != 0:
                 return _not_started("当前版本与远端不满足 fast-forward 条件，请在宿主机处理分叉")
             release_path = os.path.join(RELEASES_DIR, revision)
+            reuse = False
             if os.path.isdir(release_path):
                 existing_rc, existing_revision = _git_text_at(
                     release_path, ["rev-parse", "HEAD"], GIT_PREFLIGHT_TIMEOUT_SECONDS)
-                if existing_rc != 0 or existing_revision != revision:
-                    return _not_started("目标发布目录已存在但不是预期版本，请在宿主机检查")
+                reuse = (existing_rc == 0 and existing_revision == revision
+                         and _release_is_complete(release_path))
+                if not reuse:
+                    # A wrong-revision or interrupted/partial checkout: rebuild it
+                    # cleanly instead of trusting a half-written worktree.
+                    _discard_release_worktree(release_path)
+            if reuse:
                 _ensure_release_config_link(release_path)
                 result = {"started": True, "completed": True, "exit_code": 0,
                           "timed_out": False, "output": ["远端版本已在独立发布目录中准备完成"]}
@@ -767,6 +809,7 @@ def git_pull() -> Dict[str, Any]:
                     _discard_release_worktree(release_path)
                     return stage
                 _ensure_release_config_link(release_path)
+                _mark_release_complete(release_path)
                 result = stage
             _write_pending_release(release_path)
             result["mode"] = "staged"

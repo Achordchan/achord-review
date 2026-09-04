@@ -1307,3 +1307,88 @@ def test_reconcile_boot_keeps_current_when_a_rebuilt_head_is_dep_incompatible(mo
     assert (releases / "current").resolve() == (releases / a).resolve()
     assert (releases / ".image-build-id").read_text().strip() == "build-1"
     assert ops._pending_release() == str((releases / b).resolve())
+
+
+def test_rebuild_required_flags_a_boot_reconciler_change(monkeypatch, tmp_path):
+    # The launcher runs the image's baked reconciler, so a staged change to it must
+    # count as rebuild-required rather than a restart-safe code-only update.
+    baked = tmp_path / "baked"
+    checkout = tmp_path / "checkout"
+    for base, body in ((baked, "reconcile = 'old'\n"), (checkout, "reconcile = 'new'\n")):
+        (base / "pr_agent" / "dashboard").mkdir(parents=True)
+        (base / "pr_agent" / "dashboard" / "ops.py").write_text(body)
+    monkeypatch.setattr(ops, "REPO_DIR", str(checkout))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+
+    assert ops.rebuild_required() is True
+
+
+def test_ensure_release_worktree_recreates_an_incomplete_checkout(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    revision = _commit(source, "r1")
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+
+    path = ops._ensure_release_worktree(revision)
+    assert ops._release_is_complete(path)
+
+    # Simulate an interruption after registration but before the checkout finished.
+    os.unlink(ops._release_complete_marker(path))
+    os.unlink(os.path.join(path, "value.txt"))
+
+    rebuilt = ops._ensure_release_worktree(revision)
+
+    assert rebuilt == path
+    assert ops._release_is_complete(rebuilt)
+    assert open(os.path.join(rebuilt, "value.txt")).read() == "r1\n"
+
+
+def test_discard_release_worktree_prunes_registration_immediately(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "")
+
+    monkeypatch.setattr(ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(ops.shutil, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(tmp_path / "src"))
+
+    ops._discard_release_worktree(str(tmp_path / "src" / "releases" / ("d" * 40)))
+
+    prune = next(c for c in calls if "prune" in c)
+    assert prune[-2:] == ["--expire", "now"]
+
+
+def test_git_pull_rebuilds_a_release_missing_its_completion_marker(monkeypatch, tmp_path):
+    remote, source, releases = _staged_repo(tmp_path)
+    _commit(source, "old")
+    subprocess.run(["git", "-C", str(source), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(source), "push", "-qu", "origin", "main"], check=True, capture_output=True)
+    writer = tmp_path / "writer"
+    subprocess.run(["git", "clone", str(remote), str(writer)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(writer), "config", "user.email", "t@e"], check=True)
+    subprocess.run(["git", "-C", str(writer), "config", "user.name", "T"], check=True)
+    (writer / "value.txt").write_text("new\n")
+    subprocess.run(["git", "-C", str(writer), "commit", "-qam", "new"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(writer), "push", "-q"], check=True, capture_output=True)
+    (releases / "current").symlink_to(source)
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "UPDATE_REF", "origin/main")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(source))
+
+    first = ops.git_pull()
+    release_path = str(releases / first["release"])
+    assert ops._release_is_complete(release_path)
+
+    # An interrupted retry left the directory registered but incomplete.
+    os.unlink(ops._release_complete_marker(release_path))
+    os.unlink(os.path.join(release_path, "value.txt"))
+
+    second = ops.git_pull()
+
+    assert second["release"] == first["release"]
+    assert ops._release_is_complete(release_path)
+    assert open(os.path.join(release_path, "value.txt")).read() == "new\n"
