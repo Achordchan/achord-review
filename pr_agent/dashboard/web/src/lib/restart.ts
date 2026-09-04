@@ -1,4 +1,5 @@
 const HEALTH_URL = '/api/v1/dashboard/auth/me'
+const PROBE_TIMEOUT_MS = 5_000
 
 async function serviceIsUp(): Promise<boolean> {
   try {
@@ -8,7 +9,7 @@ async function serviceIsUp(): Promise<boolean> {
     const res = await fetch(HEALTH_URL, {
       cache: 'no-store',
       credentials: 'same-origin',
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     })
     return res.status < 500
   } catch {
@@ -16,24 +17,57 @@ async function serviceIsUp(): Promise<boolean> {
   }
 }
 
+/** The hashed entry bundle this page was loaded with, e.g. /assets/index-ab12.js. */
+function loadedBundle(): string | null {
+  const el = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/index-"]')
+  const match = el?.getAttribute('src')?.match(/\/assets\/index-[\w-]+\.js/)
+  return match ? match[0] : null
+}
+
+/** The entry bundle the server currently serves, read from a fresh index.html. */
+async function servedBundle(): Promise<string | null> {
+  try {
+    const res = await fetch('/', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    })
+    if (!res.ok) return null
+    const match = (await res.text()).match(/\/assets\/index-[\w-]+\.js/)
+    return match ? match[0] : null
+  } catch {
+    return null
+  }
+}
+
 /**
- * Reload onto the new release, but only once a restart has actually been observed.
+ * Reload onto the new release once a restart is confirmed.
  *
- * The old process keeps serving until it exits, so an "up" response before any
- * outage is the *old* frontend — accepting it would reload the stale bundle and
- * stop polling. Recovery is therefore accepted only after at least one failed
- * probe, however long initiation and graceful shutdown take. A final reload on
- * timeout keeps the user from being stranded if the outage is never seen.
+ * Two independent signals confirm it, so neither a slow restart nor a fast one is
+ * missed: an observed outage followed by the service coming back, OR the served
+ * entry bundle's hash changing from the one this page loaded (a new release booted
+ * even if the restart was too fast for any probe to catch an outage). A pure
+ * backend restart that leaves the bundle unchanged is caught by the outage path; if
+ * it is so fast that no probe sees the outage, the running bundle is already current
+ * and nothing needs reloading. A final reload on timeout avoids stranding the user.
  */
 export async function waitForServiceThenReload(maxWaitMs = 150_000) {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
   const started = Date.now()
+  const baseline = loadedBundle()
   let outageObserved = false
   while (Date.now() - started < maxWaitMs) {
     if (await serviceIsUp()) {
       if (outageObserved) {
         window.location.reload()
         return
+      }
+      if (baseline) {
+        const served = await servedBundle()
+        if (served && served !== baseline) {
+          window.location.reload()
+          return
+        }
       }
     } else {
       outageObserved = true

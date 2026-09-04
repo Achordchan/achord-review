@@ -527,6 +527,10 @@ def _switch_active_release(target: str) -> Optional[str]:
     if previous is None and os.path.lexists(active_link):
         raise OSError("活动代码路径不是可原子切换的符号链接")
     temporary_link = f"{active_link}.{os.getpid()}.tmp"
+    # A crash between symlink and replace leaves this persistent path behind; a later
+    # boot that reuses the PID would then fail on os.symlink. Clear a stale one first.
+    with suppress(FileNotFoundError):
+        os.unlink(temporary_link)
     try:
         os.symlink(target, temporary_link)
         os.replace(temporary_link, active_link)

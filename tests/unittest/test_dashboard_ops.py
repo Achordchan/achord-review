@@ -1450,3 +1450,23 @@ def test_docker_target_is_self_matches_the_real_id_past_overlay_noise(monkeypatc
     monkeypatch.setattr(ops, "_own_container_ids", lambda: {"a" * 64, container})
 
     assert ops._docker_target_is_self() is True
+
+
+def test_switch_active_release_recovers_from_a_stale_temporary_link(monkeypatch, tmp_path):
+    releases = tmp_path / "releases"
+    old_release = releases / "old"
+    new_release = releases / "new"
+    old_release.mkdir(parents=True)
+    new_release.mkdir()
+    active = releases / "current"
+    active.symlink_to(old_release)
+    monkeypatch.setattr(ops, "REPO_DIR", str(active))
+    # A crash on a previous boot with this PID left a temporary link behind.
+    stale = f"{active}.{os.getpid()}.tmp"
+    os.symlink(old_release, stale)
+
+    previous = ops._switch_active_release(str(new_release))
+
+    assert active.resolve() == new_release.resolve()
+    assert os.path.realpath(previous) == str(old_release)
+    assert not os.path.lexists(stale)
