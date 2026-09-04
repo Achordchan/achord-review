@@ -27,7 +27,10 @@ DEFAULT_DB_PATH = os.environ.get("DASHBOARD_DB_PATH", "/app/data/review.db")
 # A nonpositive stale window would put the reconciliation cutoff in the future
 # and mark every in-flight review FAILED, so it is clamped before the heartbeat
 # interval derives from it.
-STALE_REVIEW_SECONDS = bounded_env_int("DASHBOARD_STALE_REVIEW_SECONDS", 6 * 3600, 60)
+# 30 minutes: a live review heartbeats at least every 60s, so ~30 missed
+# heartbeats means the run crashed. Keeps interrupted reviews from lingering
+# as "running" for hours. Override with DASHBOARD_STALE_REVIEW_SECONDS.
+STALE_REVIEW_SECONDS = bounded_env_int("DASHBOARD_STALE_REVIEW_SECONDS", 1800, 60)
 REVIEW_HEARTBEAT_SECONDS = min(
     bounded_env_int("DASHBOARD_REVIEW_HEARTBEAT_SECONDS", 60, 5),
     max(5, STALE_REVIEW_SECONDS // 3),
@@ -236,7 +239,10 @@ class DashboardStorage:
             # worker read "database disk image is malformed" on a healthy file. A
             # rollback journal has no shared memory, so it avoids that failure mode.
             conn.execute("PRAGMA journal_mode=TRUNCATE")
-            conn.execute("PRAGMA synchronous=NORMAL")
+            # FULL, not NORMAL: with a rollback journal only FULL guarantees the file
+            # cannot be corrupted by a power loss mid-write (WAL made NORMAL safe).
+            # The dashboard's write volume is tiny, so the extra fsync is negligible.
+            conn.execute("PRAGMA synchronous=FULL")
             conn.execute("PRAGMA foreign_keys=ON")
             self._protect_storage_permissions()
             return conn
@@ -375,17 +381,28 @@ class DashboardStorage:
     def _read(self, sql: str, params: tuple = (), *, strict: bool = False) -> List[Dict[str, Any]]:
         error: Optional[Exception] = None
         for attempt in range(2):
+            conn = None
+            recover = False
             try:
-                with self._connect() as conn:
-                    rows = conn.execute(sql, params).fetchall()
+                conn = self._connect()
+                rows = conn.execute(sql, params).fetchall()
                 self._protect_storage_permissions()
                 return [dict(row) for row in rows]
             except Exception as e:
                 error = e
                 # Self-heal: a corruption-class error can be a stale per-connection
                 # view of a healthy file; a brand-new connection usually recovers.
-                if attempt == 0 and _is_recoverable_corruption(e):
-                    continue
+                recover = attempt == 0 and _is_recoverable_corruption(e)
+            finally:
+                # A connection context manager only rolls back; close the poisoned
+                # connection explicitly so the retry gets a genuinely fresh handle
+                # and its stale process state is released.
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            if not recover:
                 break
         get_logger().warning(f"Dashboard storage read failed, error: {error}")
         if strict:

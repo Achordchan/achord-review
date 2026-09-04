@@ -688,21 +688,30 @@ class TestStorageResilience:
         assert mode.lower() in ("truncate", "delete", "persist", "memory", "off")
         assert mode.lower() != "wal"
 
-    def test_read_self_heals_from_a_transient_corruption(self, storage, monkeypatch):
+    def test_read_self_heals_from_an_execute_time_corruption(self, storage, monkeypatch):
         storage.create_review(repo_name="a/b", pr_number=1, pr_url="http://x")
         real_connect = storage._connect
         calls = {"n": 0}
+        closed = []
+
+        class PoisonConn:
+            def execute(self, *args, **kwargs):
+                raise sqlite3.DatabaseError("database disk image is malformed")
+
+            def close(self):
+                closed.append(True)
 
         def flaky_connect(*args, **kwargs):
             calls["n"] += 1
-            if calls["n"] == 1:
-                raise sqlite3.DatabaseError("database disk image is malformed")
-            return real_connect(*args, **kwargs)
+            # First connection fails at execute() time, mimicking a poisoned view;
+            # the retry gets a real, healthy connection.
+            return PoisonConn() if calls["n"] == 1 else real_connect(*args, **kwargs)
 
         monkeypatch.setattr(storage, "_connect", flaky_connect)
         rows = storage._read("SELECT COUNT(*) AS c FROM reviews", strict=True)
 
-        assert calls["n"] == 2  # first attempt failed, retried on a fresh connection
+        assert calls["n"] == 2  # first attempt failed at execute(), retried fresh
+        assert closed == [True]  # the poisoned connection was closed before the retry
         assert rows[0]["c"] == 1
 
     def test_read_does_not_retry_a_non_corruption_error(self, storage, monkeypatch):
