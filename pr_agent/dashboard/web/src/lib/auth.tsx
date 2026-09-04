@@ -61,12 +61,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (password: string) => {
     const body = await api.post<{ authenticated: boolean }>('/api/v1/dashboard/auth/login', { password })
     if (!body.authenticated) return
-    // The login is confirmed, so mark the session authenticated now. Fetching
-    // model/version is best-effort: the freshly-set session cookie is not always
-    // readable on the very next request, and a transient 401 there must not bounce
-    // a real login back to the form. Use a direct fetch (with a short retry) so it
-    // does not trip the global 401-invalidation in the api layer.
+    // Confirm the session before entering. Fetching model/version doubles as that
+    // check: the freshly-set cookie is not always readable on the very next
+    // request, so a single transient failure must not bounce a real login back to
+    // the form — hence the short retry. But if every attempt ends in a definitive
+    // 401, the cookie was genuinely not accepted (rejected, stripped by a proxy,
+    // or the session invalidated); entering then would only fail on the next call
+    // or redirect straight back, so stay unauthenticated and surface the error.
+    // Use a direct fetch so it does not trip the global 401-invalidation.
     let session: SessionInfo | null = null
+    let rejected = false
     for (let attempt = 0; attempt < 3 && session === null; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, 200))
       try {
@@ -74,10 +78,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           credentials: 'same-origin',
           headers: { Accept: 'application/json' },
         })
-        if (res.ok) session = ((await res.json()) as { data?: SessionInfo }).data ?? null
+        if (res.ok) {
+          session = ((await res.json()) as { data?: SessionInfo }).data ?? null
+          rejected = false
+        } else {
+          // Persist a 401 as a rejection; treat 5xx/other as transient and retry.
+          rejected = res.status === 401
+        }
       } catch {
-        // keep retrying
+        rejected = false // network error: transient, keep retrying
       }
+    }
+    if (session === null && rejected) {
+      setState((prev) => ({ ...prev, authenticated: false, loading: false }))
+      toast.error('登录会话未能确认', '会话 Cookie 未被接受，请重试或检查反向代理设置')
+      return
     }
     setState({
       authenticated: true,
@@ -85,7 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       model: session?.model ?? '',
       version: session?.version ?? '',
     })
-  }, [])
+  }, [toast])
 
   const logout = useCallback(async () => {
     await api.post('/api/v1/dashboard/auth/logout')
