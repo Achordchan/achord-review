@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import os
 import signal
 import subprocess
 import sys
@@ -14,12 +15,25 @@ from pr_agent.dashboard import ops
 @pytest.fixture(autouse=True)
 def _isolated_ops_lock(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "OPS_LOCK_PATH", str(tmp_path / "dashboard-ops.lock"))
+    # Staged releases refuse to run without the persistent config directory.
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setattr(ops, "CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(ops, "SOURCE_DIR", "")
 
 
 def test_git_pull_returns_completed_output(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    releases = tmp_path / "releases"
+    releases.mkdir()
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
     monkeypatch.setattr(
         ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "rebuild_required", lambda: False)
+    revision = "a" * 40
+    monkeypatch.setattr(
+        ops, "_git_text",
+        lambda args, timeout: (0, "") if args == ["fetch", "--quiet"] else (0, revision))
     monkeypatch.setattr(
         ops, "_run_bounded_command",
         lambda *args, **kwargs: {
@@ -29,10 +43,13 @@ def test_git_pull_returns_completed_output(monkeypatch, tmp_path):
 
     result = ops.git_pull()
 
-    assert result == {
-        "started": True, "completed": True, "exit_code": 0,
-        "timed_out": False, "output": ["Updating files", "Done"],
-    }
+    assert result["started"] is True
+    assert result["completed"] is True
+    assert result["release"] == revision
+    assert result["mode"] == "staged"
+    assert result["dependencies_changed"] is False
+    assert "运行中的后端与静态资源尚未改变" in result["output"][-1]
+    assert (releases / ".pending-release").read_text().strip() == str(releases / revision)
 
 
 def test_git_pull_reports_not_started_without_binary(monkeypatch):
@@ -42,6 +59,7 @@ def test_git_pull_reports_not_started_without_binary(monkeypatch):
     monkeypatch.setattr(ops, "_run_bounded_command", missing)
     monkeypatch.setattr(
         ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_git_text", lambda *args: (0, "") if args[0] == ["fetch", "--quiet"] else (0, "a" * 40))
 
     result = ops.git_pull()
 
@@ -60,6 +78,7 @@ def test_git_pull_is_disabled_without_deliberate_checkout(monkeypatch):
 
 def test_git_pull_capability_verifies_real_checkout(monkeypatch, tmp_path):
     monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(tmp_path / "releases"))
     monkeypatch.setattr(
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
@@ -105,7 +124,8 @@ def test_restart_prepares_ticket_without_running_command(monkeypatch):
     monkeypatch.setattr(
         ops.subprocess, "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
-            args=args[0], returncode=0, stdout="container found"))
+            args=args[0], returncode=0, stdout="c" * 64 + "\n"))
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {"c" * 12})
     commands = []
     monkeypatch.setattr(
         ops, "_run_bounded_command", lambda *args, **kwargs: commands.append(args))
@@ -568,3 +588,888 @@ def test_github_probe_reports_a_rejected_token_revocation(monkeypatch):
 
     assert result["ok"] is True
     assert any("403" in message for message in warnings)
+
+
+def _fake_git_text(responses):
+    """Map a git argument tuple to a (returncode, stdout) pair for check_update."""
+    def _run(args, timeout_seconds):
+        return responses[tuple(args)]
+    return _run
+
+
+def test_check_update_flags_an_available_update(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "old commit"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet", "origin"): (0, ""),
+        ("rev-parse", "--short", "origin/main"): (0, "bbbbbbb"),
+        ("log", "-1", "--format=%s", "origin/main"): (0, "new commit"),
+        ("rev-list", "--count", "HEAD..origin/main"): (0, "3"),
+        ("rev-list", "--count", "origin/main..HEAD"): (0, "0"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is True
+    assert result["update_available"] is True
+    assert result["behind"] == 3
+    assert result["current"]["sha"] == "aaaaaaa"
+    assert result["latest"]["sha"] == "bbbbbbb"
+    assert result["latest"]["branch"] == "origin/main"
+
+
+def test_check_update_reports_up_to_date(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "head"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet", "origin"): (0, ""),
+        ("rev-parse", "--short", "origin/main"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s", "origin/main"): (0, "head"),
+        ("rev-list", "--count", "HEAD..origin/main"): (0, "0"),
+        ("rev-list", "--count", "origin/main..HEAD"): (0, "0"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is True
+    assert result["update_available"] is False
+    assert result["behind"] == 0
+
+
+def test_check_update_disabled_without_checkout(monkeypatch):
+    monkeypatch.setattr(
+        ops, "git_pull_capability",
+        lambda: {"available": False, "reason": "not a checkout"})
+
+    result = ops.check_update()
+
+    assert result["available"] is False
+    assert result["checked"] is False
+    assert result["update_available"] is False
+    assert result["reason"] == "not a checkout"
+
+
+def test_check_update_surfaces_fetch_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "head"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet", "origin"): (1, "fatal: could not read from remote"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is False
+    assert result["update_available"] is False
+    assert "could not read from remote" in result["reason"]
+
+
+def test_restart_capability_prefers_docker_when_endpoint_is_live(monkeypatch):
+    container_id = "f" * 64
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=container_id + "\n"))
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {container_id[:12]})
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
+
+    capability = ops.restart_capability()
+
+    assert capability["available"] is True
+    assert capability["mode"] == "docker"
+
+
+def test_restart_capability_refuses_docker_for_a_mistargeted_container(monkeypatch):
+    # The name resolves, but to a different container than the one we run in.
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="a" * 64 + "\n"))
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {"b" * 12})
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", False)
+
+    capability = ops.restart_capability()
+
+    assert capability["available"] is False
+    assert ops.CONTAINER_NAME in capability["reason"]
+
+
+def test_restart_capability_falls_back_to_self_when_the_target_is_not_self(monkeypatch):
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="a" * 64 + "\n"))
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {"b" * 12})
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
+
+    capability = ops.restart_capability()
+
+    # A mistargeted Docker name must not shadow the safe self-exit path.
+    assert capability["available"] is True
+    assert capability["mode"] == "self"
+
+
+def test_restart_capability_falls_back_to_self_exit_without_docker(monkeypatch):
+    def no_docker(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(ops.subprocess, "run", no_docker)
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", True)
+
+    capability = ops.restart_capability()
+
+    assert capability["available"] is True
+    assert capability["mode"] == "self"
+
+
+def test_restart_capability_stays_disabled_without_docker_or_self_restart(monkeypatch):
+    def no_docker(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(ops.subprocess, "run", no_docker)
+    monkeypatch.setattr(ops, "SELF_RESTART_ENABLED", False)
+
+    capability = ops.restart_capability()
+
+    assert capability["available"] is False
+
+
+def test_execute_restart_self_mode_signals_pid_one(monkeypatch):
+    signals = []
+    monkeypatch.setattr(ops.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    class _Ctx:
+        def __exit__(self, *a):
+            return False
+
+    ops.execute_restart(ops._RestartTicket(_Ctx(), None, mode="self"))
+
+    assert signals == [(1, ops.signal.SIGTERM)]
+
+
+def _completed_pull(*args, **kwargs):
+    return {"started": True, "completed": True, "exit_code": 0,
+            "timed_out": False, "output": ["Updated"]}
+
+
+def test_git_pull_flags_dependency_changes(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(tmp_path / "releases"))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_run_bounded_command", _completed_pull)
+    monkeypatch.setattr(
+        ops, "_git_text",
+        lambda args, timeout: (0, "") if args == ["fetch", "--quiet"] else (0, "a" * 40))
+    monkeypatch.setattr(ops, "rebuild_required", lambda: True)
+
+    result = ops.git_pull()
+
+    assert result["dependencies_changed"] is True
+    assert any("--build" in line for line in result["output"])
+
+
+def test_git_pull_survives_a_dependency_check_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(tmp_path / "releases"))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "_run_bounded_command", _completed_pull)
+    monkeypatch.setattr(
+        ops, "_git_text",
+        lambda args, timeout: (0, "") if args == ["fetch", "--quiet"] else (0, "a" * 40))
+
+    def _timeout():
+        raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+    monkeypatch.setattr(ops, "rebuild_required", _timeout)
+
+    result = ops.git_pull()
+
+    # A completed pull is never turned into a failure; the check degrades to
+    # a conservative rebuild-required.
+    assert result["completed"] is True
+    assert result["exit_code"] == 0
+    assert result["dependencies_changed"] is True
+
+
+def test_rebuild_required_compares_baked_and_checkout_fingerprints(monkeypatch, tmp_path):
+    baked = tmp_path / "baked"
+    checkout = tmp_path / "checkout"
+    baked.mkdir()
+    checkout.mkdir()
+    (baked / "requirements.txt").write_text("requests==1\n")
+    (baked / "pyproject.toml").write_text("[project]\n")
+    (checkout / "requirements.txt").write_text("requests==1\n")
+    (checkout / "pyproject.toml").write_text("[project]\n")
+    monkeypatch.setattr(ops, "REPO_DIR", str(checkout))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+
+    assert ops.rebuild_required() is False
+
+    (checkout / "requirements.txt").write_text("requests==2\n")
+    assert ops.rebuild_required() is True
+
+
+def test_rebuild_required_fails_closed_without_a_baked_copy(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(tmp_path / "missing"))
+    # An image reused under a mounted checkout without baked fingerprints cannot be
+    # verified — fail closed and require a rebuild rather than risk a restart loop.
+    assert ops.rebuild_required() is True
+
+
+def test_rebuild_required_never_blocks_a_non_mounted_deployment(monkeypatch):
+    # The standard deployment runs baked code only; a missing baked dir must not
+    # start blocking its ordinary restarts.
+    monkeypatch.setattr(ops, "REPO_DIR", "")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", "/nonexistent")
+    assert ops.rebuild_required() is False
+
+
+def test_prepare_restart_is_blocked_when_a_rebuild_is_required(monkeypatch):
+    monkeypatch.setattr(ops, "rebuild_required", lambda: True)
+    unexpected = []
+    monkeypatch.setattr(ops.subprocess, "run", lambda *a, **k: unexpected.append(a))
+
+    result, ticket = ops.prepare_restart()
+
+    assert result["started"] is False
+    assert ticket is None
+    assert "重启已被阻止" in result["output"][0]
+    assert unexpected == []
+
+
+def _pending_release_layout(tmp_path, monkeypatch):
+    releases = tmp_path / "releases"
+    old_release = releases / "old"
+    new_release = releases / "new"
+    old_release.mkdir(parents=True)
+    new_release.mkdir()
+    active = releases / "current"
+    active.symlink_to(old_release)
+    (releases / ".pending-release").write_text(str(new_release) + "\n")
+    monkeypatch.setattr(ops, "REPO_DIR", str(active))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "rebuild_required", lambda: False)
+    monkeypatch.setattr(
+        ops, "restart_capability",
+        lambda: {"available": True, "mode": "self", "reason": "ready"})
+    return releases, old_release, new_release, active
+
+
+def test_prepare_restart_defers_the_switch_until_restart_initiation(monkeypatch, tmp_path):
+    releases, old_release, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+
+    result, ticket = ops.prepare_restart()
+
+    # The response only announces the switch; `current` still serves the old release.
+    assert result["started"] is True
+    assert active.resolve() == old_release.resolve()
+    assert (releases / ".pending-release").exists()
+    assert ticket is not None and ticket.pending == str(new_release.resolve())
+    ticket.lock_context.__exit__(None, None, None)
+
+
+def test_execute_restart_switches_atomically_when_the_signal_is_delivered(monkeypatch, tmp_path):
+    releases, _, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(ops.os, "kill", lambda pid, sig: None)
+    _, ticket = ops.prepare_restart()
+
+    ops.execute_restart(ticket)
+
+    assert active.resolve() == new_release.resolve()
+    assert not (releases / ".pending-release").exists()
+
+
+def test_execute_restart_rolls_back_when_restart_cannot_be_initiated(monkeypatch, tmp_path):
+    releases, old_release, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+
+    def _refuse(pid, sig):
+        raise PermissionError("not PID 1's parent")
+
+    monkeypatch.setattr(ops.os, "kill", _refuse)
+    _, ticket = ops.prepare_restart()
+
+    ops.execute_restart(ticket)
+
+    # The old process keeps serving, so `current` and the marker must match it again.
+    assert active.resolve() == old_release.resolve()
+    assert (releases / ".pending-release").read_text().strip() == str(new_release.resolve())
+
+
+def test_execute_restart_rolls_back_when_docker_restart_fails(monkeypatch, tmp_path):
+    releases, old_release, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        ops, "restart_capability",
+        lambda: {"available": True, "mode": "docker", "reason": "ready"})
+    monkeypatch.setattr(
+        ops, "_run_bounded_command",
+        lambda *a, **k: {"started": True, "completed": True, "exit_code": 1, "output": ["denied"]})
+    _, ticket = ops.prepare_restart()
+
+    ops.execute_restart(ticket)
+
+    assert active.resolve() == old_release.resolve()
+    assert (releases / ".pending-release").exists()
+
+
+def test_git_pull_stages_without_mutating_live_worktree(monkeypatch, tmp_path):
+    remote = tmp_path / "remote.git"
+    source = tmp_path / "source"
+    writer = tmp_path / "writer"
+    releases = tmp_path / "releases"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(remote), str(source)], check=True, capture_output=True)
+    for checkout in (source,):
+        subprocess.run(["git", "-C", str(checkout), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(checkout), "config", "user.name", "Test"], check=True)
+    (source / "value.txt").write_text("old\n")
+    subprocess.run(["git", "-C", str(source), "add", "value.txt"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-m", "old"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(source), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(source), "push", "-u", "origin", "main"], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(remote), str(writer)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(writer), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(writer), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(writer), "checkout", "main"], check=True, capture_output=True)
+    (writer / "value.txt").write_text("new\n")
+    subprocess.run(["git", "-C", str(writer), "commit", "-am", "new"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(writer), "push"], check=True, capture_output=True)
+    releases.mkdir()
+    current = releases / "current"
+    current.symlink_to(source)
+    monkeypatch.setattr(ops, "REPO_DIR", str(current))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "UPDATE_REF", "origin/main")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(source))
+
+    result = ops.git_pull()
+
+    pending = ops._pending_release()
+    assert result["completed"] is True
+    assert (source / "value.txt").read_text() == "old\n"
+    assert pending is not None
+    assert (tmp_path / "releases" / result["release"] / "value.txt").read_text() == "new\n"
+    settings_link = tmp_path / "releases" / result["release"] / "pr_agent" / "settings_prod"
+    assert settings_link.is_symlink() and settings_link.resolve() == (tmp_path / "config").resolve()
+
+    # The prepared release is reported as staged, not re-offered as an update.
+    info = ops.check_update()
+    assert info["checked"] is True
+    assert info["staged"] is True
+    assert info["update_available"] is False
+    assert info["pending"]["sha"] == result["release"][:7]
+    assert info["pending"]["subject"] == "new"
+
+
+def _staged_repo(tmp_path):
+    """A bare remote, a source clone on `main`, and a releases dir with `current`."""
+    remote = tmp_path / "remote.git"
+    source = tmp_path / "source"
+    releases = tmp_path / "releases"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(remote), str(source)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+    releases.mkdir()
+    return remote, source, releases
+
+
+def _commit(source, text):
+    (source / "value.txt").write_text(text + "\n")
+    subprocess.run(["git", "-C", str(source), "add", "value.txt"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", text], check=True, capture_output=True)
+    return subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _boot_env(monkeypatch, tmp_path, source, releases, build_id):
+    # The image bakes no dependency files here, and neither do the committed
+    # releases, so every fingerprint is the shared "all missing" digest — a release
+    # is provenance-compatible with the image unless a test commits a dependency
+    # file that diverges from the baked copy.
+    baked = tmp_path / "baked"
+    baked.mkdir(exist_ok=True)
+    (baked / "build-id").write_text(build_id + "\n")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+
+
+def _commit_dep(source, filename, text):
+    (source / filename).write_text(text)
+    subprocess.run(["git", "-C", str(source), "add", filename], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-qm", f"dep {filename}"],
+                   check=True, capture_output=True)
+    return subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_git_pull_unregisters_a_failed_worktree_so_the_revision_can_be_retried(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    revision = _commit(source, "one")
+    (releases / "current").symlink_to(source)
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "rebuild_required", lambda: False)
+    monkeypatch.setattr(
+        ops, "_git_text",
+        lambda args, timeout: (0, "") if args[:1] in (["fetch"], ["merge-base"]) else (0, revision))
+    real_run = ops._run_bounded_command
+
+    def _register_then_time_out(argv, cwd, timeout_seconds, lock_file=None):
+        # Git registered the worktree, then the command was killed mid-checkout.
+        result = real_run(argv, cwd, timeout_seconds, lock_file)
+        return {**result, "exit_code": None, "timed_out": True}
+
+    monkeypatch.setattr(ops, "_run_bounded_command", _register_then_time_out)
+    failed = ops.git_pull()
+    assert failed["exit_code"] is None
+    registered = subprocess.run(["git", "-C", str(source), "worktree", "list", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+    assert str(releases / revision) not in registered
+
+    monkeypatch.setattr(ops, "_run_bounded_command", real_run)
+    retried = ops.git_pull()
+
+    assert retried["exit_code"] == 0
+    assert retried["release"] == revision
+
+
+def test_reconcile_boot_runs_the_rebuilt_source_head_over_a_stale_pending_release(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    r1 = _commit(source, "r1")
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    assert os.path.basename(ops.reconcile_boot_release()) == r1
+    # R1 was staged as rebuild-required; the operator then pulls R2 and rebuilds.
+    (releases / ".pending-release").write_text(str(releases / r1) + "\n")
+    r2 = _commit(source, "r2")
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-2")
+
+    active = ops.reconcile_boot_release()
+
+    assert os.path.basename(active) == r2
+    assert (releases / "current").resolve() == (releases / r2).resolve()
+    assert not (releases / ".pending-release").exists()
+    assert (releases / ".image-build-id").read_text().strip() == "build-2"
+
+
+def test_reconcile_boot_keeps_the_running_release_when_the_image_is_unchanged(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    _commit(source, "r1")
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    ops.reconcile_boot_release()
+    # A code-only in-panel update moved `current` ahead of the source checkout.
+    r2 = _commit(source, "r2")
+    subprocess.run(["git", "-C", str(source), "reset", "-q", "--hard", "HEAD~1"], check=True)
+    subprocess.run(["git", "-C", str(source), "worktree", "add", "--detach", str(releases / r2), r2],
+                   check=True, capture_output=True)
+    ops._switch_active_release(str(releases / r2))
+
+    active = ops.reconcile_boot_release()
+
+    # A plain container restart must not roll the service back to the source HEAD.
+    assert os.path.basename(active) == r2
+
+
+def test_reconcile_boot_prunes_superseded_releases_but_keeps_a_rollback(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    revisions = [_commit(source, f"r{i}") for i in range(4)]
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    for index, revision in enumerate(revisions[:-1]):
+        subprocess.run(["git", "-C", str(source), "worktree", "add", "--detach",
+                        str(releases / revision), revision], check=True, capture_output=True)
+        os.utime(releases / revision, (index, index))
+
+    active = ops.reconcile_boot_release()
+
+    remaining = sorted(name for name in os.listdir(releases) if ops._is_revision(name))
+    assert os.path.basename(active) == revisions[-1]
+    # Active plus the newest superseded release survive; the two oldest are gone.
+    assert remaining == sorted([revisions[-1], revisions[-2]])
+    registered = subprocess.run(["git", "-C", str(source), "worktree", "list", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+    assert revisions[0] not in registered
+
+
+def test_git_pull_capability_requires_a_persistent_config_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(tmp_path / "releases"))
+    monkeypatch.setattr(ops, "CONFIG_DIR", "")
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="true\n"))
+
+    result = ops.git_pull_capability()
+
+    assert result["available"] is False
+    assert "ACHORD_REVIEW_CONFIG_DIR" in result["reason"]
+
+
+def test_rebuild_required_flags_removal_of_all_dependency_files(monkeypatch, tmp_path):
+    baked = tmp_path / "baked"
+    checkout = tmp_path / "checkout"
+    (baked / "docker").mkdir(parents=True)
+    (baked / "requirements.txt").write_text("requests==1\n")
+    (baked / "pyproject.toml").write_text("[project]\n")
+    (baked / "docker" / "Dockerfile").write_text("FROM python:3.12\n")
+    checkout.mkdir()  # exists, but every tracked dependency file is gone
+    monkeypatch.setattr(ops, "REPO_DIR", str(checkout))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+
+    # A present-but-empty checkout is a definite change, not inconclusive.
+    assert ops.rebuild_required() is True
+
+
+def test_rebuild_required_detects_a_dockerfile_change(monkeypatch, tmp_path):
+    baked = tmp_path / "baked"
+    checkout = tmp_path / "checkout"
+    for base, dockerfile in ((baked, "FROM python:3.12\n"), (checkout, "FROM python:3.13\n")):
+        (base / "docker").mkdir(parents=True)
+        (base / "requirements.txt").write_text("requests==1\n")
+        (base / "pyproject.toml").write_text("[project]\n")
+        (base / "docker" / "Dockerfile").write_text(dockerfile)
+    monkeypatch.setattr(ops, "REPO_DIR", str(checkout))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+
+    assert ops.rebuild_required() is True
+
+
+def test_check_update_does_not_claim_latest_when_upstream_resolution_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    # Fetch succeeds (e.g. with prune) but the upstream ref is gone afterwards.
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "head"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet", "origin"): (0, ""),
+        ("rev-parse", "--short", "origin/main"): (128, "fatal: no upstream"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is False
+    assert result["update_available"] is False
+    assert "远端" in result["reason"]
+
+
+def test_check_update_reports_divergence_instead_of_a_doomed_update(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    # Upstream advanced (behind=2) while the local branch has its own commit
+    # (ahead=1): --ff-only would fail, so no update must be offered.
+    monkeypatch.setattr(ops, "_git_text", _fake_git_text({
+        ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s"): (0, "local"),
+        ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
+        ("fetch", "--quiet", "origin"): (0, ""),
+        ("rev-parse", "--short", "origin/main"): (0, "bbbbbbb"),
+        ("log", "-1", "--format=%s", "origin/main"): (0, "remote"),
+        ("rev-list", "--count", "HEAD..origin/main"): (0, "2"),
+        ("rev-list", "--count", "origin/main..HEAD"): (0, "1"),
+    }))
+
+    result = ops.check_update()
+
+    assert result["checked"] is True
+    assert result["diverged"] is True
+    assert result["update_available"] is False
+    assert result["ahead"] == 1
+    assert result["behind"] == 2
+
+
+def test_git_pull_capability_explains_the_retired_in_place_mode(monkeypatch, tmp_path):
+    # An upgraded deployment that still only sets REPO_DIR must learn what to add.
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", "")
+
+    result = ops.git_pull_capability()
+
+    assert result["available"] is False
+    assert "Migrating from in-place updates" in result["reason"]
+    assert "ACHORD_REVIEW_RELEASES_DIR" in result["reason"]
+
+
+def test_default_update_ref_resolves_through_the_source_checkout(monkeypatch, tmp_path):
+    remote, source, releases = _staged_repo(tmp_path)
+    r1 = _commit(source, "r1")
+    subprocess.run(["git", "-C", str(source), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(source), "push", "-qu", "origin", "main"], check=True, capture_output=True)
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    monkeypatch.setattr(ops, "UPDATE_REF", "@{u}")
+    # `current` is a detached worktree, where @{u} can never resolve on its own.
+    assert os.path.basename(ops.reconcile_boot_release()) == r1
+    assert subprocess.run(["git", "-C", str(releases / "current"), "rev-parse", "--abbrev-ref", "@{u}"],
+                          capture_output=True).returncode != 0
+
+    assert ops.git_pull_capability()["available"] is True
+    info = ops.check_update()
+
+    assert info["checked"] is True
+    assert info["latest"]["branch"] == "origin/main"
+    assert info["update_available"] is False
+
+
+def test_default_update_ref_without_an_upstream_disables_the_capability(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    _commit(source, "r1")  # a clone of an empty bare remote: no upstream configured
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    monkeypatch.setattr(ops, "UPDATE_REF", "@{u}")
+    ops.reconcile_boot_release()
+
+    result = ops.git_pull_capability()
+
+    assert result["available"] is False
+    assert "ACHORD_REVIEW_UPDATE_REF" in result["reason"]
+
+
+def test_activation_rolls_the_link_back_when_the_marker_cannot_be_removed(monkeypatch, tmp_path):
+    releases, old_release, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+    real_unlink = ops.os.unlink
+
+    def _refuse_marker(path, *args, **kwargs):
+        if path == ops._pending_marker_path():
+            raise PermissionError("read-only releases volume")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(ops.os, "unlink", _refuse_marker)
+
+    with pytest.raises(PermissionError):
+        ops._activate_pending_release()
+
+    # `current` never outruns the process serving it; the marker is still there.
+    assert active.resolve() == old_release.resolve()
+    assert (releases / ".pending-release").read_text().strip() == str(new_release)
+
+
+def test_reconcile_boot_fails_closed_when_first_boot_head_deps_differ(monkeypatch, tmp_path):
+    # Image built from deps "a==1", but the mounted checkout's HEAD needs "b==2":
+    # booting it would run new code against the image's old packages, so on a first
+    # boot (nothing already serving) the launcher must refuse rather than loop.
+    _, source, releases = _staged_repo(tmp_path)
+    _commit_dep(source, "requirements.txt", "b==2\n")
+    baked = tmp_path / "baked"
+    baked.mkdir()
+    (baked / "build-id").write_text("build-1\n")
+    (baked / "requirements.txt").write_text("a==1\n")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+
+    with pytest.raises(OSError):
+        ops.reconcile_boot_release()
+
+    # The build stamp is not consumed, so a corrected rebuild is still detected.
+    assert not (releases / ".image-build-id").exists()
+    assert not (releases / "current").exists()
+
+
+def test_reconcile_boot_keeps_current_when_a_rebuilt_head_is_dep_incompatible(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    a = _commit_dep(source, "requirements.txt", "a==1\n")
+    baked = tmp_path / "baked"
+    baked.mkdir()
+    (baked / "build-id").write_text("build-1\n")
+    (baked / "requirements.txt").write_text("a==1\n")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+    assert os.path.basename(ops.reconcile_boot_release()) == a
+
+    # The checkout advances to a dependency-changing commit and the stamp changes,
+    # but the image's baked deps still match A, not B.
+    b = _commit_dep(source, "requirements.txt", "b==2\n")
+    (baked / "build-id").write_text("build-2\n")
+
+    active = ops.reconcile_boot_release()
+
+    # B is refused; the compatible release A keeps serving; B waits as pending; and
+    # the build-2 stamp is left unconsumed so the corrected rebuild still activates.
+    assert os.path.basename(active) == a
+    assert (releases / "current").resolve() == (releases / a).resolve()
+    assert (releases / ".image-build-id").read_text().strip() == "build-1"
+    assert ops._pending_release() == str((releases / b).resolve())
+
+
+def test_rebuild_required_flags_a_boot_reconciler_change(monkeypatch, tmp_path):
+    # The launcher runs the image's baked reconciler, so a staged change to it must
+    # count as rebuild-required rather than a restart-safe code-only update.
+    baked = tmp_path / "baked"
+    checkout = tmp_path / "checkout"
+    for base, body in ((baked, "reconcile = 'old'\n"), (checkout, "reconcile = 'new'\n")):
+        (base / "pr_agent" / "dashboard").mkdir(parents=True)
+        (base / "pr_agent" / "dashboard" / "ops.py").write_text(body)
+    monkeypatch.setattr(ops, "REPO_DIR", str(checkout))
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(baked))
+
+    assert ops.rebuild_required() is True
+
+
+def test_ensure_release_worktree_recreates_an_incomplete_checkout(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    revision = _commit(source, "r1")
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(source))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+
+    path = ops._ensure_release_worktree(revision)
+    assert ops._release_is_complete(path)
+
+    # Simulate an interruption after registration but before the checkout finished.
+    os.unlink(ops._release_complete_marker(path))
+    os.unlink(os.path.join(path, "value.txt"))
+
+    rebuilt = ops._ensure_release_worktree(revision)
+
+    assert rebuilt == path
+    assert ops._release_is_complete(rebuilt)
+    with open(os.path.join(rebuilt, "value.txt")) as handle:
+        assert handle.read() == "r1\n"
+
+
+def test_discard_release_worktree_prunes_registration_immediately(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "")
+
+    monkeypatch.setattr(ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(ops.shutil, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(ops, "SOURCE_DIR", str(tmp_path / "src"))
+
+    ops._discard_release_worktree(str(tmp_path / "src" / "releases" / ("d" * 40)))
+
+    prune = next(c for c in calls if "prune" in c)
+    assert prune[-2:] == ["--expire", "now"]
+
+
+def test_git_pull_rebuilds_a_release_missing_its_completion_marker(monkeypatch, tmp_path):
+    remote, source, releases = _staged_repo(tmp_path)
+    _commit(source, "old")
+    subprocess.run(["git", "-C", str(source), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(source), "push", "-qu", "origin", "main"], check=True, capture_output=True)
+    writer = tmp_path / "writer"
+    subprocess.run(["git", "clone", str(remote), str(writer)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(writer), "config", "user.email", "t@e"], check=True)
+    subprocess.run(["git", "-C", str(writer), "config", "user.name", "T"], check=True)
+    # The bare remote's default branch may be `master`, so check out `main` explicitly
+    # before committing rather than trusting the clone's checked-out branch.
+    subprocess.run(["git", "-C", str(writer), "checkout", "main"], check=True, capture_output=True)
+    (writer / "value.txt").write_text("new\n")
+    subprocess.run(["git", "-C", str(writer), "commit", "-qam", "new"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(writer), "push", "-q"], check=True, capture_output=True)
+    (releases / "current").symlink_to(source)
+    monkeypatch.setattr(ops, "REPO_DIR", str(releases / "current"))
+    monkeypatch.setattr(ops, "RELEASES_DIR", str(releases))
+    monkeypatch.setattr(ops, "UPDATE_REF", "origin/main")
+    monkeypatch.setattr(ops, "DEPS_BAKED_DIR", str(source))
+
+    first = ops.git_pull()
+    release_path = str(releases / first["release"])
+    assert ops._release_is_complete(release_path)
+
+    # An interrupted retry left the directory registered but incomplete.
+    os.unlink(ops._release_complete_marker(release_path))
+    os.unlink(os.path.join(release_path, "value.txt"))
+
+    second = ops.git_pull()
+
+    assert second["release"] == first["release"]
+    assert ops._release_is_complete(release_path)
+    with open(os.path.join(release_path, "value.txt")) as handle:
+        assert handle.read() == "new\n"
+
+
+def test_check_update_fetches_the_comparison_refs_own_remote(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "UPDATE_REF", "upstream/main")
+    fetched = []
+
+    def _git(args, timeout):
+        if args[:1] == ["fetch"]:
+            fetched.append(args)
+            return (0, "")
+        return {
+            ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+            ("log", "-1", "--format=%s"): (0, "head"),
+            ("rev-parse", "--short", "upstream/main"): (0, "bbbbbbb"),
+            ("log", "-1", "--format=%s", "upstream/main"): (0, "remote"),
+            ("rev-list", "--count", "HEAD..upstream/main"): (0, "1"),
+            ("rev-list", "--count", "upstream/main..HEAD"): (0, "0"),
+        }[tuple(args)]
+
+    monkeypatch.setattr(ops, "_git_text", _git)
+
+    result = ops.check_update()
+
+    # The multi-remote checkout must fetch `upstream`, not Git's default `origin`.
+    assert fetched == [["fetch", "--quiet", "upstream"]]
+    assert result["update_available"] is True
+
+
+def test_extract_container_ids_prefers_the_container_path_over_overlay_layers():
+    layer = "a" * 64
+    container = "b" * 64
+    blob = (
+        f"41 30 0:35 / /var/lib/docker/overlay2/{layer}/merged rw shared\n"
+        f"52 41 0:36 /{container}/hostname /etc/hostname rw,relatime\n"
+        f"53 41 0:36 / /var/lib/docker/containers/{container}/mounts rw\n")
+
+    assert ops._extract_container_ids(blob) == {container}
+
+
+def test_extract_container_ids_falls_back_to_any_hash_without_a_container_path():
+    only = "c" * 64
+    assert ops._extract_container_ids(f"anon path with {only} inside") == {only}
+
+
+def test_docker_target_is_self_matches_the_real_id_past_overlay_noise(monkeypatch):
+    container = "b" * 64
+    monkeypatch.setattr(
+        ops.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=container + "\n"))
+    # A layer hash sorts first, but the real container id is also a candidate.
+    monkeypatch.setattr(ops, "_own_container_ids", lambda: {"a" * 64, container})
+
+    assert ops._docker_target_is_self() is True
+
+
+def test_switch_active_release_recovers_from_a_stale_temporary_link(monkeypatch, tmp_path):
+    releases = tmp_path / "releases"
+    old_release = releases / "old"
+    new_release = releases / "new"
+    old_release.mkdir(parents=True)
+    new_release.mkdir()
+    active = releases / "current"
+    active.symlink_to(old_release)
+    monkeypatch.setattr(ops, "REPO_DIR", str(active))
+    # A crash on a previous boot with this PID left a temporary link behind.
+    stale = f"{active}.{os.getpid()}.tmp"
+    os.symlink(old_release, stale)
+
+    previous = ops._switch_active_release(str(new_release))
+
+    assert active.resolve() == new_release.resolve()
+    assert os.path.realpath(previous) == str(old_release)
+    assert not os.path.lexists(stale)

@@ -625,6 +625,8 @@ class TestProtectedRoutes:
             dashboard_api.ops, "restart_capability",
             lambda: {"available": False, "reason": "host restarted"})
 
+        monkeypatch.setattr(dashboard_api.ops, "rebuild_required", lambda: True)
+
         resp = client.get(
             "/api/v1/dashboard/ops/capabilities", headers=_auth_header(client))
 
@@ -633,6 +635,26 @@ class TestProtectedRoutes:
             "available": False, "reason": "host managed"}
         assert resp.json()["data"]["restart"] == {
             "available": False, "reason": "host restarted"}
+        # Server-authoritative so the panel can restore the blocked-restart state.
+        assert resp.json()["data"]["rebuild_required"] is True
+
+    def test_ops_check_update_is_reachable_and_returns_the_probe(self, client, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_api.ops, "check_update",
+            lambda: {"version": "1.0.0", "available": True, "reason": "ready",
+                     "checked": True, "current": {"sha": "aaaaaaa", "subject": "old"},
+                     "latest": {"sha": "bbbbbbb", "subject": "new", "branch": "origin/main"},
+                     "behind": 2, "update_available": True})
+
+        resp = client.get(
+            "/api/v1/dashboard/ops/check-update", headers=_auth_header(client))
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["update_available"] is True
+        assert resp.json()["data"]["behind"] == 2
+
+    def test_ops_check_update_requires_auth(self, client):
+        assert client.get("/api/v1/dashboard/ops/check-update").status_code == 401
 
     def test_config_save_without_restart_reports_not_restarted(self, client):
         auth = _auth_header(client)

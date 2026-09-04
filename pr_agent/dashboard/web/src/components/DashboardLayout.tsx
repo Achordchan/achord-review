@@ -1,12 +1,16 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import {
   Activity, Beaker, FlaskConical, GitPullRequestArrow, LayoutDashboard,
   LogOut, Settings, ShieldCheck, TerminalSquare, X,
 } from 'lucide-react'
 import { useAuth } from '../lib/auth'
+import { api } from '../lib/api'
+import type { VersionInfo } from '../lib/types'
 import { ComingSoonBadge } from './badges'
+import { VersionBadge, VersionCenter } from './VersionCenter'
 import { useToast } from './Toast'
 
 type NavItem = {
@@ -89,6 +93,15 @@ export default function DashboardLayout() {
   const toast = useToast()
   const [pendingItem, setPendingItem] = useState<NavItem | null>(null)
   const [logoutPending, setLogoutPending] = useState(false)
+  const [versionOpen, setVersionOpen] = useState(false)
+  // Read-only view of the update-check cache: lights up the "有更新" dot once
+  // the user has opened the panel; never triggers a git fetch on its own.
+  const cachedUpdate = useQuery({
+    queryKey: ['ops-check-update'],
+    queryFn: () => api.get<VersionInfo>('/api/v1/dashboard/ops/check-update'),
+    enabled: false,
+  })
+  const updateAvailable = cachedUpdate.data?.update_available === true
 
   const handleNavClick = (item: NavItem) => {
     if (item.phase) {
@@ -120,7 +133,12 @@ export default function DashboardLayout() {
           </span>
           <div>
             <p className="text-sm font-semibold leading-tight text-text">achord-review</p>
-            <p className="text-[11px] leading-tight text-muted">控制面板 v{version}</p>
+            <button
+              onClick={() => setVersionOpen(true)}
+              className="text-left text-[11px] leading-tight text-muted transition-colors hover:text-accent"
+            >
+              控制面板 v{version} · 检查更新
+            </button>
           </div>
         </div>
         <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-2">
@@ -175,12 +193,19 @@ export default function DashboardLayout() {
             <span className="h-2 w-2 rounded-full bg-good" />
             服务运行中
           </div>
-          {model && (
-            <span className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-xs text-muted">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              {model.replace(/^openai\//, '')}
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {model && (
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-xs text-muted">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                {model.replace(/^openai\//, '')}
+              </span>
+            )}
+            <VersionBadge
+              version={version}
+              updateAvailable={updateAvailable}
+              onClick={() => setVersionOpen(true)}
+            />
+          </div>
         </header>
         <main className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto max-w-6xl animate-fade-in p-6">
@@ -190,6 +215,7 @@ export default function DashboardLayout() {
       </div>
 
       {pendingItem && <ComingSoonCard item={pendingItem} onClose={() => setPendingItem(null)} />}
+      {versionOpen && <VersionCenter onClose={() => setVersionOpen(false)} version={version} />}
     </div>
   )
 }

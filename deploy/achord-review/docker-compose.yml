@@ -19,12 +19,34 @@ services:
     image: achord-review:latest
     container_name: achord-review
     restart: unless-stopped
+    # In-panel updates (opt-in): start through the release launcher. It creates
+    # a detached initial worktree and runs from the stable `current` symlink.
+    # Updates are staged in another worktree and the symlink changes atomically
+    # only when the restart is initiated, so live Python/static files are never
+    # modified in place. A host rebuild always wins: the launcher detects the new
+    # image and runs the rebuilt source HEAD, discarding any older staged release,
+    # then prunes superseded worktrees. Uncomment together with the mounts/env below.
+    #command: ["/bin/sh", "/app/source/deploy/achord-review/run-staged-release.sh"]
+    # The panel runs `git fetch`/`worktree add` as the container user. As root (the
+    # default) fetched objects become root-owned in the mounted checkout — fine when
+    # that checkout is root-managed (the shipped /opt/achord-review is). If a non-root
+    # host user owns it, map the container to that user's UID:GID so host-side git
+    # stays writable:
+    #user: "1000:1000"
     ports:
       - "127.0.0.1:33001:3000"
     volumes:
       - ./config:/app/pr_agent/settings_prod
       # Dashboard SQLite database (review history, audit logs); survives restarts.
       - ./data:/app/data
+      # --- In-panel code updates (opt-in) -------------------------------------
+      # The source checkout supplies Git metadata but is never pulled in place.
+      # Prepared worktrees live in a separate persistent release directory.
+      #- ../..:/app/source
+      #- ./releases:/app/releases
+      # Releases use this stable config path instead of a checkout-relative mount.
+      # Required for staged updates: without it the panel refuses to stage.
+      #- ./config:/app/config
     environment:
       # Keep at least two workers (the gunicorn default) so a slow provider call
       # cannot stall health checks and unrelated webhooks. Dashboard sessions
@@ -37,9 +59,15 @@ services:
       # Exact public browser origin used by the CSRF fallback when Fetch
       # Metadata headers are unavailable. Scheme and effective port matter.
       DASHBOARD_EXTERNAL_ORIGIN: "https://review.achord.cn"
-      # Intentionally omit ACHORD_REVIEW_REPO_DIR: this image is not a checkout.
-      # Code releases are performed by the host deployment workflow. A custom
-      # deployment may opt in only with a deliberately mounted writable checkout.
+      # In-panel updates (opt-in) — uncomment with command and mounts above.
+      #ACHORD_REVIEW_SOURCE_DIR: "/app/source"
+      #ACHORD_REVIEW_RELEASES_DIR: "/app/releases"
+      #ACHORD_REVIEW_REPO_DIR: "/app/releases/current"
+      #ACHORD_REVIEW_UPDATE_REF: "origin/main"
+      #ACHORD_REVIEW_SELF_RESTART: "1"
+      #ACHORD_REVIEW_CONFIG_DIR: "/app/config"
+      # Left commented by default: releases stay host-managed
+      # (git pull --ff-only + docker compose up -d --build).
     mem_limit: 900m
     logging:
       driver: json-file

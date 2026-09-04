@@ -5,12 +5,31 @@ RUN apt update && apt install --no-install-recommends -y git curl && apt-get cle
 WORKDIR /app
 ADD pyproject.toml .
 ADD requirements.txt .
+# Bake the Dockerfile into the fingerprint dir too, at the same relative path the
+# checkout uses (docker/Dockerfile), so a base-image/system-package change is
+# detected as needing a rebuild.
+ADD docker/Dockerfile /app/.deps-baked/docker/Dockerfile
+ADD deploy/achord-review/docker-compose.yml /app/.deps-baked/deploy/achord-review/docker-compose.yml
+ADD deploy/achord-review/run-staged-release.sh /app/.deps-baked/deploy/achord-review/run-staged-release.sh
+# Bake the boot reconciler too: it runs from the image, so its fingerprint must
+# be part of the rebuild-required check (a staged change to it needs a rebuild).
+ADD pr_agent/dashboard/ops.py /app/.deps-baked/pr_agent/dashboard/ops.py
 ADD docs docs
-RUN pip install --no-cache-dir . && rm pyproject.toml requirements.txt
+# Keep a copy of the dependency-/build-defining files the image was built from, so
+# the dashboard can compare them against a mounted checkout and refuse an in-place
+# restart when a pulled update needs packages or a base image this image lacks.
+RUN pip install --no-cache-dir . \
+    && cp pyproject.toml requirements.txt /app/.deps-baked/ \
+    && rm pyproject.toml requirements.txt
 ENV PYTHONPATH=/app
 
 FROM base AS github_app
 ADD pr_agent pr_agent
+# Per-build stamp for the release launcher: a stamp it has not seen means the
+# image was rebuilt, so the rebuilt source checkout - not an older staged
+# release - is what must run. Placed after the code so a cached, identical
+# build keeps its stamp.
+RUN python -c "import uuid; print(uuid.uuid4())" > /app/.deps-baked/build-id
 CMD ["python", "-m", "gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-c", "pr_agent/servers/gunicorn_config.py", "--forwarded-allow-ips", "*", "pr_agent.servers.github_app:app"]
 
 FROM base AS bitbucket_app

@@ -84,10 +84,29 @@ export type OpsResult = {
   completed: boolean
   exit_code: number | null
   output: string[]
+  dependencies_changed?: boolean
+  mode?: string
 }
 export type OpsCapabilities = {
   git_pull: { available: boolean; reason: string }
-  restart: { available: boolean; reason: string }
+  restart: { available: boolean; reason: string; mode?: string }
+  rebuild_required: boolean
+}
+export type VersionCommit = { sha: string | null; subject: string | null }
+export type VersionInfo = {
+  version: string
+  available: boolean
+  reason: string
+  checked: boolean
+  current: VersionCommit | null
+  latest: (VersionCommit & { branch: string }) | null
+  behind: number | null
+  ahead: number | null
+  diverged: boolean
+  update_available: boolean
+  /** A staged release waiting for restart; `staged` when it already is the latest. */
+  pending: (VersionCommit & { rebuild_required: boolean }) | null
+  staged: boolean
 }
 export type DiagnoseResult = {
   ok: boolean

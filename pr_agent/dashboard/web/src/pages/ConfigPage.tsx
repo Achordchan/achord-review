@@ -7,6 +7,7 @@ import { Card, CardHeader, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/Dialogs'
 import { useToast } from '../components/Toast'
 import { useAuth } from '../lib/auth'
+import { waitForServiceThenReload } from '../lib/restart'
 
 const SEVERITIES = ['P0', 'P1', 'P2', 'P3'] as const
 
@@ -95,6 +96,9 @@ export default function ConfigPage() {
       setConfirmRestart(false)
       if (body.restarted) {
         window.setTimeout(() => window.location.reload(), 30_000)
+      } else if (body.restart_started) {
+        queryClient.cancelQueries()
+        void waitForServiceThenReload()
       } else {
         await queryClient.invalidateQueries({ queryKey: ['config'] })
         await refreshAuth()

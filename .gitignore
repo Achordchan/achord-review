@@ -23,6 +23,7 @@ deploy/achord-review/config.toml
 deploy/achord-review/config.toml.bak*
 deploy/achord-review/config/
 deploy/achord-review/data/
+deploy/achord-review/releases/
 
 # private project dossier (plaintext credentials, never commit)
 ACHORD-PRIVATE-*.md
