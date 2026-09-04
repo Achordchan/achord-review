@@ -762,8 +762,11 @@ class DashboardStorage:
         self.reconcile_stale_reviews()
         where, params = [], []
         if repo:
-            where.append("repo_name = ?")
-            params.append(repo)
+            # Substring, case-insensitive: the UI filter is a search box, not an
+            # exact-name selector. Escape LIKE wildcards in the user's term.
+            escaped = repo.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where.append("repo_name LIKE ? ESCAPE '\\'")
+            params.append(f"%{escaped}%")
         if status:
             where.append("status = ?")
             params.append(status)

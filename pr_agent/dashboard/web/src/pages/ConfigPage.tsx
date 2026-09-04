@@ -173,7 +173,7 @@ export default function ConfigPage() {
         <Card>
           <CardHeader title="模型" description="审查引擎使用的 LLM 与推理参数" />
           <div className="space-y-4 p-5">
-            <Field label="模型" hint="如 openai/gpt-5.6-sol">
+            <Field label="模型" hint="前缀 openai/ 表示按 OpenAI 兼容协议路由到下方中继端点（LiteLLM 约定，非流式开关），如 openai/gpt-5.6-sol">
               <input className={inputClass} value={values.model ?? ''} onChange={(e) => set('model', e.target.value)} />
             </Field>
             <Field label="推理强度" hint="支持 none / minimal / low / medium / high / xhigh / max">

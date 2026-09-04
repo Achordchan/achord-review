@@ -222,7 +222,7 @@ export default function DashboardLayout() {
           </div>
         </header>
         <main className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-6xl animate-fade-in p-6">
+          <div className="mx-auto max-w-[1600px] animate-fade-in p-6">
             <Outlet />
           </div>
         </main>

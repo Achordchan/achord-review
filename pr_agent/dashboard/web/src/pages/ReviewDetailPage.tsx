@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react'
+import { prHtmlUrl, repoHtmlUrl } from '../lib/github'
 import { api } from '../lib/api'
 import type { ReviewDetail } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
@@ -90,7 +91,7 @@ export default function ReviewDetailPage() {
           </h1>
         </div>
         <a
-          href={data.pr_url}
+          href={prHtmlUrl(data.repo_name, data.pr_number)}
           target="_blank"
           rel="noreferrer"
           className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs text-muted transition-colors hover:bg-surface-2 hover:text-text"
@@ -107,7 +108,7 @@ export default function ReviewDetailPage() {
           <span className="rounded-md bg-surface-3 px-1.5 py-0.5 text-xs text-muted">{data.command}</span>
         </div>
         <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-4">
-          <MetaItem label="仓库">{data.repo_name}</MetaItem>
+          <MetaItem label="仓库"><a href={repoHtmlUrl(data.repo_name)} target="_blank" rel="noreferrer" className="hover:text-accent">{data.repo_name}</a></MetaItem>
           <MetaItem label="PR 编号">#{data.pr_number}</MetaItem>
           <MetaItem label="Commit">{shortSha(data.commit_sha)}</MetaItem>
           <MetaItem label="触发者">{data.sender || '—'}</MetaItem>
