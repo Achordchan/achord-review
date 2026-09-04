@@ -106,11 +106,15 @@ export function VersionCenter({ onClose, version }: {
 
   return (
     <>
-      {/* click-catcher: dismiss on outside click, but no dimming — this is a
-          lightweight dropdown card, not a modal. Frozen during a restart. */}
-      {phase !== 'restarting' && (
-        <div className="fixed inset-0 z-40" onClick={onClose} aria-hidden="true" />
-      )}
+      {/* Click-catcher: dismiss on outside click, but no dimming — this is a
+          lightweight dropdown card, not a modal. Always mounted so the trigger
+          underneath cannot be clicked; during a restart it blocks interaction
+          without dismissing, keeping the service-recovery polling effect alive. */}
+      <div
+        className="fixed inset-0 z-40"
+        onClick={phase === 'restarting' ? undefined : onClose}
+        aria-hidden="true"
+      />
       <div
         role="dialog"
         aria-label="版本与更新"
@@ -141,18 +145,32 @@ export function VersionCenter({ onClose, version }: {
               </button>
             </div>
 
-            {!featureEnabled ? (
+            {updateQuery.isLoading ? (
+              <div className="mt-4 flex items-center gap-2 rounded-lg border border-line bg-surface-2/50 px-4 py-4 text-sm text-muted">
+                <LoaderCircle size={15} className="animate-spin" /> 正在检查更新…
+              </div>
+            ) : updateQuery.isError ? (
+              <div className="mt-4 rounded-lg border border-line bg-surface-2/50 px-4 py-3">
+                <p className="text-xs leading-relaxed text-warn">
+                  无法检查更新{updateQuery.error instanceof ApiError ? `：${updateQuery.error.message}` : ''}
+                </p>
+                <button
+                  onClick={() => void updateQuery.refetch()}
+                  disabled={updateQuery.isFetching}
+                  className="mt-2 flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface-2 hover:text-text disabled:opacity-50"
+                >
+                  <RefreshCw size={13} className={updateQuery.isFetching ? 'animate-spin' : ''} />
+                  重试
+                </button>
+              </div>
+            ) : !featureEnabled ? (
               <p className="mt-4 rounded-lg border border-line bg-surface-2/50 px-4 py-3 text-xs leading-relaxed text-muted">
                 {info?.reason ?? '更新由宿主机发布流程管理，面板内更新未启用。'}
               </p>
             ) : (
               <>
                 <div className="mt-4 rounded-lg border border-line bg-surface-2/50 px-4 py-1.5">
-                  {updateQuery.isLoading ? (
-                    <div className="flex items-center gap-2 py-4 text-sm text-muted">
-                      <LoaderCircle size={15} className="animate-spin" /> 正在检查更新…
-                    </div>
-                  ) : info?.checked ? (
+                  {info?.checked ? (
                     <>
                       <CommitLine label="当前版本" sha={info.current?.sha} subject={info.current?.subject} />
                       <div className="border-t border-line/60" />
