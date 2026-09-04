@@ -11,9 +11,11 @@ front end can wire them up before the backing features ship.
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
+import socket
 import threading
 import time
 from contextlib import contextmanager
@@ -534,6 +536,42 @@ class UpstreamModelsRequest(BaseModel):
     key: str = ""
 
 
+def _ip_is_disallowed(ip: str) -> bool:
+    """Reject anything not a globally-routable unicast address: loopback,
+    private, link-local (incl. 169.254.169.254 metadata), reserved, multicast."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_reserved or addr.is_multicast or addr.is_unspecified
+            or not addr.is_global)
+
+
+async def _egress_error(url: str) -> Optional[str]:
+    """Egress policy for the operator-supplied relay: http(s) only, and every
+    resolved address must be a public unicast host. Blocks SSRF to loopback,
+    private ranges, and cloud metadata even from an authenticated admin session."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        return "仅支持 http(s) 中继端点"
+    host = parts.hostname
+    if not host:
+        return "无效的中继地址"
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        infos = await asyncio.get_event_loop().getaddrinfo(
+            host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return f"无法解析中继主机：{host}"
+    if not infos:
+        return f"无法解析中继主机：{host}"
+    for info in infos:
+        if _ip_is_disallowed(info[4][0]):
+            return f"中继主机解析到非公网地址（{info[4][0]}），已拒绝"
+    return None
+
+
 def _upstream_model_urls(api_base: str) -> list:
     """Candidate model-listing endpoints for an OpenAI-compatible relay.
 
@@ -582,10 +620,22 @@ async def get_upstream_models(body: UpstreamModelsRequest, request: Request,
     they already set for reviews."""
     await require_auth(request, dashboard_session)
     require_same_origin(request)
-    api_base = (body.api_base or "").strip() or str(get_settings().get("openai.api_base", "") or "").strip()
-    api_key = (body.key or "").strip() or str(get_settings().get("openai.key", "") or "").strip()
+    persisted_base = str(get_settings().get("openai.api_base", "") or "").strip()
+    persisted_key = str(get_settings().get("openai.key", "") or "").strip()
+    req_base = (body.api_base or "").strip()
+    req_key = (body.key or "").strip()
+    # The persisted key is only ever sent to the persisted base. If the form points
+    # at a different base, authenticate solely with a freshly-supplied key (or none)
+    # so switching to a keyless/untrusted relay cannot leak the stored credential.
+    if req_base and req_base != persisted_base:
+        api_base, api_key = req_base, req_key
+    else:
+        api_base, api_key = (req_base or persisted_base), (req_key or persisted_key)
     if not api_base:
         raise HTTPException(status_code=400, detail="未配置中继 API Base，无法获取上游模型")
+    egress_error = await _egress_error(api_base)
+    if egress_error:
+        raise HTTPException(status_code=400, detail=egress_error)
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -595,7 +645,9 @@ async def get_upstream_models(body: UpstreamModelsRequest, request: Request,
     async def _fetch() -> list:
         nonlocal last_error
         timeout = httpx.Timeout(_UPSTREAM_PER_REQUEST_TIMEOUT_SECONDS)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        # No redirect-following: a 3xx could bounce a validated public host to a
+        # private/metadata one, side-stepping the egress check above.
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             for url in _upstream_model_urls(api_base):
                 try:
                     async with client.stream("GET", url, headers=headers) as resp:
