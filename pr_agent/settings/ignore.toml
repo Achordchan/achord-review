@@ -4,6 +4,33 @@ glob = [
     # Ignore files and directories matching these glob patterns.
     # See https://docs.python.org/3/library/glob.html
     'vendor/**',
+    # Vendored / installed dependencies — never authored in the PR.
+    '**/node_modules/**',
+    # Build output and compiled bundles (e.g. this panel's own static assets),
+    # which otherwise burn review budget as unreadable minified diffs.
+    '**/dist/**',
+    '**/build/**',
+    'pr_agent/dashboard/static/**',
+    '**/*.min.js',
+    '**/*.min.css',
+    '**/*.map',
+    # Dependency lockfiles — machine-generated, reviewing them adds no signal.
+    '**/package-lock.json',
+    '**/pnpm-lock.yaml',
+    '**/yarn.lock',
+    '**/poetry.lock',
+    '**/Cargo.lock',
+    '**/composer.lock',
+    '**/Gemfile.lock',
+    # Binary assets the model cannot meaningfully review.
+    '**/*.png',
+    '**/*.jpg',
+    '**/*.jpeg',
+    '**/*.gif',
+    '**/*.ico',
+    '**/*.pdf',
+    '**/*.woff',
+    '**/*.woff2',
 ]
 regex = [
     # Ignore files and directories matching these regex patterns.
