@@ -3,26 +3,15 @@
 glob = [
     # Ignore files and directories matching these glob patterns.
     # See https://docs.python.org/3/library/glob.html
+    # Deliberately conservative: deployed/executed build output (compiled bundles,
+    # dist/, *.min.js) and dependency lockfiles are NOT ignored here — code or a
+    # supply-chain change hidden only in a committed artifact must still reach
+    # review. Only vendored dependencies and non-executable binary assets, which
+    # the model cannot meaningfully read anyway, are excluded.
     'vendor/**',
-    # Vendored / installed dependencies — never authored in the PR.
     '**/node_modules/**',
-    # Build output and compiled bundles (e.g. this panel's own static assets),
-    # which otherwise burn review budget as unreadable minified diffs.
-    '**/dist/**',
-    '**/build/**',
-    'pr_agent/dashboard/static/**',
-    '**/*.min.js',
-    '**/*.min.css',
-    '**/*.map',
-    # Dependency lockfiles — machine-generated, reviewing them adds no signal.
-    '**/package-lock.json',
-    '**/pnpm-lock.yaml',
-    '**/yarn.lock',
-    '**/poetry.lock',
-    '**/Cargo.lock',
-    '**/composer.lock',
-    '**/Gemfile.lock',
-    # Binary assets the model cannot meaningfully review.
+    # Binary assets the model cannot review (raster images, fonts, PDFs) — not
+    # executable source, so ignoring them hides no reviewable behavior.
     '**/*.png',
     '**/*.jpg',
     '**/*.jpeg',
