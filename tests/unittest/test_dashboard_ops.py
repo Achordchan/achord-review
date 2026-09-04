@@ -605,7 +605,7 @@ def test_check_update_flags_an_available_update(monkeypatch, tmp_path):
         ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
         ("log", "-1", "--format=%s"): (0, "old commit"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
-        ("fetch", "--quiet"): (0, ""),
+        ("fetch", "--quiet", "origin"): (0, ""),
         ("rev-parse", "--short", "origin/main"): (0, "bbbbbbb"),
         ("log", "-1", "--format=%s", "origin/main"): (0, "new commit"),
         ("rev-list", "--count", "HEAD..origin/main"): (0, "3"),
@@ -630,7 +630,7 @@ def test_check_update_reports_up_to_date(monkeypatch, tmp_path):
         ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
         ("log", "-1", "--format=%s"): (0, "head"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
-        ("fetch", "--quiet"): (0, ""),
+        ("fetch", "--quiet", "origin"): (0, ""),
         ("rev-parse", "--short", "origin/main"): (0, "aaaaaaa"),
         ("log", "-1", "--format=%s", "origin/main"): (0, "head"),
         ("rev-list", "--count", "HEAD..origin/main"): (0, "0"),
@@ -665,7 +665,7 @@ def test_check_update_surfaces_fetch_failure(monkeypatch, tmp_path):
         ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
         ("log", "-1", "--format=%s"): (0, "head"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
-        ("fetch", "--quiet"): (1, "fatal: could not read from remote"),
+        ("fetch", "--quiet", "origin"): (1, "fatal: could not read from remote"),
     }))
 
     result = ops.check_update()
@@ -1157,7 +1157,7 @@ def test_check_update_does_not_claim_latest_when_upstream_resolution_fails(monke
         ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
         ("log", "-1", "--format=%s"): (0, "head"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
-        ("fetch", "--quiet"): (0, ""),
+        ("fetch", "--quiet", "origin"): (0, ""),
         ("rev-parse", "--short", "origin/main"): (128, "fatal: no upstream"),
     }))
 
@@ -1178,7 +1178,7 @@ def test_check_update_reports_divergence_instead_of_a_doomed_update(monkeypatch,
         ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
         ("log", "-1", "--format=%s"): (0, "local"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
-        ("fetch", "--quiet"): (0, ""),
+        ("fetch", "--quiet", "origin"): (0, ""),
         ("rev-parse", "--short", "origin/main"): (0, "bbbbbbb"),
         ("log", "-1", "--format=%s", "origin/main"): (0, "remote"),
         ("rev-list", "--count", "HEAD..origin/main"): (0, "2"),
@@ -1341,7 +1341,8 @@ def test_ensure_release_worktree_recreates_an_incomplete_checkout(monkeypatch, t
 
     assert rebuilt == path
     assert ops._release_is_complete(rebuilt)
-    assert open(os.path.join(rebuilt, "value.txt")).read() == "r1\n"
+    with open(os.path.join(rebuilt, "value.txt")) as handle:
+        assert handle.read() == "r1\n"
 
 
 def test_discard_release_worktree_prunes_registration_immediately(monkeypatch, tmp_path):
@@ -1391,4 +1392,34 @@ def test_git_pull_rebuilds_a_release_missing_its_completion_marker(monkeypatch, 
 
     assert second["release"] == first["release"]
     assert ops._release_is_complete(release_path)
-    assert open(os.path.join(release_path, "value.txt")).read() == "new\n"
+    with open(os.path.join(release_path, "value.txt")) as handle:
+        assert handle.read() == "new\n"
+
+
+def test_check_update_fetches_the_comparison_refs_own_remote(monkeypatch, tmp_path):
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        ops, "git_pull_capability", lambda: {"available": True, "reason": "ready"})
+    monkeypatch.setattr(ops, "UPDATE_REF", "upstream/main")
+    fetched = []
+
+    def _git(args, timeout):
+        if args[:1] == ["fetch"]:
+            fetched.append(args)
+            return (0, "")
+        return {
+            ("rev-parse", "--short", "HEAD"): (0, "aaaaaaa"),
+            ("log", "-1", "--format=%s"): (0, "head"),
+            ("rev-parse", "--short", "upstream/main"): (0, "bbbbbbb"),
+            ("log", "-1", "--format=%s", "upstream/main"): (0, "remote"),
+            ("rev-list", "--count", "HEAD..upstream/main"): (0, "1"),
+            ("rev-list", "--count", "upstream/main..HEAD"): (0, "0"),
+        }[tuple(args)]
+
+    monkeypatch.setattr(ops, "_git_text", _git)
+
+    result = ops.check_update()
+
+    # The multi-remote checkout must fetch `upstream`, not Git's default `origin`.
+    assert fetched == [["fetch", "--quiet", "upstream"]]
+    assert result["update_available"] is True

@@ -423,6 +423,22 @@ def _resolve_update_ref() -> tuple[Optional[str], str]:
     return resolved, ""
 
 
+def _remote_of_ref(ref: str) -> Optional[str]:
+    """The remote a `<remote>/<branch>` tracking ref names, or None if it has none."""
+    return ref.split("/", 1)[0] if ref and "/" in ref else None
+
+
+def _fetch_args_for(ref: str) -> List[str]:
+    """Fetch exactly the remote backing the comparison ref, not Git's default one.
+
+    In a checkout with several remotes, a bare `git fetch` updates `origin` while
+    the comparison may use e.g. `upstream/main`, leaving that ref stale. Naming the
+    ref's own remote keeps the fetched objects and the comparison in agreement.
+    """
+    remote = _remote_of_ref(ref)
+    return ["fetch", "--quiet", remote] if remote else ["fetch", "--quiet"]
+
+
 def _pending_marker_path() -> str:
     return os.path.join(RELEASES_DIR, ".pending-release")
 
@@ -771,12 +787,12 @@ def git_pull() -> Dict[str, Any]:
             return _not_started("另一项运维操作正在执行，git pull 未发起")
         try:
             os.makedirs(RELEASES_DIR, mode=0o700, exist_ok=True)
-            fetch_rc, fetch_out = _git_text(["fetch", "--quiet"], GIT_FETCH_TIMEOUT_SECONDS)
-            if fetch_rc != 0:
-                return _not_started(("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300])
             update_ref, unresolved = _resolve_update_ref()
             if update_ref is None:
                 return _not_started(unresolved)
+            fetch_rc, fetch_out = _git_text(_fetch_args_for(update_ref), GIT_FETCH_TIMEOUT_SECONDS)
+            if fetch_rc != 0:
+                return _not_started(("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300])
             revision_rc, revision = _git_text(["rev-parse", update_ref], GIT_PREFLIGHT_TIMEOUT_SECONDS)
             if revision_rc != 0 or not _is_revision(revision):
                 return _not_started("无法解析待发布的远端版本")
@@ -888,7 +904,7 @@ def check_update() -> Dict[str, Any]:
                 result["reason"] = unresolved
                 return result
             upstream = comparison_ref
-            fetch_rc, fetch_out = _git_text(["fetch", "--quiet"], GIT_FETCH_TIMEOUT_SECONDS)
+            fetch_rc, fetch_out = _git_text(_fetch_args_for(comparison_ref), GIT_FETCH_TIMEOUT_SECONDS)
             if fetch_rc != 0:
                 result["reason"] = ("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300]
                 return result
