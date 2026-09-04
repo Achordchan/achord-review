@@ -605,10 +605,10 @@ def test_check_update_flags_an_available_update(monkeypatch, tmp_path):
         ("log", "-1", "--format=%s"): (0, "old commit"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
         ("fetch", "--quiet"): (0, ""),
-        ("rev-parse", "--short", "@{u}"): (0, "bbbbbbb"),
-        ("log", "-1", "--format=%s", "@{u}"): (0, "new commit"),
-        ("rev-list", "--count", "HEAD..@{u}"): (0, "3"),
-        ("rev-list", "--count", "@{u}..HEAD"): (0, "0"),
+        ("rev-parse", "--short", "origin/main"): (0, "bbbbbbb"),
+        ("log", "-1", "--format=%s", "origin/main"): (0, "new commit"),
+        ("rev-list", "--count", "HEAD..origin/main"): (0, "3"),
+        ("rev-list", "--count", "origin/main..HEAD"): (0, "0"),
     }))
 
     result = ops.check_update()
@@ -630,10 +630,10 @@ def test_check_update_reports_up_to_date(monkeypatch, tmp_path):
         ("log", "-1", "--format=%s"): (0, "head"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
         ("fetch", "--quiet"): (0, ""),
-        ("rev-parse", "--short", "@{u}"): (0, "aaaaaaa"),
-        ("log", "-1", "--format=%s", "@{u}"): (0, "head"),
-        ("rev-list", "--count", "HEAD..@{u}"): (0, "0"),
-        ("rev-list", "--count", "@{u}..HEAD"): (0, "0"),
+        ("rev-parse", "--short", "origin/main"): (0, "aaaaaaa"),
+        ("log", "-1", "--format=%s", "origin/main"): (0, "head"),
+        ("rev-list", "--count", "HEAD..origin/main"): (0, "0"),
+        ("rev-list", "--count", "origin/main..HEAD"): (0, "0"),
     }))
 
     result = ops.check_update()
@@ -1117,7 +1117,7 @@ def test_check_update_does_not_claim_latest_when_upstream_resolution_fails(monke
         ("log", "-1", "--format=%s"): (0, "head"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
         ("fetch", "--quiet"): (0, ""),
-        ("rev-parse", "--short", "@{u}"): (128, "fatal: no upstream"),
+        ("rev-parse", "--short", "origin/main"): (128, "fatal: no upstream"),
     }))
 
     result = ops.check_update()
@@ -1138,10 +1138,10 @@ def test_check_update_reports_divergence_instead_of_a_doomed_update(monkeypatch,
         ("log", "-1", "--format=%s"): (0, "local"),
         ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): (0, "origin/main"),
         ("fetch", "--quiet"): (0, ""),
-        ("rev-parse", "--short", "@{u}"): (0, "bbbbbbb"),
-        ("log", "-1", "--format=%s", "@{u}"): (0, "remote"),
-        ("rev-list", "--count", "HEAD..@{u}"): (0, "2"),
-        ("rev-list", "--count", "@{u}..HEAD"): (0, "1"),
+        ("rev-parse", "--short", "origin/main"): (0, "bbbbbbb"),
+        ("log", "-1", "--format=%s", "origin/main"): (0, "remote"),
+        ("rev-list", "--count", "HEAD..origin/main"): (0, "2"),
+        ("rev-list", "--count", "origin/main..HEAD"): (0, "1"),
     }))
 
     result = ops.check_update()
@@ -1151,3 +1151,67 @@ def test_check_update_reports_divergence_instead_of_a_doomed_update(monkeypatch,
     assert result["update_available"] is False
     assert result["ahead"] == 1
     assert result["behind"] == 2
+
+
+def test_git_pull_capability_explains_the_retired_in_place_mode(monkeypatch, tmp_path):
+    # An upgraded deployment that still only sets REPO_DIR must learn what to add.
+    monkeypatch.setattr(ops, "REPO_DIR", str(tmp_path))
+    monkeypatch.setattr(ops, "RELEASES_DIR", "")
+
+    result = ops.git_pull_capability()
+
+    assert result["available"] is False
+    assert "Migrating from in-place updates" in result["reason"]
+    assert "ACHORD_REVIEW_RELEASES_DIR" in result["reason"]
+
+
+def test_default_update_ref_resolves_through_the_source_checkout(monkeypatch, tmp_path):
+    remote, source, releases = _staged_repo(tmp_path)
+    r1 = _commit(source, "r1")
+    subprocess.run(["git", "-C", str(source), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(source), "push", "-qu", "origin", "main"], check=True, capture_output=True)
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    monkeypatch.setattr(ops, "UPDATE_REF", "@{u}")
+    # `current` is a detached worktree, where @{u} can never resolve on its own.
+    assert os.path.basename(ops.reconcile_boot_release()) == r1
+    assert subprocess.run(["git", "-C", str(releases / "current"), "rev-parse", "--abbrev-ref", "@{u}"],
+                          capture_output=True).returncode != 0
+
+    assert ops.git_pull_capability()["available"] is True
+    info = ops.check_update()
+
+    assert info["checked"] is True
+    assert info["latest"]["branch"] == "origin/main"
+    assert info["update_available"] is False
+
+
+def test_default_update_ref_without_an_upstream_disables_the_capability(monkeypatch, tmp_path):
+    _, source, releases = _staged_repo(tmp_path)
+    _commit(source, "r1")  # a clone of an empty bare remote: no upstream configured
+    _boot_env(monkeypatch, tmp_path, source, releases, build_id="build-1")
+    monkeypatch.setattr(ops, "UPDATE_REF", "@{u}")
+    ops.reconcile_boot_release()
+
+    result = ops.git_pull_capability()
+
+    assert result["available"] is False
+    assert "ACHORD_REVIEW_UPDATE_REF" in result["reason"]
+
+
+def test_activation_rolls_the_link_back_when_the_marker_cannot_be_removed(monkeypatch, tmp_path):
+    releases, old_release, new_release, active = _pending_release_layout(tmp_path, monkeypatch)
+    real_unlink = ops.os.unlink
+
+    def _refuse_marker(path, *args, **kwargs):
+        if path == ops._pending_marker_path():
+            raise PermissionError("read-only releases volume")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(ops.os, "unlink", _refuse_marker)
+
+    with pytest.raises(PermissionError):
+        ops._activate_pending_release()
+
+    # `current` never outruns the process serving it; the marker is still there.
+    assert active.resolve() == old_release.resolve()
+    assert (releases / ".pending-release").read_text().strip() == str(new_release)

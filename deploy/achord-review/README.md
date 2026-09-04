@@ -157,6 +157,16 @@ image and the API routes share the webhook process).
   up -d --build`) instead of implying a restart is enough.
 - Left fully commented, the buttons stay disabled and releases remain host-managed
   (`git pull --ff-only` then `docker compose up -d --build`).
+- **Migrating from in-place updates.** Earlier builds enabled the update button by
+  setting only `ACHORD_REVIEW_REPO_DIR` on a mounted checkout and ran `git pull` into
+  the serving directory. That mode is retired (it rewrote live Python and static files
+  under a running process) and is not silently emulated: with only `REPO_DIR` set the
+  panel reports the update as unavailable and names this section. To migrate, replace
+  the checkout mount with the opt-in block in `docker-compose.yml` — the launcher
+  `command`, the `../..:/app/source`, `./releases:/app/releases` and `./config:/app/config`
+  mounts, and the six `ACHORD_REVIEW_*` variables (`REPO_DIR` now points at
+  `/app/releases/current`) — then `docker compose up -d --build` once from the host. The
+  first boot stages the checkout's `HEAD` as the initial release; nothing else changes.
 
 ## Behaviour summary
 

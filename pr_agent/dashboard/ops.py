@@ -310,11 +310,24 @@ def _execute_self_restart() -> bool:
 
 
 def git_pull_capability() -> Dict[str, Any]:
-    """Report whether an operator configured isolated staged releases."""
-    if not REPO_DIR or not RELEASES_DIR:
+    """Report whether an operator configured isolated staged releases.
+
+    The earlier in-place mode (only ACHORD_REVIEW_REPO_DIR set, `git pull` into
+    the running checkout) is deliberately retired: it mutated live Python and
+    static files under a serving process. A deployment still configured that way
+    is told exactly what to add rather than silently losing the button.
+    """
+    if not REPO_DIR:
         return {
             "available": False,
             "reason": "标准部署由宿主机发布流程更新，面板内分阶段更新未启用。",
+        }
+    if not RELEASES_DIR:
+        return {
+            "available": False,
+            "reason": ("旧版就地 git pull 模式已移除：请按 README「Migrating from in-place updates」"
+                       "启用分阶段发布（启动器 command、/app/source 与 releases/config 挂载、"
+                       "ACHORD_REVIEW_RELEASES_DIR/SOURCE_DIR/CONFIG_DIR 环境变量）。"),
         }
     try:
         inspection = subprocess.run(
@@ -334,7 +347,33 @@ def git_pull_capability() -> Dict[str, Any]:
     if not CONFIG_DIR or not os.path.isdir(CONFIG_DIR):
         return {"available": False,
                 "reason": "未配置持久化配置目录（ACHORD_REVIEW_CONFIG_DIR），分阶段更新未启用。"}
+    try:
+        update_ref, reason = _resolve_update_ref()
+    except (OSError, subprocess.TimeoutExpired):
+        return {"available": False, "reason": "无法解析更新所跟踪的远端分支。"}
+    if update_ref is None:
+        return {"available": False, "reason": reason}
     return {"available": True, "reason": "已连接受控 Git 工作区，更新会先写入独立发布目录。"}
+
+
+def _resolve_update_ref() -> tuple[Optional[str], str]:
+    """Return the concrete remote-tracking ref updates compare against.
+
+    `current` is always a detached worktree, so the default `@{u}` cannot be
+    resolved there; it is resolved in the source checkout (whose branch carries
+    the upstream) and shared through the common Git metadata. Returns
+    (ref, reason) with ref None when nothing usable can be determined.
+    """
+    if UPDATE_REF != "@{u}":
+        return UPDATE_REF, ""
+    upstream_args = ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]
+    if SOURCE_DIR:
+        upstream_rc, resolved = _git_text_at(SOURCE_DIR, upstream_args, GIT_PREFLIGHT_TIMEOUT_SECONDS)
+    else:
+        upstream_rc, resolved = _git_text(upstream_args, GIT_PREFLIGHT_TIMEOUT_SECONDS)
+    if upstream_rc != 0 or not resolved or resolved == "@{u}":
+        return None, "源码检出的分支未跟踪远端分支，请设置 ACHORD_REVIEW_UPDATE_REF。"
+    return resolved, ""
 
 
 def _pending_marker_path() -> str:
@@ -421,8 +460,16 @@ def _activate_pending_release() -> Optional[_Activation]:
     if pending is None:
         return None
     previous = _switch_active_release(pending)
-    os.unlink(_pending_marker_path())
-    return _Activation(pending, previous, was_pending=True)
+    activation = _Activation(pending, previous, was_pending=True)
+    try:
+        os.unlink(_pending_marker_path())
+    except OSError:
+        # The marker is still in place, so only the link has to be undone before
+        # surfacing the error; `current` must never outrun the process serving it.
+        if previous is not None:
+            _switch_active_release(previous)
+        raise
+    return activation
 
 
 def _rollback_activation(activation: _Activation) -> None:
@@ -628,8 +675,11 @@ def git_pull() -> Dict[str, Any]:
             fetch_rc, fetch_out = _git_text(["fetch", "--quiet"], GIT_FETCH_TIMEOUT_SECONDS)
             if fetch_rc != 0:
                 return _not_started(("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300])
-            revision_rc, revision = _git_text(["rev-parse", UPDATE_REF], GIT_PREFLIGHT_TIMEOUT_SECONDS)
-            if revision_rc != 0 or len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision.lower()):
+            update_ref, unresolved = _resolve_update_ref()
+            if update_ref is None:
+                return _not_started(unresolved)
+            revision_rc, revision = _git_text(["rev-parse", update_ref], GIT_PREFLIGHT_TIMEOUT_SECONDS)
+            if revision_rc != 0 or not _is_revision(revision):
                 return _not_started("无法解析待发布的远端版本")
             ancestor_rc, _ = _git_text(
                 ["merge-base", "--is-ancestor", "HEAD", revision], GIT_PREFLIGHT_TIMEOUT_SECONDS)
@@ -727,16 +777,11 @@ def check_update() -> Dict[str, Any]:
                 "sha": head_sha if head_rc == 0 else None,
                 "subject": head_subject or None,
             }
-            upstream = UPDATE_REF
-            comparison_ref = UPDATE_REF
-            if UPDATE_REF == "@{u}":
-                upstream_rc, resolved_upstream = _git_text(
-                    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-                    GIT_PREFLIGHT_TIMEOUT_SECONDS)
-                if upstream_rc != 0 or not resolved_upstream:
-                    result["reason"] = "当前分支未跟踪远端分支，无法检查更新。"
-                    return result
-                upstream = resolved_upstream
+            comparison_ref, unresolved = _resolve_update_ref()
+            if comparison_ref is None:
+                result["reason"] = unresolved
+                return result
+            upstream = comparison_ref
             fetch_rc, fetch_out = _git_text(["fetch", "--quiet"], GIT_FETCH_TIMEOUT_SECONDS)
             if fetch_rc != 0:
                 result["reason"] = ("拉取远端信息失败：" + (fetch_out or "git fetch 未成功"))[:300]
