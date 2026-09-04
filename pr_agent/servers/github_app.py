@@ -521,7 +521,7 @@ try:
     # Outermost, so even the rejections above leave with the anti-framing headers.
     app.middleware("http")(add_dashboard_security_headers)
 
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, RedirectResponse
     from fastapi.staticfiles import StaticFiles
 
     _dashboard_dist = os.path.join(base_path, "dashboard", "static")
@@ -541,6 +541,12 @@ try:
                     and os.path.isfile(target):
                 return FileResponse(target)
             return FileResponse(os.path.join(_dashboard_dist, "index.html"))
+
+        # Convenience redirect: a bare /login (and /dashboard/) reaches the panel
+        # login instead of 404, so the domain root is friendlier to type.
+        @app.get("/login")
+        async def dashboard_login_redirect():
+            return RedirectResponse(url="/dashboard/login", status_code=302)
 except Exception as _dashboard_error:  # pragma: no cover - defensive by design
     get_logger().warning(f"Dashboard routes unavailable, error: {_dashboard_error}")
 

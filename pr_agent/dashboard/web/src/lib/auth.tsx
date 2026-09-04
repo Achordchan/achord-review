@@ -60,11 +60,55 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (password: string) => {
     const body = await api.post<{ authenticated: boolean }>('/api/v1/dashboard/auth/login', { password })
-    if (body.authenticated) {
-      setState((prev) => ({ ...prev, authenticated: true, loading: false }))
-      await refresh()
+    if (!body.authenticated) return
+    // Confirm the session before entering. Fetching model/version doubles as that
+    // check: the freshly-set cookie is not always readable on the very next
+    // request, so a single transient failure must not bounce a real login back to
+    // the form — hence the short retry. But if every attempt ends in a definitive
+    // 401, the cookie was genuinely not accepted (rejected, stripped by a proxy,
+    // or the session invalidated); entering then would only fail on the next call
+    // or redirect straight back, so stay unauthenticated and surface the error.
+    // Use a direct fetch so it does not trip the global 401-invalidation.
+    let session: SessionInfo | null = null
+    let sawRejection = false // at least one definitive 401
+    let sawTransient = false // at least one network / 5xx failure
+    for (let attempt = 0; attempt < 3 && session === null; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 200))
+      try {
+        const res = await fetch('/api/v1/dashboard/auth/me', {
+          credentials: 'same-origin',
+          headers: { Accept: 'application/json' },
+        })
+        if (res.ok) {
+          session = ((await res.json()) as { data?: SessionInfo }).data ?? null
+        } else if (res.status === 401) {
+          sawRejection = true
+        } else {
+          sawTransient = true // 5xx / other: transient, keep retrying
+        }
+      } catch {
+        sawTransient = true // network error: transient, keep retrying
+      }
     }
-  }, [refresh])
+    // Reject only when the session was never confirmed and every failure was a
+    // definitive 401: the cookie was not accepted (rejected, proxy-stripped, or the
+    // session invalidated), so entering would only fail on the next call. A single
+    // transient failure keeps the optimistic entry the retry loop is there to allow.
+    if (session === null && sawRejection && !sawTransient) {
+      setState((prev) => ({ ...prev, authenticated: false, loading: false }))
+      toast.error('登录会话未能确认', '会话 Cookie 未被接受，请重试或检查反向代理设置')
+      return
+    }
+    setState({
+      authenticated: true,
+      loading: false,
+      model: session?.model ?? '',
+      version: session?.version ?? '',
+    })
+    // Entered without metadata after transient failures; refresh once the session
+    // settles so model/version do not stay blank until the next reload.
+    if (session === null) void refresh().catch(() => undefined)
+  }, [toast, refresh])
 
   const logout = useCallback(async () => {
     await api.post('/api/v1/dashboard/auth/logout')

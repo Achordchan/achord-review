@@ -204,21 +204,19 @@ export function VersionCenter({ onClose, version }: {
                           : <><CircleArrowUp size={14} /> 一键更新</>}
                       </button>
                     )}
-                    <button
-                      onClick={() => void runRestart()}
-                      disabled={!restartAvailable || phase === 'updating' || updateQuery.isFetching || rebuildRequired}
-                      title={rebuildRequired
-                        ? '本次更新需由维护者在服务器完成'
-                        : (restartAvailable ? '' : capabilitiesQuery.data?.restart.reason)}
-                      className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-semibold transition-all active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
-                        staged && !rebuildRequired
-                          ? 'bg-accent-strong text-white hover:bg-accent'
-                          : 'border border-line text-text hover:bg-surface-2'
-                      }`}
-                    >
-                      <RefreshCw size={14} />
-                      {staged ? '重启以生效' : '重启'}
-                    </button>
+                    {/* Restart is only offered to apply a prepared update — there is no
+                        routine need to restart, so it does not sit here permanently. */}
+                    {staged && !rebuildRequired && (
+                      <button
+                        onClick={() => void runRestart()}
+                        disabled={!restartAvailable || phase === 'updating' || updateQuery.isFetching}
+                        title={restartAvailable ? '' : capabilitiesQuery.data?.restart.reason}
+                        className="flex items-center gap-1.5 rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-accent active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <RefreshCw size={14} />
+                        重启以生效
+                      </button>
+                    )}
                   </div>
                 </div>
               </>

@@ -291,6 +291,16 @@ class TestReviewsCrud:
         assert storage.list_reviews(repo="a/b")["total"] == 1
         assert storage.list_reviews(verdict="REQUEST_CHANGES")["total"] == 1
         assert storage.list_reviews()["total"] == 2
+        # The repo filter is a case-insensitive substring search, not exact match.
+        assert storage.list_reviews(repo="a/")["total"] == 1
+        assert storage.list_reviews(repo="A/B")["total"] == 1
+        assert storage.list_reviews(repo="/")["total"] == 2
+        assert storage.list_reviews(repo="nope")["total"] == 0
+
+    def test_list_reviews_search_escapes_like_wildcards(self, storage):
+        _seed_review(storage, repo="a/b", pr=1)
+        # A "%" in the query must match literally, not as a LIKE wildcard.
+        assert storage.list_reviews(repo="%")["total"] == 0
 
     def test_list_reviews_severity_counts(self, storage):
         _seed_review(storage, repo="a/b", pr=1, severities=("P0", "P1", "P1"))

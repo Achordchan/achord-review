@@ -7,6 +7,7 @@ import type { ReviewListData, ReviewRow } from '../lib/types'
 import { Card, Skeleton } from '../components/ui'
 import { SeveritySummary, StatusBadge, TriggerBadge, VerdictBadge } from '../components/badges'
 import { formatDuration, formatTokens, relativeTime, shortSha } from '../lib/format'
+import { prHtmlUrl, repoHtmlUrl } from '../lib/github'
 
 const STATUS_OPTIONS = [
   { value: '', label: '全部状态' },
@@ -131,9 +132,24 @@ export default function ReviewsPage() {
                         {row.pr_title || `PR #${row.pr_number}`}
                       </Link>
                       <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted">
-                        <span className="truncate">{row.repo_name}#{row.pr_number}</span>
-                        <a href={row.pr_url} target="_blank" rel="noreferrer" className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100" title="在 GitHub 打开">
-                          <ExternalLink size={12} className="hover:text-accent" />
+                        <a
+                          href={repoHtmlUrl(row.pr_url, row.repo_name)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="truncate hover:text-accent"
+                          title="打开仓库"
+                        >
+                          {row.repo_name}
+                        </a>
+                        <a
+                          href={prHtmlUrl(row.pr_url, row.repo_name, row.pr_number)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex shrink-0 items-center gap-0.5 hover:text-accent"
+                          title="在 GitHub 打开 PR"
+                        >
+                          #{row.pr_number}
+                          <ExternalLink size={11} className="opacity-0 transition-opacity group-hover:opacity-100" />
                         </a>
                       </div>
                     </td>
