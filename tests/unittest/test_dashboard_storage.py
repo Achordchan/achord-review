@@ -213,6 +213,20 @@ class TestReviewsCrud:
         assert row["total_tokens"] == 133
         assert row["duration_ms"] == 4567
 
+    def test_finish_review_persists_review_comment_url(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=41, pr_url="u41")
+        storage.finish_review(
+            request_id, [], verdict="COMMENT",
+            review_comment_url="https://github.com/o/r/pull/41#pullrequestreview-9")
+        detail = storage.get_review_detail(storage.get_review_by_request_id(request_id)["id"])
+        assert detail["review_comment_url"] == "https://github.com/o/r/pull/41#pullrequestreview-9"
+
+    def test_finish_review_empty_url_leaves_column_null(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=42, pr_url="u42")
+        storage.finish_review(request_id, [], verdict="APPROVE")
+        row = storage.get_review_by_request_id(request_id)
+        assert row["review_comment_url"] is None
+
     def test_review_payloads_are_truncated_to_configured_limit(self, storage, monkeypatch):
         monkeypatch.setattr(storage_module, "MAX_REVIEW_PAYLOAD_BYTES", 128)
         request_id = storage.create_review(repo_name="r", pr_number=7, pr_url="u7")

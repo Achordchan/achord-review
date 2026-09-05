@@ -242,8 +242,14 @@ async def _audit_finished(reviewer: "PRReviewer", request_id: str, pr_review: st
         if review_data:
             issues = (review_data.get("review") or {}).get("key_issues_to_review") or []
         verdict, reason = _audit_verdict(reviewer, review_data)
+        review_comment_url = ""
+        try:
+            review_comment_url = reviewer.git_provider.get_published_review_url() or ""
+        except Exception as e:
+            get_logger().debug(f"Dashboard audit could not read published review URL, error: {e}")
         await review_finished(request_id, verdict=verdict, verdict_reason=reason,
-                              markdown_output=pr_review, raw_prediction=prediction, issues=issues)
+                              markdown_output=pr_review, raw_prediction=prediction, issues=issues,
+                              review_comment_url=review_comment_url)
     except Exception as e:
         get_logger().debug(f"Dashboard audit (finished) skipped, error: {e}")
 
