@@ -635,6 +635,27 @@ async def retry_review(review_id: int, request: Request,
     return coming_soon()  # wired to the playground runner when F-01 lights up
 
 
+@router.post("/reviews/{review_id}/cancel")
+async def cancel_review(review_id: int, request: Request,
+                        dashboard_session: Optional[str] = Cookie(None)):
+    """Request a cooperative manual stop of a still-RUNNING review.
+
+    Sets a flag the review's own heartbeat observes and acts on; it does not
+    itself terminate anything, so it always returns promptly.
+    """
+    await require_auth(request, dashboard_session)
+    if not 1 <= review_id <= MAX_SQLITE_INTEGER:
+        raise HTTPException(status_code=404, detail="Review not found")
+    flagged = await asyncio.to_thread(_storage_call, "cancel_review", review_id)
+    if flagged:
+        await asyncio.to_thread(
+            _storage_call, "add_audit_log", "CANCEL_REVIEW", {"review_id": review_id},
+            ip_address=_client_ip(request))
+    return _ok(
+        {"cancel_requested": bool(flagged)},
+        message="已请求停止，将在下一次心跳时生效" if flagged else "该审查已结束或未在运行")
+
+
 @router.get("/repos")
 async def list_repos(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)

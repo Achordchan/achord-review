@@ -266,8 +266,31 @@ async def review_heartbeat(request_id: str) -> None:
     await run_audit_work(_work)
 
 
-async def review_heartbeat_loop(request_id: str, interval_seconds: Optional[float] = None) -> None:
-    """Keep a long-running review live until its owner cancels this task."""
+async def review_should_cancel(request_id: str) -> bool:
+    """Whether an admin requested a manual stop for this still-RUNNING review."""
+    if not request_id:
+        return False
+
+    def _work() -> bool:
+        try:
+            storage = _run_audit()
+            return bool(storage is not None and storage.is_cancel_requested(request_id))
+        except Exception as e:
+            get_logger().debug(f"Dashboard audit (cancel check) failed, error: {e}")
+            return False
+
+    return await run_audit_work(_work)
+
+
+async def review_heartbeat_loop(request_id: str, interval_seconds: Optional[float] = None,
+                                on_cancel_requested: Optional[Callable[[], None]] = None) -> None:
+    """Keep a long-running review live until its owner cancels this task.
+
+    When on_cancel_requested is given, each beat also checks the manual-stop flag
+    and invokes the callback once it is set — the callback cancels the review task
+    in this same worker. Cross-worker safe: the flag lives in shared SQLite, the
+    cancellation happens in the worker that owns the review.
+    """
     if not request_id:
         return
     if interval_seconds is None:
@@ -276,6 +299,10 @@ async def review_heartbeat_loop(request_id: str, interval_seconds: Optional[floa
     while True:
         await asyncio.sleep(interval_seconds)
         await review_heartbeat(request_id)
+        if on_cancel_requested is not None and await review_should_cancel(request_id):
+            get_logger().info(f"Manual stop requested for review {request_id}; cancelling the run")
+            on_cancel_requested()
+            return
 
 
 def _as_int(value) -> Optional[int]:

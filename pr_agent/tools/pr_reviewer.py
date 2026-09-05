@@ -6,7 +6,7 @@ import os
 import re
 import uuid
 from functools import partial
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from jinja2 import Environment, StrictUndefined
 
@@ -197,13 +197,19 @@ async def _await_bounded_audit(coro, what: str = "terminal") -> None:
         raise
 
 
-def _start_audit_heartbeat(request_id: str) -> Optional[asyncio.Task]:
-    """Start durable liveness updates after the RUNNING record exists."""
+def _start_audit_heartbeat(request_id: str,
+                           on_cancel_requested: Optional[Callable[[], None]] = None) -> Optional[asyncio.Task]:
+    """Start durable liveness updates after the RUNNING record exists.
+
+    on_cancel_requested, when given, is invoked by the heartbeat once an admin
+    flags this review for a manual stop — it cancels the review task.
+    """
     if not request_id:
         return None
     try:
         from pr_agent.dashboard.audit import review_heartbeat_loop
-        return asyncio.create_task(review_heartbeat_loop(request_id))
+        return asyncio.create_task(
+            review_heartbeat_loop(request_id, on_cancel_requested=on_cancel_requested))
     except Exception as e:
         get_logger().debug(f"Dashboard audit heartbeat not started, error: {e}")
         return None
@@ -422,15 +428,25 @@ class PRReviewer:
         audit_request_id = ""
         audit_heartbeat_task = None
         terminal_audit_started = False
+        self._manual_stop_requested = False
+        run_task = asyncio.current_task()
 
         async def _persist_terminal(coro) -> None:
             nonlocal terminal_audit_started
             terminal_audit_started = True
             await _await_bounded_audit(coro)
 
+        def _request_manual_stop() -> None:
+            # Runs in this same worker's loop (the heartbeat task): flag the reason
+            # so the CancelledError path records a manual stop, then cancel the run.
+            self._manual_stop_requested = True
+            if run_task is not None:
+                run_task.cancel()
+
         try:
             audit_request_id = await _audit_started(self)
-            audit_heartbeat_task = _start_audit_heartbeat(audit_request_id)
+            audit_heartbeat_task = _start_audit_heartbeat(
+                audit_request_id, on_cancel_requested=_request_manual_stop)
             if not self.git_provider.get_files():
                 get_logger().info(f"PR has no files: {self.pr_url}, skipping review")
                 await _persist_terminal(_audit_skipped(audit_request_id, "PR has no files"))
@@ -546,8 +562,11 @@ class PRReviewer:
                 _audit_finished(self, audit_request_id, pr_review, self.prediction))
         except asyncio.CancelledError:
             if not terminal_audit_started:
+                reason = ("管理员手动停止审查"
+                          if getattr(self, "_manual_stop_requested", False)
+                          else "review task cancelled")
                 await _persist_terminal(
-                    _audit_failed(audit_request_id, RuntimeError("review task cancelled")))
+                    _audit_failed(audit_request_id, RuntimeError(reason)))
             raise
         except Exception as e:
             review_failed = True

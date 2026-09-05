@@ -757,7 +757,7 @@ async def test_cancellation_during_completion_does_not_start_competing_failure(m
         terminal_finished.set()
 
     monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
-    monkeypatch.setattr(pr_reviewer_module, "_start_audit_heartbeat", lambda request_id: None)
+    monkeypatch.setattr(pr_reviewer_module, "_start_audit_heartbeat", lambda request_id, on_cancel_requested=None: None)
     monkeypatch.setattr(pr_reviewer_module, "_audit_finished", delayed_finished)
     monkeypatch.setattr(pr_reviewer_module, "_audit_failed", audit_failed)
     monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
@@ -1461,7 +1461,7 @@ async def test_run_backfills_the_audit_metadata_on_the_review_path(monkeypatch):
     monkeypatch.setattr(pr_reviewer_module, "extract_and_cache_pr_tickets", AsyncMock())
     monkeypatch.setattr(pr_reviewer_module, "retry_with_fallback_models", fake_retry)
     monkeypatch.setattr(pr_reviewer_module, "_audit_started", AsyncMock(return_value="request-id"))
-    monkeypatch.setattr(pr_reviewer_module, "_start_audit_heartbeat", lambda request_id: None)
+    monkeypatch.setattr(pr_reviewer_module, "_start_audit_heartbeat", lambda request_id, on_cancel_requested=None: None)
     monkeypatch.setattr(pr_reviewer_module, "_audit_failed", AsyncMock())
     monkeypatch.setattr(pr_reviewer_module, "_audit_finished", AsyncMock())
     monkeypatch.setattr(pr_reviewer_module, "_audit_metadata", audit_metadata)

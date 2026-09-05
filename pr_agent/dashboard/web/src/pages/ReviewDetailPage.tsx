@@ -1,11 +1,13 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react'
+import { ArrowLeft, Ban, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react'
 import { prHtmlUrl, repoHtmlUrl } from '../lib/github'
-import { api } from '../lib/api'
+import { api, ApiError } from '../lib/api'
 import type { ReviewDetail } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
+import { ConfirmDialog } from '../components/Dialogs'
+import { useToast } from '../components/Toast'
 import { SeverityBadge, StatusBadge, TriggerBadge, VerdictBadge } from '../components/badges'
 import { MarkdownView } from '../components/MarkdownView'
 import { formatDuration, formatTokens, formatDateTime, shortModel, shortSha } from '../lib/format'
@@ -42,12 +44,36 @@ function Collapsible({ title, children, defaultOpen = false }: {
 export default function ReviewDetailPage() {
   const { id } = useParams<{ id: string }>()
   const reviewId = Number(id)
+  const toast = useToast()
+  const queryClient = useQueryClient()
+  const [confirmStop, setConfirmStop] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const { data, isLoading, isError } = useQuery({
     queryKey: ['review-detail', reviewId],
     queryFn: () => api.get<ReviewDetail>(`/api/v1/dashboard/reviews/${reviewId}`),
     enabled: Number.isInteger(reviewId) && reviewId > 0,
     refetchInterval: (query) => (query.state.data?.status === 'RUNNING' ? 8_000 : false),
   })
+
+  const stopReview = async () => {
+    if (stopping) return
+    setStopping(true)
+    try {
+      const body = await api.post<{ cancel_requested: boolean }>(
+        `/api/v1/dashboard/reviews/${reviewId}/cancel`)
+      if (body.cancel_requested) {
+        toast.success('已请求停止', '将在下一次心跳时生效，最长约 1 分钟')
+      } else {
+        toast.info('无需停止', '该审查已结束或未在运行')
+      }
+      await queryClient.invalidateQueries({ queryKey: ['review-detail', reviewId] })
+    } catch (err) {
+      toast.error('停止失败', err instanceof ApiError ? err.message : '未知错误')
+    } finally {
+      setStopping(false)
+      setConfirmStop(false)
+    }
+  }
 
   if (Number.isNaN(reviewId) || reviewId <= 0) {
     return (
@@ -96,15 +122,28 @@ export default function ReviewDetailPage() {
             {data.pr_title || `PR #${data.pr_number}`}
           </h1>
         </div>
-        <a
-          href={openUrl}
-          target="_blank"
-          rel="noreferrer"
-          title={reviewUrl ? '跳转到本次审查评论' : '跳转到 PR 页面'}
-          className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs text-muted transition-colors hover:bg-surface-2 hover:text-text"
-        >
-          在 GitHub 打开 <ExternalLink size={12} />
-        </a>
+        <div className="flex items-center gap-2">
+          {data.status === 'RUNNING' && (
+            <button
+              onClick={() => setConfirmStop(true)}
+              disabled={stopping}
+              title="手动停止这条卡住的审查"
+              className="flex items-center gap-1.5 rounded-lg border border-bad/40 px-3 py-1.5 text-xs font-medium text-bad transition-colors hover:bg-bad/10 disabled:opacity-40"
+            >
+              {stopping ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-bad/40 border-t-bad" /> : <Ban size={12} />}
+              {stopping ? '停止中…' : '停止审查'}
+            </button>
+          )}
+          <a
+            href={openUrl}
+            target="_blank"
+            rel="noreferrer"
+            title={reviewUrl ? '跳转到本次审查评论' : '跳转到 PR 页面'}
+            className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs text-muted transition-colors hover:bg-surface-2 hover:text-text"
+          >
+            在 GitHub 打开 <ExternalLink size={12} />
+          </a>
+        </div>
       </div>
 
       <Card className="p-5">
@@ -199,6 +238,16 @@ export default function ReviewDetailPage() {
           </pre>
         </Collapsible>
       )}
+
+      <ConfirmDialog
+        open={confirmStop}
+        title="停止这条审查？"
+        body="将请求评审进程尽快中止，该记录会标记为失败（原因：管理员手动停止）。生效有约一次心跳的延迟（最长约 1 分钟）。之后可对该 PR 重新触发审查。"
+        danger
+        confirmLabel="停止审查"
+        onConfirm={() => void stopReview()}
+        onCancel={() => setConfirmStop(false)}
+      />
     </div>
   )
 }
