@@ -810,7 +810,12 @@ class GithubProvider(GitProvider):
             # be seen must be submitted, so default to COMMENT when the caller gave no verdict.
             review_kwargs["event"] = "COMMENT"
         if verified_comments or review_body is not None:
-            self.pr.create_review(**review_kwargs)
+            review = self.pr.create_review(**review_kwargs)
+            # Same rule as the bulk path: deep-link only to the review that carries
+            # the summary/verdict, not a bare inline batch. Here that is whenever a
+            # body or an explicit verdict rode along.
+            if review_body is not None or review_event is not None:
+                self._record_published_review(review)
 
         # try to publish one by one the invalid comments as a one-line code comment
         if invalid_comments and get_settings().github.try_fix_invalid_inline_comments:

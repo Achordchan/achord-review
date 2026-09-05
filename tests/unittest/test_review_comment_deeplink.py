@@ -68,3 +68,31 @@ def test_missing_html_url_does_not_break_publishing():
     provider.pr.create_review = lambda **kwargs: SimpleNamespace(id=1, state="COMMENTED")
     assert provider.submit_review_verdict("COMMENT", "body") is True
     assert provider.get_published_review_url() is None
+
+
+class _Status422Error(Exception):
+    status = 422
+
+
+def test_fallback_review_records_its_url_when_bulk_publish_422s(monkeypatch):
+    """A finding outside the diff 422s the bulk review; the fallback re-posts the
+    summary/verdict as a new review, and that review's URL is what we deep-link to."""
+    provider = _make_provider()
+    calls = {"n": 0}
+
+    def create_review(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _Status422Error("line not in diff")
+        return SimpleNamespace(id=99, state="COMMENTED", html_url=REVIEW_URL)
+
+    provider.pr.create_review = create_review
+    monkeypatch.setattr(provider, "_verify_code_comments",
+                        lambda c: ([], [(comment, _Status422Error("x")) for comment in c]))
+    monkeypatch.setattr(provider, "_try_fix_invalid_inline_comments", lambda c: [])
+
+    provider.publish_inline_comments(
+        [{"body": "f", "path": "a.py", "line": 999, "side": "RIGHT"}],
+        review_body="## Summary", review_event="COMMENT")
+
+    assert provider.get_published_review_url() == REVIEW_URL
