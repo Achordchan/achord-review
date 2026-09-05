@@ -113,6 +113,19 @@ def test_finished_audit_normalizes_valid_severity_before_storage(tmp_path, monke
     assert storage.stats_overview()["p0_p1_blocked"] == 1
 
 
+def test_finished_audit_persists_review_comment_url(tmp_path, monkeypatch):
+    storage = DashboardStorage(db_path=str(tmp_path / "audit.db"))
+    storage.initialize()
+    request_id = storage.create_review(repo_name="a/b", pr_number=7, pr_url="u")
+    monkeypatch.setattr(audit, "_run_audit", lambda: storage)
+
+    url = "https://github.com/a/b/pull/7#pullrequestreview-1"
+    asyncio.run(audit.review_finished(request_id, verdict="COMMENT", review_comment_url=url))
+
+    detail = storage.get_review_detail(storage.get_review_by_request_id(request_id)["id"])
+    assert detail["review_comment_url"] == url
+
+
 def test_review_heartbeat_loop_refreshes_until_cancelled(monkeypatch):
     touched = asyncio.Event()
 

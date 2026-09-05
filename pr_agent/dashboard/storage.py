@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     raw_prediction TEXT,
     markdown_output TEXT,
     error_message TEXT,
+    review_comment_url TEXT,
 
     created_at TEXT NOT NULL,
     completed_at TEXT
@@ -333,6 +334,8 @@ class DashboardStorage:
             if "heartbeat_at" not in review_columns:
                 conn.execute("ALTER TABLE reviews ADD COLUMN heartbeat_at TEXT")
                 conn.execute("UPDATE reviews SET heartbeat_at = created_at WHERE heartbeat_at IS NULL")
+            if "review_comment_url" not in review_columns:
+                conn.execute("ALTER TABLE reviews ADD COLUMN review_comment_url TEXT")
             if auth_generation_migrated or auth_signature_migrated or session_generation_migrated:
                 # Legacy sessions have no trustworthy generation and must not revive.
                 conn.execute("DELETE FROM dashboard_sessions")
@@ -784,7 +787,8 @@ class DashboardStorage:
                       verdict_reason: str = "", markdown_output: str = "",
                       raw_prediction: str = "", model: str = "", reasoning_effort: str = "",
                       prompt_tokens: int = 0, completion_tokens: int = 0,
-                      total_tokens: int = 0, duration_ms: int = 0) -> None:
+                      total_tokens: int = 0, duration_ms: int = 0,
+                      review_comment_url: str = "") -> None:
         """Atomically persist usage, findings and the terminal COMPLETED state.
 
         One transaction so a reader that sees status=COMPLETED also sees every
@@ -801,6 +805,7 @@ class DashboardStorage:
             cursor = conn.execute(
                 "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
                 " markdown_output=?, raw_prediction=?,"
+                " review_comment_url=COALESCE(NULLIF(?, ''), review_comment_url),"
                 " model=COALESCE(NULLIF(?, ''), model),"
                 " reasoning_effort=COALESCE(NULLIF(?, ''), reasoning_effort),"
                 " prompt_tokens=CASE WHEN ? > 0 THEN ? ELSE prompt_tokens END,"
@@ -809,7 +814,7 @@ class DashboardStorage:
                 " duration_ms=CASE WHEN ? > 0 THEN ? ELSE duration_ms END,"
                 " completed_at=? WHERE request_id=? AND status='RUNNING'",
                 (verdict, verdict_reason, markdown_output, raw_prediction,
-                 model, reasoning_effort,
+                 review_comment_url, model, reasoning_effort,
                  prompt_tokens, prompt_tokens, completion_tokens, completion_tokens,
                  total_tokens, total_tokens, duration_ms, duration_ms,
                  _utcnow(), request_id))

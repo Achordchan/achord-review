@@ -75,6 +75,12 @@ export default function ReviewDetailPage() {
 
   const issues = [...(data.issues ?? [])]
 
+  // The deep-link target is GitHub's own review html_url when we captured it;
+  // fall back to the PR page. Guard the scheme so only http(s) ever reaches the
+  // href, never a javascript:/data: URL from an unexpected stored value.
+  const reviewUrl = /^https?:\/\//i.test(data.review_comment_url ?? '') ? data.review_comment_url! : ''
+  const openUrl = reviewUrl || prHtmlUrl(data.pr_url, data.repo_name, data.pr_number)
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -91,9 +97,10 @@ export default function ReviewDetailPage() {
           </h1>
         </div>
         <a
-          href={prHtmlUrl(data.pr_url, data.repo_name, data.pr_number)}
+          href={openUrl}
           target="_blank"
           rel="noreferrer"
+          title={reviewUrl ? '跳转到本次审查评论' : '跳转到 PR 页面'}
           className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-xs text-muted transition-colors hover:bg-surface-2 hover:text-text"
         >
           在 GitHub 打开 <ExternalLink size={12} />

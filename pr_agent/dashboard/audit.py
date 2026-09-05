@@ -147,7 +147,7 @@ def review_started(pr_url: str, sender: str = "", trigger_type: str = "manual",
 
 async def review_finished(request_id: str, verdict: str = "", verdict_reason: str = "",
                           markdown_output: str = "", raw_prediction: str = "",
-                          issues: Optional[list] = None) -> None:
+                          issues: Optional[list] = None, review_comment_url: str = "") -> None:
     """Complete the record with usage, findings and verdict in one transaction."""
     if not request_id:
         return
@@ -180,7 +180,8 @@ async def review_finished(request_id: str, verdict: str = "", verdict_reason: st
             # together, so a status=COMPLETED read never races a missing finding
             storage.finish_review(
                 request_id, clean_issues, verdict=verdict, verdict_reason=verdict_reason,
-                markdown_output=markdown_output, raw_prediction=raw_prediction, **fields)
+                markdown_output=markdown_output, raw_prediction=raw_prediction,
+                review_comment_url=(review_comment_url or "")[:500], **fields)
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_finished) failed, error: {e}")
 

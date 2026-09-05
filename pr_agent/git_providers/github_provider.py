@@ -600,7 +600,11 @@ class GithubProvider(GitProvider):
                 review_kwargs["body"] = review_body
             if review_event is not None:
                 review_kwargs["event"] = review_event
-            self.pr.create_review(**review_kwargs)
+            review = self.pr.create_review(**review_kwargs)
+            # Only a review carrying the verdict/body is the one the dashboard should
+            # deep-link to; a bare inline-comment batch (no review_event) is not.
+            if review_event is not None:
+                self._record_published_review(review)
             # The whole batch posted; record its fingerprints so the rest of this
             # run dedups against them. Cross-run dedup relies on the markers in the
             # posted bodies, so comments the fallback below drops stay unrecorded
@@ -806,7 +810,12 @@ class GithubProvider(GitProvider):
             # be seen must be submitted, so default to COMMENT when the caller gave no verdict.
             review_kwargs["event"] = "COMMENT"
         if verified_comments or review_body is not None:
-            self.pr.create_review(**review_kwargs)
+            review = self.pr.create_review(**review_kwargs)
+            # Same rule as the bulk path: deep-link only to the review that carries
+            # the summary/verdict, not a bare inline batch. Here that is whenever a
+            # body or an explicit verdict rode along.
+            if review_body is not None or review_event is not None:
+                self._record_published_review(review)
 
         # try to publish one by one the invalid comments as a one-line code comment
         if invalid_comments and get_settings().github.try_fix_invalid_inline_comments:
@@ -1591,6 +1600,21 @@ class GithubProvider(GitProvider):
         """
         return self.get_inline_comment_bodies()
 
+    def _record_published_review(self, review) -> None:
+        """Remember the web URL of the verdict-carrying review just posted.
+
+        The dashboard reads it via get_published_review_url() so its "open in
+        GitHub" action deep-links to this exact review rather than the PR page.
+        Best-effort: PyGithub review objects normally expose html_url, but a
+        missing attribute must never break the publish path.
+        """
+        try:
+            url = getattr(review, "html_url", None)
+            if url:
+                self.published_review_url = url
+        except Exception as e:
+            get_logger().debug(f"Could not record published review URL, error: {e}")
+
     def mark_review_verdict_body(self, body: str) -> str:
         if VERDICT_MARKER in (body or ""):
             return body
@@ -1652,6 +1676,7 @@ class GithubProvider(GitProvider):
             if res.state != expected_states[event]:
                 get_logger().warning(f"Review verdict '{event}' returned unexpected state '{res.state}'")
                 return False
+            self._record_published_review(res)
             return True
         except Exception as e:
             get_logger().exception(f"Failed to submit review verdict '{event}', error: {e}")

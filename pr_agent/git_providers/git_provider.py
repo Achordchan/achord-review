@@ -609,6 +609,16 @@ class GitProvider(ABC):
         """
         return False
 
+    def get_published_review_url(self) -> Optional[str]:
+        """Web URL of the review this run just published, or None if unavailable.
+
+        A provider records it when it publishes the verdict-carrying review (see
+        GithubProvider); the dashboard deep-links its "open in GitHub" action to
+        that exact review instead of the PR page. Providers that cannot report one
+        return None and the caller falls back to the PR URL.
+        """
+        return getattr(self, "published_review_url", None)
+
     def calc_pr_statistics(self, pull_request_data: dict):
         return {}
 

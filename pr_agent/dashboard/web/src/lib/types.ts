@@ -45,6 +45,7 @@ export type ReviewIssue = {
 export type ReviewDetail = ReviewRow & {
   raw_prediction: string | null
   markdown_output: string | null
+  review_comment_url: string | null
   issues: ReviewIssue[]
 }
 
