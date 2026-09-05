@@ -126,6 +126,47 @@ def test_finished_audit_persists_review_comment_url(tmp_path, monkeypatch):
     assert detail["review_comment_url"] == url
 
 
+def test_heartbeat_loop_invokes_cancel_callback_when_flag_set(tmp_path, monkeypatch):
+    storage = DashboardStorage(db_path=str(tmp_path / "audit.db"))
+    storage.initialize()
+    request_id = storage.create_review(repo_name="a/b", pr_number=9, pr_url="u")
+    review_id = storage.get_review_by_request_id(request_id)["id"]
+    monkeypatch.setattr(audit, "_run_audit", lambda: storage)
+    calls = {"n": 0}
+
+    async def scenario():
+        storage.cancel_review(review_id)  # admin flags the stop
+        # With the flag set the loop must invoke the callback once and return,
+        # so wait_for never times out.
+        await asyncio.wait_for(
+            audit.review_heartbeat_loop(
+                request_id, interval_seconds=0.01,
+                on_cancel_requested=lambda: calls.__setitem__("n", calls["n"] + 1)),
+            timeout=2)
+
+    asyncio.run(scenario())
+    assert calls["n"] == 1
+
+
+def test_heartbeat_loop_without_flag_does_not_cancel(tmp_path, monkeypatch):
+    storage = DashboardStorage(db_path=str(tmp_path / "audit.db"))
+    storage.initialize()
+    request_id = storage.create_review(repo_name="a/b", pr_number=10, pr_url="u")
+    monkeypatch.setattr(audit, "_run_audit", lambda: storage)
+    calls = {"n": 0}
+
+    async def scenario():
+        # No flag: the loop beats forever, so it is cancelled by the timeout and
+        # the callback is never invoked.
+        await audit.review_heartbeat_loop(
+            request_id, interval_seconds=0.01,
+            on_cancel_requested=lambda: calls.__setitem__("n", calls["n"] + 1))
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(asyncio.wait_for(scenario(), timeout=0.2))
+    assert calls["n"] == 0
+
+
 def test_review_heartbeat_loop_refreshes_until_cancelled(monkeypatch):
     touched = asyncio.Event()
 
@@ -149,7 +190,7 @@ def test_review_heartbeat_loop_refreshes_until_cancelled(monkeypatch):
 def test_reviewer_owns_and_stops_heartbeat_task(monkeypatch):
     started = asyncio.Event()
 
-    async def fake_loop(request_id):
+    async def fake_loop(request_id, on_cancel_requested=None):
         assert request_id == "request-id"
         started.set()
         await asyncio.Future()

@@ -227,6 +227,24 @@ class TestReviewsCrud:
         row = storage.get_review_by_request_id(request_id)
         assert row["review_comment_url"] is None
 
+    def test_cancel_review_flags_running_and_is_observable(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=51, pr_url="u51")
+        review_id = storage.get_review_by_request_id(request_id)["id"]
+        assert storage.is_cancel_requested(request_id) is False
+        assert storage.cancel_review(review_id) is True
+        assert storage.is_cancel_requested(request_id) is True
+
+    def test_cancel_review_rejects_non_running(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=52, pr_url="u52")
+        review_id = storage.get_review_by_request_id(request_id)["id"]
+        storage.finish_review(request_id, [], verdict="APPROVE")
+        # A finished review cannot be cancelled, and never reports a pending stop.
+        assert storage.cancel_review(review_id) is False
+        assert storage.is_cancel_requested(request_id) is False
+
+    def test_cancel_review_missing_id_is_false(self, storage):
+        assert storage.cancel_review(999999) is False
+
     def test_review_payloads_are_truncated_to_configured_limit(self, storage, monkeypatch):
         monkeypatch.setattr(storage_module, "MAX_REVIEW_PAYLOAD_BYTES", 128)
         request_id = storage.create_review(repo_name="r", pr_number=7, pr_url="u7")

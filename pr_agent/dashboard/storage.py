@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     markdown_output TEXT,
     error_message TEXT,
     review_comment_url TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
 
     created_at TEXT NOT NULL,
     completed_at TEXT
@@ -336,6 +337,9 @@ class DashboardStorage:
                 conn.execute("UPDATE reviews SET heartbeat_at = created_at WHERE heartbeat_at IS NULL")
             if "review_comment_url" not in review_columns:
                 conn.execute("ALTER TABLE reviews ADD COLUMN review_comment_url TEXT")
+            if "cancel_requested" not in review_columns:
+                conn.execute(
+                    "ALTER TABLE reviews ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
             if auth_generation_migrated or auth_signature_migrated or session_generation_migrated:
                 # Legacy sessions have no trustworthy generation and must not revive.
                 conn.execute("DELETE FROM dashboard_sessions")
@@ -695,6 +699,34 @@ class DashboardStorage:
         return self._transaction(
             _touch, "review heartbeat", timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS,
             max_retry=1) and touched
+
+    def cancel_review(self, review_id: int) -> bool:
+        """Flag a RUNNING review for cooperative cancellation, keyed by row id.
+
+        The review's own heartbeat loop (running in the worker that owns the
+        review) observes the flag via is_cancel_requested and cancels the task
+        locally. Returns True only when a RUNNING row was actually flagged, so
+        the caller can report "already finished / not running" honestly.
+        """
+        flagged = False
+
+        def _cancel(conn: sqlite3.Connection) -> None:
+            nonlocal flagged
+            cursor = conn.execute(
+                "UPDATE reviews SET cancel_requested=1 WHERE id=? AND status='RUNNING'",
+                (review_id,))
+            flagged = cursor.rowcount == 1
+
+        return self._transaction(
+            _cancel, "review cancel request",
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS) and flagged
+
+    def is_cancel_requested(self, request_id: str) -> bool:
+        """Whether a stop was requested for a still-RUNNING review, by request_id."""
+        rows = self._read(
+            "SELECT 1 AS c FROM reviews WHERE request_id=? AND status='RUNNING'"
+            " AND cancel_requested=1 LIMIT 1", (request_id,))
+        return bool(rows)
 
     def complete_review(self, request_id: str, verdict: str = "", verdict_reason: str = "",
                         markdown_output: str = "", raw_prediction: str = "") -> None:
