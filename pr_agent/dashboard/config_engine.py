@@ -148,6 +148,17 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
                 errors.append(f"{name} must be between {low} and {high}")
                 continue
             clean[name] = number
+        elif name == "fallback_models":
+            if value is None:
+                continue
+            if isinstance(value, str):
+                # Comma-separated convenience form from a single input field.
+                value = [entry for entry in (part.strip() for part in value.split(",")) if entry]
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                errors.append("fallback_models must be a list of model names")
+                continue
+            # Empty is a valid choice: it disables the fallback route on purpose.
+            clean[name] = [v.strip() for v in value if v.strip()]
         elif name == "verdict_blocking_severities":
             if value is None:
                 continue
@@ -197,8 +208,33 @@ class ConfigEngine:
             values[name] = raw.get(table, {}).get(key)
         values["verdict_blocking_severities"] = list(
             raw.get("pr_reviewer", {}).get("verdict_blocking_severities", []))
+        values["fallback_models"] = self._read_fallback_models(raw)
         values["ignore_glob"] = list(raw.get("ignore", {}).get("glob", []))
         return {"available": True, "path": self.config_path, "values": values}
+
+    @staticmethod
+    def _read_fallback_models(raw: Dict[str, Any]) -> List[str]:
+        """Config-file value if set, else the effective inherited value.
+
+        The config file is an override layered on configuration.toml defaults
+        (which ship fallback_models=["gpt-5.6-terra"]), so an absent key is
+        inheritance, not disablement: reporting [] for it would show "fallback
+        off" while fallback actually runs. The file's own value — including an
+        explicit [] — is always authoritative when present; the panel shows the
+        effective value only so the empty state tells the truth.
+        """
+        if "fallback_models" in raw.get("config", {}):
+            return list(raw["config"]["fallback_models"] or [])
+        try:
+            from pr_agent.config_loader import get_settings
+            inherited = get_settings().get("config.fallback_models", [])
+        except Exception:
+            return []
+        if isinstance(inherited, list):
+            return list(inherited)
+        if isinstance(inherited, str) and inherited:
+            return [entry for entry in (part.strip() for part in inherited.split(",")) if entry]
+        return []
 
     # ----------------------------------------------------------------- write
 
@@ -318,6 +354,8 @@ class ConfigEngine:
                 raw.setdefault(table, {})[key] = value
             elif name == "verdict_blocking_severities":
                 raw.setdefault("pr_reviewer", {})["verdict_blocking_severities"] = value
+            elif name == "fallback_models":
+                raw.setdefault("config", {})["fallback_models"] = value
             elif name == "ignore_glob":
                 raw.setdefault("ignore", {})["glob"] = value
 
@@ -440,6 +478,8 @@ class ConfigEngine:
             return f"{table}.{key}"
         if name == "verdict_blocking_severities":
             return "pr_reviewer.verdict_blocking_severities"
+        if name == "fallback_models":
+            return "config.fallback_models"
         if name == "ignore_glob":
             return "ignore.glob"
         return ""

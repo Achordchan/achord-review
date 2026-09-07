@@ -43,6 +43,7 @@ export default function ConfigPage() {
   const saveInFlight = useRef(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
   const [newGlob, setNewGlob] = useState('')
+  const [newFallbackModel, setNewFallbackModel] = useState('')
 
   useEffect(() => {
     if (data?.values) {
@@ -181,6 +182,51 @@ export default function ConfigPage() {
                 <option value="">默认</option>
                 {['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((v) => <option key={v} value={v}>{v}</option>)}
               </select>
+            </Field>
+            <Field label="兜底模型" hint="主模型被拒答时依次尝试的模型（如 gpt-5.4）。留空 = 关闭兜底；一项被拒后换下一个，重新给出新的分类决策。">
+              <div className="flex gap-2">
+                <input
+                  className={inputClass}
+                  placeholder="如 gpt-5.4"
+                  value={newFallbackModel}
+                  onChange={(e) => setNewFallbackModel(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newFallbackModel.trim()) {
+                      set('fallback_models', [...(values.fallback_models ?? []), newFallbackModel.trim()])
+                      setNewFallbackModel('')
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (newFallbackModel.trim()) {
+                      set('fallback_models', [...(values.fallback_models ?? []), newFallbackModel.trim()])
+                      setNewFallbackModel('')
+                    }
+                  }}
+                  className="mt-1.5 shrink-0 rounded-lg border border-line px-4 text-sm text-muted transition-colors hover:bg-surface-3 hover:text-text"
+                >
+                  添加
+                </button>
+              </div>
+              {(values.fallback_models ?? []).length === 0 ? (
+                <p className="mt-1.5 text-xs text-muted">未配置：主模型拒绝时审查直接失败</p>
+              ) : (
+                <ul className="mt-2 space-y-1.5">
+                  {(values.fallback_models ?? []).map((fbModel, index) => (
+                    <li key={`${fbModel}-${index}`} className="flex items-center justify-between rounded-lg border border-line bg-surface-2 px-3 py-2">
+                      <code className="text-xs text-text">{fbModel}</code>
+                      <button
+                        onClick={() => set('fallback_models', (values.fallback_models ?? []).filter((_, i) => i !== index))}
+                        className="text-xs text-muted transition-colors hover:text-bad"
+                      >
+                        移除
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </Field>
             <div className="grid grid-cols-2 gap-4">
               <Field label="AI 超时（秒）">

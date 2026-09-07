@@ -692,10 +692,13 @@ class TestProtectedRoutes:
         resp = client.put(
             "/api/v1/dashboard/config",
             headers={**auth, "Sec-Fetch-Site": "same-origin"},
-            json={"model": "gpt-5.6-sol", "custom_llm_provider": "openai", "restart": False})
+            json={"model": "gpt-5.6-sol", "custom_llm_provider": "openai",
+                  "fallback_models": ["gpt-5.4"], "restart": False})
         assert resp.status_code == 200, resp.text
         assert captured.get("custom_llm_provider") == "openai"
         assert captured.get("model") == "gpt-5.6-sol"
+        # fallback_models rides the same extra-field path as custom_llm_provider.
+        assert captured.get("fallback_models") == ["gpt-5.4"]
         assert "restart" not in captured  # popped before the engine write
 
     def test_config_restart_acceptance_is_not_reported_as_completion(
