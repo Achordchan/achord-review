@@ -48,7 +48,7 @@ class TestLiteLLMReasoningEffort:
     Comprehensive test suite for GPT-5 reasoning_effort configuration handling.
 
     Tests cover:
-    - Valid reasoning_effort values for GPT-5 models
+    - Valid reasoning_effort values for GPT-5/6 reasoning models
     - Invalid reasoning_effort values with warning logging
     - Model detection (GPT-5 vs non-GPT-5)
     - Model suffix handling (_thinking vs regular)
@@ -83,7 +83,7 @@ class TestLiteLLMReasoningEffort:
             assert "reasoning_effort" in call_kwargs["allowed_openai_params"]
 
             # Verify info log
-            mock_logger.info.assert_any_call("Using reasoning_effort='none' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='none' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_valid_reasoning_effort_low(self, monkeypatch, mock_logger):
@@ -104,7 +104,7 @@ class TestLiteLLMReasoningEffort:
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "low"
             assert "reasoning_effort" in call_kwargs["allowed_openai_params"]
-            mock_logger.info.assert_any_call("Using reasoning_effort='low' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='low' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_valid_reasoning_effort_medium(self, monkeypatch, mock_logger):
@@ -125,7 +125,7 @@ class TestLiteLLMReasoningEffort:
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "medium"
             assert "reasoning_effort" in call_kwargs["allowed_openai_params"]
-            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_valid_reasoning_effort_high(self, monkeypatch, mock_logger):
@@ -146,7 +146,7 @@ class TestLiteLLMReasoningEffort:
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "high"
             assert "reasoning_effort" in call_kwargs["allowed_openai_params"]
-            mock_logger.info.assert_any_call("Using reasoning_effort='high' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='high' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_valid_reasoning_effort_xhigh(self, monkeypatch, mock_logger):
@@ -167,7 +167,7 @@ class TestLiteLLMReasoningEffort:
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "xhigh"
             assert "reasoning_effort" in call_kwargs["allowed_openai_params"]
-            mock_logger.info.assert_any_call("Using reasoning_effort='xhigh' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='xhigh' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_valid_reasoning_effort_max(self, monkeypatch, mock_logger):
@@ -191,7 +191,7 @@ class TestLiteLLMReasoningEffort:
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "max"
             assert "reasoning_effort" in call_kwargs["allowed_openai_params"]
-            mock_logger.info.assert_any_call("Using reasoning_effort='max' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='max' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_valid_reasoning_effort_minimal(self, monkeypatch, mock_logger):
@@ -212,7 +212,7 @@ class TestLiteLLMReasoningEffort:
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "minimal"
             assert "reasoning_effort" in call_kwargs["allowed_openai_params"]
-            mock_logger.info.assert_any_call("Using reasoning_effort='minimal' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='minimal' for GPT-5/6 reasoning model")
 
     # ========== Group 2: Invalid Configuration Tests ==========
 
@@ -243,7 +243,7 @@ class TestLiteLLMReasoningEffort:
             assert "Valid values:" in warning_call
 
             # Verify info log
-            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_invalid_reasoning_effort_thinking_model(self, monkeypatch, mock_logger):
@@ -269,7 +269,7 @@ class TestLiteLLMReasoningEffort:
             mock_logger.warning.assert_called_once()
 
             # Verify info log
-            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_none_config_defaults_to_medium(self, monkeypatch, mock_logger):
@@ -295,7 +295,7 @@ class TestLiteLLMReasoningEffort:
             mock_logger.warning.assert_not_called()
 
             # Info log should show effort
-            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_none_config_thinking_model_defaults_to_medium(self, monkeypatch, mock_logger):
@@ -321,7 +321,7 @@ class TestLiteLLMReasoningEffort:
             mock_logger.warning.assert_not_called()
 
             # Info log
-            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5/6 reasoning model")
 
     # ========== Group 3: Model Detection Tests ==========
 
@@ -430,7 +430,7 @@ class TestLiteLLMReasoningEffort:
 
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "medium"
-            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_regular_suffix_default_medium(self, monkeypatch, mock_logger):
@@ -450,7 +450,7 @@ class TestLiteLLMReasoningEffort:
 
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "medium"
-            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_thinking_suffix_config_overrides_default(self, monkeypatch, mock_logger):
@@ -471,7 +471,7 @@ class TestLiteLLMReasoningEffort:
             # Should use 'high' from config, not 'medium' default
             call_kwargs = mock_completion.call_args[1]
             assert call_kwargs["reasoning_effort"] == "high"
-            mock_logger.info.assert_any_call("Using reasoning_effort='high' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='high' for GPT-5/6 reasoning model")
 
     # ========== Group 5: Logging Behavior Tests ==========
 
@@ -492,7 +492,7 @@ class TestLiteLLMReasoningEffort:
             )
 
             # Verify log
-            mock_logger.info.assert_any_call("Using reasoning_effort='low' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='low' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_info_logging_default_value(self, monkeypatch, mock_logger):
@@ -511,7 +511,7 @@ class TestLiteLLMReasoningEffort:
             )
 
             # Verify log
-            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5 model")
+            mock_logger.info.assert_any_call("Using reasoning_effort='medium' for GPT-5/6 reasoning model")
 
     @pytest.mark.asyncio
     async def test_gpt5_warning_only_for_invalid_non_none(self, monkeypatch, mock_logger):

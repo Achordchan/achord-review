@@ -677,16 +677,21 @@ class LiteLLMAIHandler(BaseAiHandler):
                     messages[1]["content"] = [{"type": "text", "text": messages[1]["content"]},
                                               {"type": "image_url", "image_url": {"url": img_path}}]
 
-                thinking_kwargs_gpt5 = None
-                # Detect GPT-5 family regardless of provider prefix(es) on the model name.
-                # Users sometimes put a provider prefix in config (e.g. "openai/gpt-5.1-codex-max"),
-                # and Azure mode auto-prepends "azure/", which together can produce stacked prefixes
-                # like "azure/openai/gpt-5...". Without normalization the GPT-5 path is skipped and
-                # litellm rejects the request with UnsupportedParamsError for temperature=0.2.
+                reasoning_thinking_kwargs = None
+                # Detect the GPT-5/6 reasoning family regardless of provider prefix(es) on the
+                # model name. Users sometimes put a provider prefix in config (e.g.
+                # "openai/gpt-5.1-codex-max"), and Azure mode auto-prepends "azure/", which together
+                # can produce stacked prefixes like "azure/openai/gpt-5...". Without normalization
+                # the reasoning path is skipped and litellm rejects the request with
+                # UnsupportedParamsError for temperature=0.2. gpt-6 models (e.g. a relay's
+                # "gpt-6-astra") are the same OpenAI-style reasoning family, so a configured
+                # reasoning_effort must reach them too; allowed_openai_params below forces it through
+                # even when litellm does not recognize the (relay-served) model id and would
+                # otherwise silently drop it — the symptom that hid a selected "low" effort.
                 model_base = model
                 while model_base.startswith(('openai/', 'azure/')):
                     model_base = model_base.removeprefix('openai/').removeprefix('azure/')
-                if model_base.startswith('gpt-5'):
+                if model_base.startswith(('gpt-5', 'gpt-6')):
                     # Use configured reasoning_effort or default to MEDIUM
                     config_effort = get_settings().config.reasoning_effort
                     try:
@@ -700,11 +705,11 @@ class LiteLLMAIHandler(BaseAiHandler):
                                 f"Using default '{effort}'. Valid values: {[e.value for e in ReasoningEffort]}"
                             )
 
-                    thinking_kwargs_gpt5 = {
+                    reasoning_thinking_kwargs = {
                         "reasoning_effort": effort,
                         "allowed_openai_params": ["reasoning_effort"],
                     }
-                    get_logger().info(f"Using reasoning_effort='{effort}' for GPT-5 model")
+                    get_logger().info(f"Using reasoning_effort='{effort}' for GPT-5/6 reasoning model")
                     # Routing priority: Azure mode > explicit provider prefix in user config > openai/
                     # default. This preserves an explicit "azure/" the user wrote in config even when
                     # self.azure is false, and avoids stacking when self.azure already added "azure/".
@@ -744,8 +749,8 @@ class LiteLLMAIHandler(BaseAiHandler):
                     # get_logger().info(f"Adding temperature with value {temperature} to model {model}.")
                     kwargs["temperature"] = temperature
 
-                if thinking_kwargs_gpt5:
-                    kwargs.update(thinking_kwargs_gpt5)
+                if reasoning_thinking_kwargs:
+                    kwargs.update(reasoning_thinking_kwargs)
                     if 'temperature' in kwargs:
                         del kwargs['temperature']
 

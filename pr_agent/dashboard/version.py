@@ -12,7 +12,7 @@ the latest GitHub release tag to decide whether an update is available.
 
 import os
 
-APP_VERSION = "0.0.12"
+APP_VERSION = "0.0.13"
 
 
 def get_app_version() -> str:
