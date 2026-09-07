@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, Ban, ChevronDown, ChevronUp, ExternalLink, Terminal } from 'lucide-react'
@@ -63,6 +63,25 @@ export default function ReviewDetailPage() {
     refetchInterval: () => (data?.status === 'RUNNING' ? 8_000 : false),
   })
   const logLines = logsQuery.data?.lines ?? []
+
+  // A review can finish between log polls; the detail query then returns a
+  // terminal status and stops the interval above, freezing the card before the
+  // final lines are in. Fetch once more when the status settles — after a short
+  // delay so the asynchronous file writer has flushed them.
+  const refetchLogs = logsQuery.refetch
+  const finalLogFetchDone = useRef(false)
+  useEffect(() => {
+    const status = data?.status
+    if (!status) return
+    if (status === 'RUNNING') {
+      finalLogFetchDone.current = false
+      return
+    }
+    if (finalLogFetchDone.current) return
+    finalLogFetchDone.current = true
+    const timer = setTimeout(() => void refetchLogs(), 1500)
+    return () => clearTimeout(timer)
+  }, [data?.status, refetchLogs])
 
   const stopReview = async () => {
     if (stopping) return

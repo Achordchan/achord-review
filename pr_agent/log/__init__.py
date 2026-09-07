@@ -28,6 +28,7 @@ REVIEW_LOG_FORMAT = (
 REVIEW_LOG_QUEUE_MAXSIZE = 10_000
 REVIEW_LOG_ROTATION_BYTES = 10 * 1024 * 1024
 REVIEW_LOG_BACKUP_COUNT = 3
+REVIEW_LOG_STOP_TIMEOUT_SECONDS = 2
 
 
 def json_format(record: dict) -> str:
@@ -111,27 +112,41 @@ class _ReviewLogWriter:
             self.dropped += 1  # disk can't keep up — drop rather than stall the review
 
     def _run(self) -> None:
-        while True:
-            message = self._queue.get()
-            if message is None:
-                return
+        try:
+            while True:
+                message = self._queue.get()
+                if message is None:
+                    return
+                try:
+                    # Reuse RotatingFileHandler's size rollover; write the preformatted
+                    # loguru line as-is (args=None, so no %-interpolation of the message).
+                    self._handler.emit(logging.LogRecord(
+                        "achord-review", logging.INFO, __file__, 0,
+                        message.rstrip("\n"), None, None))
+                except Exception:
+                    pass  # a log write must never escape the writer thread
+        finally:
+            # The writer owns the handle and closes it, so the caller never blocks
+            # on a flush of a stalled file (this runs on the writer thread).
             try:
-                # Reuse RotatingFileHandler's size rollover; write the preformatted
-                # loguru line as-is (args=None, so no %-interpolation of the message).
-                self._handler.emit(logging.LogRecord(
-                    "achord-review", logging.INFO, __file__, 0,
-                    message.rstrip("\n"), None, None))
+                self._handler.close()
             except Exception:
-                pass  # a log write must never escape the writer thread
+                pass
 
     def stop(self) -> None:
-        """Drain the queue, stop the thread and close the file (idempotent-safe)."""
-        self._queue.put(None)
-        self._thread.join(timeout=2)
+        """Signal shutdown and wait a bounded time; never blocks the caller.
+
+        The sentinel is inserted non-blocking: a full queue means the writer is
+        wedged on a stalled disk, and a blocking put would hang the caller — this
+        runs on re-enable (e.g. worker init), which must never stall. The writer
+        thread closes its own handler; here we only wait a bounded time, and a
+        still-wedged daemon thread simply dies with the process.
+        """
         try:
-            self._handler.close()
-        except Exception:
+            self._queue.put_nowait(None)
+        except queue.Full:
             pass
+        self._thread.join(timeout=REVIEW_LOG_STOP_TIMEOUT_SECONDS)
 
 
 # The review sink's handler id and writer in THIS process, so a repeated enable
