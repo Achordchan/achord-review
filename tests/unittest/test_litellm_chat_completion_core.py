@@ -283,6 +283,46 @@ async def test_chat_completion_does_not_use_extended_thinking_for_claude_sonnet_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6", "openai/gpt-6-astra", "gpt-5.1"])
+async def test_chat_completion_passes_reasoning_effort_for_gpt5_and_gpt6(monkeypatch, model):
+    # A configured reasoning_effort must reach GPT-5/6-family models — including a
+    # relay-served id like "gpt-6-astra" litellm does not recognize — via
+    # allowed_openai_params, instead of being silently dropped.
+    settings = FakeSettings()
+    settings.config.reasoning_effort = "low"
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+
+        await handler.chat_completion(model=model, system="sys", user="usr", temperature=0.2)
+
+    kwargs = mock_call.call_args.kwargs
+    assert kwargs["reasoning_effort"] == "low"
+    assert "reasoning_effort" in kwargs.get("allowed_openai_params", [])
+    assert "temperature" not in kwargs  # reasoning models reject an explicit temperature
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_omits_reasoning_effort_for_non_reasoning_models(monkeypatch):
+    # A plain relay/chat model must NOT get reasoning_effort forced on it just because
+    # the (default) config value is set — that would break models the relay does not
+    # route to a reasoning backend.
+    settings = FakeSettings()
+    settings.config.reasoning_effort = "low"
+    monkeypatch.setattr(litellm_handler, "get_settings", lambda: settings)
+
+    with patch("pr_agent.algo.ai_handlers.litellm_ai_handler.acompletion", new_callable=AsyncMock) as mock_call:
+        mock_call.return_value = _mock_response()
+        handler = litellm_handler.LiteLLMAIHandler()
+
+        await handler.chat_completion(model="gpt-4o", system="sys", user="usr", temperature=0.2)
+
+    assert "reasoning_effort" not in mock_call.call_args.kwargs
+
+
+@pytest.mark.asyncio
 async def test_chat_completion_combines_prompts_for_user_message_only_models(monkeypatch):
     monkeypatch.setattr(litellm_handler, "get_settings", FakeSettings)
 
