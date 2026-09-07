@@ -93,11 +93,176 @@ def test_all_models_fail_raises_with_aggregate_message_and_cause():
             asyncio.run(retry_with_fallback_models(fake_f))
 
         assert attempted == ["primary-model", "fallback-1"]
-        assert "Failed to generate prediction with any model" in str(exc_info.value)
         # Production code uses `raise ... from e`, so the last failure should be chained.
         assert exc_info.value.__cause__ is last_error
+        message = str(exc_info.value)
+        assert "Failed to generate prediction with any model" in message
+        # The aggregate must name every attempted model...
+        assert "primary-model" in message
+        assert "fallback-1" in message
+        # ...and carry each model's underlying error, so the dashboard shows the
+        # provider's actual refusal reason instead of only the model list.
+        assert "primary failure" in message
+        assert "last failure" in message
     finally:
         _restore_settings(snapshot)
+
+
+def test_all_models_fail_message_collapses_and_truncates_per_model_reasons():
+    snapshot = _snapshot_settings()
+    try:
+        get_settings().set("config.model", "primary-model")
+        get_settings().set("config.fallback_models", [])
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        long_reason = " ".join(["word"] * 300)
+
+        async def fake_f(model):
+            raise RuntimeError(f"line one\nline two\n{long_reason}")
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert message.count("\n") == 1  # header + one line per attempted model
+        assert "line one line two" in message  # newlines collapsed per model
+        assert "word word" in message
+        assert message.endswith("…")
+        assert len(message) <= 2000  # whole message respects the audit's error_message bound
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_all_models_fail_message_keeps_every_model_within_aggregate_bound():
+    """Budget the 2000-char audit bound across attempts, never dropping a model line."""
+    snapshot = _snapshot_settings()
+    try:
+        get_settings().set("config.model", "primary-model")
+        get_settings().set("config.fallback_models", ["fallback-1", "fallback-2", "fallback-3"])
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        long_reason = "r" * 5000
+
+        async def fake_f(model):
+            raise RuntimeError(f"{model}-reason {long_reason}")
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert len(message) <= 2000
+        for model in ("primary-model", "fallback-1", "fallback-2", "fallback-3"):
+            assert f"- {model}: " in message  # every attempted model keeps its line
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_all_models_fail_message_keeps_every_model_with_many_fallbacks_and_long_names():
+    """Line prefixes and the header are reserved before splitting the reason budget.
+
+    Ten models with long names plus long reasons must still leave each *listed*
+    model with its own (possibly very short) line, rather than slicing the tail
+    models off. Attempt counts beyond the listing cap are summarized in the header
+    instead of being dropped blind.
+    """
+    snapshot = _snapshot_settings()
+    try:
+        get_settings().set("config.model", "primary-model-with-a-long-name")
+        fallbacks = [f"fallback-model-with-a-long-name-{i}" for i in range(10)]
+        get_settings().set("config.fallback_models", fallbacks)
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        async def fake_f(model):
+            raise RuntimeError("x" * 5000)
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert len(message) <= 2000
+        listed = ["primary-model-with-a-long-name"] + fallbacks[:6]
+        for model in listed:
+            assert f"- {model}: " in message
+        # Middle attempts are summarized; the final attempt always keeps its line.
+        assert "(+3 more, last attempt below)" in message
+        assert f"- {fallbacks[9]}: " in message
+        for model in fallbacks[6:9]:
+            assert f"- {model}: " not in message
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_all_models_fail_message_bounds_very_long_model_labels():
+    """Each rendered model label is capped, so prefixes always fit the budget.
+
+    Two models with 5000-char identifiers would otherwise render their names twice
+    each (header + line) and exhaust the 2000-char aggregate before any reason
+    text, letting the trailing slice remove whole model rows.
+    """
+    snapshot = _snapshot_settings()
+    try:
+        long_name = "m" * 5000
+        get_settings().set("config.model", long_name)
+        get_settings().set("config.fallback_models", [long_name])
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        async def fake_f(model):
+            raise RuntimeError("refusal reason")
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert len(message) <= 2000
+        # Both abbreviated labels carry their line, and the reason survives.
+        assert message.count("mmm…: ") == 2  # one per listed model line
+        assert "refusal reason" in message
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_all_models_fail_message_falls_back_to_exception_class_for_empty_reasons():
+    """asyncio.TimeoutError str()s to "", so its line uses the class name."""
+    snapshot = _snapshot_settings()
+    try:
+        get_settings().set("config.model", "primary-model")
+        get_settings().set("config.fallback_models", [])
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        async def fake_f(model):
+            raise asyncio.TimeoutError()
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert "- primary-model: TimeoutError" in message  # class name, not a bare label
+        assert "TimeoutError" in message
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_bounded_failure_reason_truncates_at_capture_time():
+    """The retained reason is capped immediately, not only when rendered.
+
+    A provider can embed a multi-megabyte body in the exception text; holding the
+    full string across the remaining fallback attempts would spike memory.
+    """
+    from pr_agent.algo.pr_processing import _bounded_failure_reason
+
+    huge = "y" * 5_000_000
+    reason = _bounded_failure_reason(RuntimeError(huge))
+    assert len(reason) == 501  # 500 chars + ellipsis
+    assert reason.endswith("…")
+    # Multi-line messages collapse into one line before truncation.
+    multiline = _bounded_failure_reason(RuntimeError("\n".join(["z"] * 400)))
+    assert "\n" not in multiline
+    assert len(multiline) == 501
 
 
 def test_deployment_id_updated_per_attempt():

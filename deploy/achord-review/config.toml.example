@@ -6,10 +6,12 @@
 
 [config]
 model = "openai/gpt-5.6-sol"
-# Listing the same model twice was never a fallback route: it only doubled the cost of
-# every failure (2 models x 2 tenacity attempts x 3 SDK retries = 24 min at 120s each).
-# The retry layers underneath already cover a transient relay error.
-fallback_models = []
+# A refusal is not a transient error: the upstream occasionally flags a legitimate
+# review diff as cybersecurity risk and rejects it outright. Retrying the same model
+# only re-runs the same classifier decision, so fall back to a different GPT-5 model
+# (gpt-5.4, same relay) for a fresh decision instead of failing the review.
+# Comment out or empty the list to disable.
+fallback_models = ["openai/gpt-5.4"]
 # gpt-5.6-sol is not in litellm's built-in table, so its context size must be declared.
 custom_model_max_tokens = 1000000
 # Global ceiling: get_max_tokens() takes min(max_model_tokens, custom_model_max_tokens),

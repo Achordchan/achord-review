@@ -335,6 +335,11 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
     all_models = _get_all_models(model_type)
     all_deployments = _get_all_deployments(all_models)
     # try each (model, deployment_id) pair until one is successful, otherwise raise exception
+    # Only the bounded reason text is kept per attempt, not the exception object: an
+    # exception pins its traceback and frame locals (prompt/response state included),
+    # and retaining one across the remaining fallback attempts holds that memory at
+    # peak for no benefit. The last exception itself is kept only for `raise ... from`.
+    failure_reasons: List[Tuple[str, str]] = []  # (model, bounded reason) per attempt
     for i, (model, deployment_id) in enumerate(zip(all_models, all_deployments)):
         try:
             get_logger().debug(
@@ -348,11 +353,89 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
                 f"Failed to generate prediction with {model}",
                 artifact={"error": e},
             )
+            failure_reasons.append((model, _bounded_failure_reason(e)))
             if i == len(all_models) - 1:  # If it's the last iteration
-                raise Exception(f"Failed to generate prediction with any model of {all_models}") from e
+                raise Exception(_format_all_models_failed(failure_reasons)) from e
         else:
             record_model_used(model, is_fallback=i > 0)
             return result
+
+
+_MAX_PER_MODEL_ERROR_CHARS = 500
+_MAX_AGGREGATE_ERROR_CHARS = 2000  # mirrors dashboard audit's error_message bound
+_MAX_MODELS_IN_MESSAGE = 8
+_MAX_MODEL_LABEL_CHARS = 100  # per rendered model name; long identifiers are abbreviated
+
+
+def _bounded_failure_reason(error: Exception) -> str:
+    """Collapse an exception into one bounded line, never empty.
+
+    Exceptions such as asyncio.TimeoutError render as "" via str(), which would
+    show a bare `- model:` line; fall back to the class name so a timeout stays
+    distinguishable from any other provider failure. The reason is also truncated
+    here, at capture time: a provider can stuff a multi-megabyte response body
+    into the exception text, and only a bounded string is retained across the
+    remaining fallback attempts.
+    """
+    reason = " ".join(str(error).split())
+    if not reason:
+        reason = type(error).__name__
+    if len(reason) > _MAX_PER_MODEL_ERROR_CHARS:
+        reason = reason[:_MAX_PER_MODEL_ERROR_CHARS] + "…"
+    return reason
+
+
+def _format_all_models_failed(failure_reasons: List[Tuple[str, str]]) -> str:
+    """One line per attempted model with its bounded failure reason.
+
+    The model list alone tells the dashboard nothing actionable: a provider refusal
+    ("flagged for possible cybersecurity risk", a quota error, a timeout) is only
+    visible in the chained exception, which the audit path flattens via str(e).
+    Reasons arrive pre-collapsed and non-empty (see _bounded_failure_reason); this
+    function fits the whole message into the audit's 2000-char error_message bound.
+
+    Every fixed cost is bounded before reasons are sized: at most
+    _MAX_MODELS_IN_MESSAGE models are listed (the overflow is counted in the
+    header, which keeps the full attempt count visible), and each model label is
+    capped at _MAX_MODEL_LABEL_CHARS, so the header plus all line prefixes always
+    fit and every listed model retains an actionable (possibly short) reason.
+    Truncating a name or a reason's tail is always preferable to dropping a model
+    entirely. The final attempt always keeps a slot: it is the last error raised
+    (the `raise ... from` cause), so hiding it would leave the freshest failure
+    unexplained wherever only this message is recorded.
+    """
+    def _label(model: str) -> str:
+        return model if len(model) <= _MAX_MODEL_LABEL_CHARS else model[:_MAX_MODEL_LABEL_CHARS - 1] + "…"
+
+    if len(failure_reasons) > _MAX_MODELS_IN_MESSAGE:
+        # First models minus one slot, an ellipsis marker, then the final attempt.
+        head = failure_reasons[:_MAX_MODELS_IN_MESSAGE - 1]
+        tail = failure_reasons[-1]
+        omitted = len(failure_reasons) - len(head) - 1
+        listed = head + [("<…>", "")] + [tail]
+        marker = f" (+{omitted} more, last attempt below)"
+    else:
+        listed = failure_reasons
+        marker = ""
+    header = ("Failed to generate prediction with any model of "
+              f"{[_label(model) for model, _ in listed]}{marker}:")
+    prefixes = sum(len(f"\n- {_label(model)}: ") for model, _ in listed)
+    # Room left for reason text after the header and every line's label.
+    reason_budget = _MAX_AGGREGATE_ERROR_CHARS - len(header) - prefixes
+    per_model_cap = min(reason_budget // max(len(listed), 1), _MAX_PER_MODEL_ERROR_CHARS)
+    per_model_cap = max(per_model_cap, 1)
+    lines = [header]
+    for model, reason in listed:
+        if reason:
+            if len(reason) > per_model_cap:
+                reason = reason[:per_model_cap] + "…"
+        else:  # the marker slot: the omitted middle attempts
+            reason = "…"
+        lines.append(f"- {_label(model)}: {reason}")
+    message = "\n".join(lines)
+    if len(message) > _MAX_AGGREGATE_ERROR_CHARS:
+        message = message[:_MAX_AGGREGATE_ERROR_CHARS - 1] + "…"
+    return message
 
 
 def _get_all_models(model_type: ModelType = ModelType.REGULAR) -> List[str]:
