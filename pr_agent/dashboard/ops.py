@@ -1193,6 +1193,12 @@ def _review_log_files() -> List[str]:
     stem, ext = os.path.splitext(base_path)
     ext = ext or ".log"
     matches = [p for p in glob.glob(f"{glob.escape(stem)}.*{ext}") if os.path.isfile(p)]
+    # Also read the base path itself: a deployment (or a pre-upgrade log) that
+    # points ACHORD_REVIEW_LOG_FILE at a literal file still shows up. It carries
+    # no pid, so it is read but never pruned. The "<stem>.*<ext>" glob does not
+    # match "<stem><ext>", so this cannot double-count.
+    if os.path.isfile(base_path):
+        matches.append(base_path)
     matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     prunable = [
         p for p in matches

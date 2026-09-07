@@ -289,16 +289,28 @@ def post_fork(server, worker):
     # named for the *master*, and every worker inherits the same descriptor. Re-running it
     # here gives each worker its own file again. All three apps that use this config call
     # setup_logger identically, so repeating that call is enough.
+    from pr_agent.config_loader import get_settings
+    from pr_agent.log import LoggingFormat, setup_logger
+
+    if get_settings().get("CONFIG.ANALYTICS_FOLDER", ""):
+        setup_logger(fmt=LoggingFormat.JSON, level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))
+
+
+def post_worker_init(worker):
+    """Runs in each worker after it has loaded the app (both preloaded and not).
+
+    The dashboard log sink is installed here, not in post_fork: without preload the
+    worker imports the app — whose import-time setup_logger clears every sink —
+    *after* post_fork, so a sink installed there would be wiped. This hook runs
+    after load_wsgi() in every startup mode. The sink is enqueued, so it must live
+    in the worker and never be inherited from the preloaded master (a forked writer
+    thread would deadlock on the next remove).
+    """
     import os
 
+    if not os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip():
+        return
     from pr_agent.config_loader import get_settings
-    from pr_agent.log import LoggingFormat, enable_review_log_sink, setup_logger
+    from pr_agent.log import enable_review_log_sink
 
-    log_level = get_settings().get("CONFIG.LOG_LEVEL", "DEBUG")
-    review_log = os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip()
-    if get_settings().get("CONFIG.ANALYTICS_FOLDER", "") or review_log:
-        setup_logger(fmt=LoggingFormat.JSON, level=log_level)
-    # The dashboard log sink is enqueued, so it must be opened in the worker, never
-    # inherited from the preloaded master (a forked writer thread would deadlock).
-    if review_log:
-        enable_review_log_sink(level=log_level)
+    enable_review_log_sink(level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))

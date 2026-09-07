@@ -175,15 +175,18 @@ class TestPostFork:
         gunicorn_config.post_fork(server=None, worker=None)
         assert len(recorded_setup_logger) == 1
 
-    def test_reopens_review_log_file_in_the_worker(self, recorded_setup_logger, analytics_folder,
-                                                   monkeypatch, tmp_path):
-        # The enqueued review-log sink must be opened in the worker (never inherited
-        # from the preloaded master), even when the analytics folder is unset.
-        analytics_folder("")
+    def test_post_worker_init_installs_the_review_sink(self, recorded_setup_logger,
+                                                       monkeypatch, tmp_path):
+        # Installed after the app has loaded (post_worker_init), so a non-preloaded
+        # worker's import-time setup_logger cannot wipe it. post_fork does not.
         monkeypatch.setenv("ACHORD_REVIEW_LOG_FILE", str(tmp_path / "achord-review.log"))
-        gunicorn_config.post_fork(server=None, worker=None)
-        assert len(recorded_setup_logger) == 1
+        gunicorn_config.post_worker_init(worker=None)
         assert len(self.sink_calls) == 1
+
+    def test_post_worker_init_is_a_noop_without_the_env(self, recorded_setup_logger, monkeypatch):
+        monkeypatch.delenv("ACHORD_REVIEW_LOG_FILE", raising=False)
+        gunicorn_config.post_worker_init(worker=None)
+        assert self.sink_calls == []
 
 
 def test_when_ready_freezes_gc(monkeypatch):

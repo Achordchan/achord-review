@@ -64,6 +64,17 @@ def test_tail_merges_across_worker_files_by_timestamp(log_base):
     ]
 
 
+def test_tail_includes_the_configured_base_file(log_base):
+    # A deployment (or a pre-upgrade log) that points the env at a literal file is
+    # still read, alongside the per-pid worker files.
+    _write(log_base, ["2026-09-07 12:00:05.000 | INFO    | - | m:f:1 - from the base file"])
+    _write(log_base.parent / f"achord-review.{os.getpid()}.log",
+           ["2026-09-07 12:00:00.000 | INFO    | - | m:f:1 - from a worker file"])
+    lines = ops.tail_logs()
+    assert any("from the base file" in ln for ln in lines)
+    assert any("from a worker file" in ln for ln in lines)
+
+
 def test_tail_returns_the_most_recent_lines_up_to_the_cap(log_base):
     _write(log_base.parent / "achord-review.111.log", [
         f"2026-09-07 12:00:{n:02d}.000 | INFO    | - | m:f:1 - line {n}" for n in range(10)
