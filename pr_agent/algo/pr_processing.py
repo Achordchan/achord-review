@@ -360,6 +360,7 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
 _MAX_PER_MODEL_ERROR_CHARS = 500
 _MAX_AGGREGATE_ERROR_CHARS = 2000  # mirrors dashboard audit's error_message bound
 _MAX_MODELS_IN_MESSAGE = 8
+_MAX_MODEL_LABEL_CHARS = 100  # per rendered model name; long identifiers are abbreviated
 
 
 def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
@@ -369,23 +370,25 @@ def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
     ("flagged for possible cybersecurity risk", a quota error, a timeout) is only
     visible in the chained exception, which the audit path flattens via str(e).
     Collapse each error's whitespace and cap it so the aggregate stays readable and
-    within the audit's 2000-char error_message bound. The header and every line
-    prefix (`\\n- model: `) are reserved up front and only the remainder is split
-    across reasons, so every listed model keeps a line no matter how long the error
-    strings are; truncating a reason's tail is always preferable to dropping a
-    model entirely.
+    within the audit's 2000-char error_message bound.
 
-    To keep the labels themselves inside the budget, at most _MAX_MODELS_IN_MESSAGE
-    models are listed (long name lists are the normal case, not an anomaly); any
-    further attempts are counted in the header, which is the only place the full
-    attempt count still appears.
+    Every fixed cost is bounded before reasons are sized: at most
+    _MAX_MODELS_IN_MESSAGE models are listed (the overflow is counted in the
+    header, which keeps the full attempt count visible), and each model label is
+    capped at _MAX_MODEL_LABEL_CHARS, so the header plus all line prefixes always
+    fit and every listed model retains an actionable (possibly short) reason.
+    Truncating a name or a reason's tail is always preferable to dropping a model
+    entirely.
     """
+    def _label(model: str) -> str:
+        return model if len(model) <= _MAX_MODEL_LABEL_CHARS else model[:_MAX_MODEL_LABEL_CHARS - 1] + "…"
+
     listed = failures[:_MAX_MODELS_IN_MESSAGE]
     remaining = len(failures) - len(listed)
     header = ("Failed to generate prediction with any model of "
-              f"{[model for model, _ in listed]}"
+              f"{[_label(model) for model, _ in listed]}"
               + (f" (+{remaining} more)" if remaining > 0 else "") + ":")
-    prefixes = sum(len(f"\n- {model}: ") for model, _ in listed)
+    prefixes = sum(len(f"\n- {_label(model)}: ") for model, _ in listed)
     # Room left for reason text after the header and every line's label.
     reason_budget = _MAX_AGGREGATE_ERROR_CHARS - len(header) - prefixes
     per_model_cap = min(reason_budget // max(len(listed), 1), _MAX_PER_MODEL_ERROR_CHARS)
@@ -395,7 +398,7 @@ def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
         reason = " ".join(str(error).split())
         if len(reason) > per_model_cap:
             reason = reason[:per_model_cap] + "…"
-        lines.append(f"- {model}: {reason}")
+        lines.append(f"- {_label(model)}: {reason}")
     message = "\n".join(lines)
     if len(message) > _MAX_AGGREGATE_ERROR_CHARS:
         message = message[:_MAX_AGGREGATE_ERROR_CHARS - 1] + "…"

@@ -194,6 +194,36 @@ def test_all_models_fail_message_keeps_every_model_with_many_fallbacks_and_long_
         _restore_settings(snapshot)
 
 
+def test_all_models_fail_message_bounds_very_long_model_labels():
+    """Each rendered model label is capped, so prefixes always fit the budget.
+
+    Two models with 5000-char identifiers would otherwise render their names twice
+    each (header + line) and exhaust the 2000-char aggregate before any reason
+    text, letting the trailing slice remove whole model rows.
+    """
+    snapshot = _snapshot_settings()
+    try:
+        long_name = "m" * 5000
+        get_settings().set("config.model", long_name)
+        get_settings().set("config.fallback_models", [long_name])
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        async def fake_f(model):
+            raise RuntimeError("refusal reason")
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert len(message) <= 2000
+        # Both abbreviated labels carry their line, and the reason survives.
+        assert message.count("mmm…: ") == 2  # one per listed model line
+        assert "refusal reason" in message
+    finally:
+        _restore_settings(snapshot)
+
+
 def test_deployment_id_updated_per_attempt():
     snapshot = _snapshot_settings()
     try:
