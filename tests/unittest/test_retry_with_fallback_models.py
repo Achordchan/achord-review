@@ -183,12 +183,13 @@ def test_all_models_fail_message_keeps_every_model_with_many_fallbacks_and_long_
 
         message = str(exc_info.value)
         assert len(message) <= 2000
-        listed = ["primary-model-with-a-long-name"] + fallbacks[:7]
+        listed = ["primary-model-with-a-long-name"] + fallbacks[:6]
         for model in listed:
             assert f"- {model}: " in message
-        # The overflow attempts are counted in the header, not silently lost.
-        assert "(+3 more)" in message
-        for model in fallbacks[7:]:
+        # Middle attempts are summarized; the final attempt always keeps its line.
+        assert "(+3 more, last attempt below)" in message
+        assert f"- {fallbacks[9]}: " in message
+        for model in fallbacks[6:9]:
             assert f"- {model}: " not in message
     finally:
         _restore_settings(snapshot)
@@ -244,6 +245,24 @@ def test_all_models_fail_message_falls_back_to_exception_class_for_empty_reasons
         assert "TimeoutError" in message
     finally:
         _restore_settings(snapshot)
+
+
+def test_bounded_failure_reason_truncates_at_capture_time():
+    """The retained reason is capped immediately, not only when rendered.
+
+    A provider can embed a multi-megabyte body in the exception text; holding the
+    full string across the remaining fallback attempts would spike memory.
+    """
+    from pr_agent.algo.pr_processing import _bounded_failure_reason
+
+    huge = "y" * 5_000_000
+    reason = _bounded_failure_reason(RuntimeError(huge))
+    assert len(reason) == 501  # 500 chars + ellipsis
+    assert reason.endswith("…")
+    # Multi-line messages collapse into one line before truncation.
+    multiline = _bounded_failure_reason(RuntimeError("\n".join(["z"] * 400)))
+    assert "\n" not in multiline
+    assert len(multiline) == 501
 
 
 def test_deployment_id_updated_per_attempt():

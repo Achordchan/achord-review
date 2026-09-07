@@ -372,11 +372,16 @@ def _bounded_failure_reason(error: Exception) -> str:
 
     Exceptions such as asyncio.TimeoutError render as "" via str(), which would
     show a bare `- model:` line; fall back to the class name so a timeout stays
-    distinguishable from any other provider failure.
+    distinguishable from any other provider failure. The reason is also truncated
+    here, at capture time: a provider can stuff a multi-megabyte response body
+    into the exception text, and only a bounded string is retained across the
+    remaining fallback attempts.
     """
     reason = " ".join(str(error).split())
     if not reason:
         reason = type(error).__name__
+    if len(reason) > _MAX_PER_MODEL_ERROR_CHARS:
+        reason = reason[:_MAX_PER_MODEL_ERROR_CHARS] + "…"
     return reason
 
 
@@ -395,16 +400,25 @@ def _format_all_models_failed(failure_reasons: List[Tuple[str, str]]) -> str:
     capped at _MAX_MODEL_LABEL_CHARS, so the header plus all line prefixes always
     fit and every listed model retains an actionable (possibly short) reason.
     Truncating a name or a reason's tail is always preferable to dropping a model
-    entirely.
+    entirely. The final attempt always keeps a slot: it is the last error raised
+    (the `raise ... from` cause), so hiding it would leave the freshest failure
+    unexplained wherever only this message is recorded.
     """
     def _label(model: str) -> str:
         return model if len(model) <= _MAX_MODEL_LABEL_CHARS else model[:_MAX_MODEL_LABEL_CHARS - 1] + "…"
 
-    listed = failure_reasons[:_MAX_MODELS_IN_MESSAGE]
-    remaining = len(failure_reasons) - len(listed)
+    if len(failure_reasons) > _MAX_MODELS_IN_MESSAGE:
+        # First models minus one slot, an ellipsis marker, then the final attempt.
+        head = failure_reasons[:_MAX_MODELS_IN_MESSAGE - 1]
+        tail = failure_reasons[-1]
+        omitted = len(failure_reasons) - len(head) - 1
+        listed = head + [("<…>", "")] + [tail]
+        marker = f" (+{omitted} more, last attempt below)"
+    else:
+        listed = failure_reasons
+        marker = ""
     header = ("Failed to generate prediction with any model of "
-              f"{[_label(model) for model, _ in listed]}"
-              + (f" (+{remaining} more)" if remaining > 0 else "") + ":")
+              f"{[_label(model) for model, _ in listed]}{marker}:")
     prefixes = sum(len(f"\n- {_label(model)}: ") for model, _ in listed)
     # Room left for reason text after the header and every line's label.
     reason_budget = _MAX_AGGREGATE_ERROR_CHARS - len(header) - prefixes
@@ -412,8 +426,11 @@ def _format_all_models_failed(failure_reasons: List[Tuple[str, str]]) -> str:
     per_model_cap = max(per_model_cap, 1)
     lines = [header]
     for model, reason in listed:
-        if len(reason) > per_model_cap:
-            reason = reason[:per_model_cap] + "…"
+        if reason:
+            if len(reason) > per_model_cap:
+                reason = reason[:per_model_cap] + "…"
+        else:  # the marker slot: the omitted middle attempts
+            reason = "…"
         lines.append(f"- {_label(model)}: {reason}")
     message = "\n".join(lines)
     if len(message) > _MAX_AGGREGATE_ERROR_CHARS:
