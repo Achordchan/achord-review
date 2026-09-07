@@ -1177,29 +1177,38 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-def _review_log_files() -> List[str]:
-    """Per-process log files for the configured base path, newest first.
+def _glob_review_log_files() -> tuple:
+    """(files newest-first, stem) for the configured base path, or ([], "").
 
     ACHORD_REVIEW_LOG_FILE is a base path; each process writes "<stem>.<pid><ext>"
-    and rotation adds dated siblings, so this globs them and returns the most recent
-    handful to scan. Pruning removes only files whose owning worker has exited: a
-    live worker keeps its sink's descriptor open, so deleting its file — even an
-    old, idle one that fell behind newer workers' — would send that worker's later
-    logs to an unlinked file no reader ever sees. Unknown owners count as live.
+    and rotation adds dated siblings. The base path itself is also read: a
+    deployment (or a pre-upgrade log) that points the env at a literal file still
+    shows up. It carries no pid, so it is read but never pruned; the "<stem>.*<ext>"
+    glob never matches "<stem><ext>", so this cannot double-count.
     """
     base_path = os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip()
     if not base_path:
-        return []
+        return [], ""
     stem, ext = os.path.splitext(base_path)
     ext = ext or ".log"
     matches = [p for p in glob.glob(f"{glob.escape(stem)}.*{ext}") if os.path.isfile(p)]
-    # Also read the base path itself: a deployment (or a pre-upgrade log) that
-    # points ACHORD_REVIEW_LOG_FILE at a literal file still shows up. It carries
-    # no pid, so it is read but never pruned. The "<stem>.*<ext>" glob does not
-    # match "<stem><ext>", so this cannot double-count.
     if os.path.isfile(base_path):
         matches.append(base_path)
     matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return matches, stem
+
+
+def prune_review_log_files() -> None:
+    """Delete log files whose owning worker has exited, keeping newest MAX_LOG_FILES_KEPT.
+
+    Run at worker startup (post_worker_init) as well as on read, so retired per-pid
+    files cannot grow without bound on the data volume when nobody opens the log
+    views. A live worker's file is never removed — its sink still holds the
+    descriptor, so deleting even an old, idle one would send that worker's later
+    logs to an unlinked file no reader ever sees. Unknown owners count as live, and
+    the pid-less configured base file is never pruned.
+    """
+    matches, stem = _glob_review_log_files()
     prunable = [
         p for p in matches
         if (pid := _log_owner_pid(p, stem)) is not None and not _process_alive(pid)
@@ -1207,6 +1216,12 @@ def _review_log_files() -> List[str]:
     for stale in prunable[MAX_LOG_FILES_KEPT:]:
         with suppress(OSError):
             os.remove(stale)
+
+
+def _review_log_files() -> List[str]:
+    """Per-process log files for the configured base path, newest first, capped."""
+    prune_review_log_files()
+    matches, _stem = _glob_review_log_files()
     return [p for p in matches if os.path.exists(p)][:MAX_LOG_FILES_SCANNED]
 
 

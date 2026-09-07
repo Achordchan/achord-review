@@ -311,6 +311,10 @@ def post_worker_init(worker):
     if not os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip():
         return
     from pr_agent.config_loader import get_settings
+    from pr_agent.dashboard import ops
     from pr_agent.log import enable_review_log_sink
 
     enable_review_log_sink(level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))
+    # Reap files from workers that have since exited, so a restart-churning
+    # deployment cannot grow the log dir without anyone opening the panel.
+    ops.prune_review_log_files()

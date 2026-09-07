@@ -178,10 +178,15 @@ class TestPostFork:
     def test_post_worker_init_installs_the_review_sink(self, recorded_setup_logger,
                                                        monkeypatch, tmp_path):
         # Installed after the app has loaded (post_worker_init), so a non-preloaded
-        # worker's import-time setup_logger cannot wipe it. post_fork does not.
+        # worker's import-time setup_logger cannot wipe it. post_fork does not. It
+        # also reaps files from workers that have exited, independently of reads.
+        import pr_agent.dashboard.ops as ops
+        prunes = []
+        monkeypatch.setattr(ops, "prune_review_log_files", lambda: prunes.append(True))
         monkeypatch.setenv("ACHORD_REVIEW_LOG_FILE", str(tmp_path / "achord-review.log"))
         gunicorn_config.post_worker_init(worker=None)
         assert len(self.sink_calls) == 1
+        assert prunes == [True]
 
     def test_post_worker_init_is_a_noop_without_the_env(self, recorded_setup_logger, monkeypatch):
         monkeypatch.delenv("ACHORD_REVIEW_LOG_FILE", raising=False)

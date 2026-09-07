@@ -143,16 +143,31 @@ def test_enable_review_log_sink_writes_a_per_pid_file_carrying_the_review_id(log
     try:
         with get_logger().contextualize(review_request_id="req12345"):
             get_logger().info("hello inside a review")
-        get_logger().complete()  # drain the enqueued writer thread before reading
+        logmod._REVIEW_LOG_WRITER.stop()  # drain + stop the writer thread before reading
         stem, ext = os.path.splitext(str(log_base))
         expected = f"{stem}.{os.getpid()}{ext}"
         assert os.path.isfile(expected)
         content = open(expected, encoding="utf-8").read()
         assert "req12345" in content and "hello inside a review" in content
     finally:
-        # Detach the enqueued sink (joins its writer thread — safe in-process) and
-        # clear the default extra so nothing points at this tmp file (deleted on
-        # teardown) or leaks into other tests' logging.
+        # Detach the sink and clear the default extra so nothing points at this tmp
+        # file (deleted on teardown) or leaks into other tests' logging.
         get_logger().remove(sink_id)
         logmod._REVIEW_SINK_ID = None
+        logmod._REVIEW_LOG_WRITER = None
         get_logger().configure(extra={})
+
+
+def test_review_log_writer_drops_instead_of_blocking_when_full(tmp_path):
+    import queue as _queue
+
+    from pr_agent.log import _ReviewLogWriter
+
+    writer = _ReviewLogWriter(str(tmp_path / "x.log"))
+    writer.stop()  # stop the drain thread so the queue cannot empty
+    # A full bounded queue with no consumer: write must drop, never block.
+    writer._queue = _queue.Queue(maxsize=1)
+    writer._queue.put_nowait("occupied")
+    writer.write("dropped-1")
+    writer.write("dropped-2")
+    assert writer.dropped == 2
