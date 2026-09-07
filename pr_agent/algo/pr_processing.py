@@ -358,6 +358,8 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
 
 
 _MAX_PER_MODEL_ERROR_CHARS = 500
+_MIN_PER_MODEL_ERROR_CHARS = 80  # keeps a reason line meaningful when the budget is split thin
+_MAX_AGGREGATE_ERROR_CHARS = 2000  # mirrors dashboard audit's error_message bound
 
 
 def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
@@ -367,16 +369,27 @@ def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
     ("flagged for possible cybersecurity risk", a quota error, a timeout) is only
     visible in the chained exception, which the audit path flattens via str(e).
     Collapse each error's whitespace and cap it so the aggregate stays readable and
-    within the audit's 2000-char error_message bound.
+    within the audit's 2000-char error_message bound. The per-model cap is derived
+    from the aggregate bound so every attempted model keeps a line even when the
+    reason strings are long: with a 2,000-char budget, [model1, model2, ...] : +
+    one line per model is what fits, and truncating the last model's tail is always
+    preferable to dropping it entirely.
     """
-    lines = ["Failed to generate prediction with any model of "
-             f"{[model for model, _ in failures]}:"]
+    header = ("Failed to generate prediction with any model of "
+              f"{[model for model, _ in failures]}:")
+    per_model_cap = max(_MAX_AGGREGATE_ERROR_CHARS // max(len(failures), 1),
+                        _MIN_PER_MODEL_ERROR_CHARS) - len(header) // max(len(failures), 1)
+    per_model_cap = min(per_model_cap, _MAX_PER_MODEL_ERROR_CHARS)
+    lines = [header]
     for model, error in failures:
         reason = " ".join(str(error).split())
-        if len(reason) > _MAX_PER_MODEL_ERROR_CHARS:
-            reason = reason[:_MAX_PER_MODEL_ERROR_CHARS] + "…"
+        if len(reason) > per_model_cap:
+            reason = reason[:per_model_cap] + "…"
         lines.append(f"- {model}: {reason}")
-    return "\n".join(lines)
+    message = "\n".join(lines)
+    if len(message) > _MAX_AGGREGATE_ERROR_CHARS:
+        message = message[:_MAX_AGGREGATE_ERROR_CHARS - 1] + "…"
+    return message
 
 
 def _get_all_models(model_type: ModelType = ModelType.REGULAR) -> List[str]:

@@ -129,7 +129,32 @@ def test_all_models_fail_message_collapses_and_truncates_per_model_reasons():
         assert "line one line two" in message  # newlines collapsed per model
         assert "word word" in message
         assert message.endswith("…")
-        assert len(message) < 600  # each model's reason is capped at 500 chars
+        assert len(message) <= 2000  # whole message respects the audit's error_message bound
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_all_models_fail_message_keeps_every_model_within_aggregate_bound():
+    """Budget the 2000-char audit bound across attempts, never dropping a model line."""
+    snapshot = _snapshot_settings()
+    try:
+        get_settings().set("config.model", "primary-model")
+        get_settings().set("config.fallback_models", ["fallback-1", "fallback-2", "fallback-3"])
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        long_reason = "r" * 5000
+
+        async def fake_f(model):
+            raise RuntimeError(f"{model}-reason {long_reason}")
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert len(message) <= 2000
+        for model in ("primary-model", "fallback-1", "fallback-2", "fallback-3"):
+            assert f"- {model}: " in message  # every attempted model keeps its line
     finally:
         _restore_settings(snapshot)
 
