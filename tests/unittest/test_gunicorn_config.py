@@ -142,6 +142,8 @@ class TestPostFork:
 
         calls = []
         monkeypatch.setattr(pr_agent.log, "setup_logger", lambda **kwargs: calls.append(kwargs))
+        # The other post_fork trigger; clear it so these cases isolate the analytics one.
+        monkeypatch.delenv("ACHORD_REVIEW_LOG_FILE", raising=False)
         return calls
 
     @pytest.fixture
@@ -165,6 +167,15 @@ class TestPostFork:
         # Under preload the sink was opened in the master and named for the master's pid;
         # the worker must open its own.
         analytics_folder(str(tmp_path))
+        gunicorn_config.post_fork(server=None, worker=None)
+        assert len(recorded_setup_logger) == 1
+
+    def test_reopens_review_log_file_in_the_worker(self, recorded_setup_logger, analytics_folder,
+                                                   monkeypatch, tmp_path):
+        # The review log file sink is per-pid too, so the worker must reopen it even
+        # when the analytics folder is unset.
+        analytics_folder("")
+        monkeypatch.setenv("ACHORD_REVIEW_LOG_FILE", str(tmp_path / "achord-review.log"))
         gunicorn_config.post_fork(server=None, worker=None)
         assert len(recorded_setup_logger) == 1
 

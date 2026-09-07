@@ -6,7 +6,7 @@ import { api } from '../lib/api'
 import type { ReviewListData, ReviewRow } from '../lib/types'
 import { Card, Skeleton } from '../components/ui'
 import { SeveritySummary, StatusBadge, TriggerBadge, VerdictBadge } from '../components/badges'
-import { formatDuration, formatTokens, relativeTime, shortSha } from '../lib/format'
+import { CopyableId, formatDuration, formatTokens, relativeTime, shortSha } from '../lib/format'
 import { prHtmlUrl, repoHtmlUrl } from '../lib/github'
 
 const STATUS_OPTIONS = [
@@ -122,6 +122,7 @@ export default function ReviewsPage() {
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-line text-xs uppercase tracking-wider text-muted">
+                  <th className="px-4 py-3 font-medium">编号</th>
                   <th className="px-4 py-3 font-medium">PR</th>
                   <th className="px-4 py-3 font-medium">Commit</th>
                   <th className="px-4 py-3 font-medium">触发</th>
@@ -136,6 +137,7 @@ export default function ReviewsPage() {
               <tbody className={isFetching ? 'opacity-70 transition-opacity' : 'transition-opacity'}>
                 {data.items.map((row) => (
                   <tr key={row.id} className="group border-b border-line/60 transition-colors last:border-0 hover:bg-surface-2/60">
+                    <td className="px-4 py-3 align-top"><CopyableId id={row.id} /></td>
                     <td className="max-w-[260px] px-4 py-3">
                       <Link to={`/dashboard/reviews/${row.id}`} className="block truncate font-medium text-text hover:text-accent">
                         {row.pr_title || `PR #${row.pr_number}`}

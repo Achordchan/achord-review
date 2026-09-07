@@ -13,6 +13,15 @@ class LoggingFormat(str, Enum):
     JSON = "JSON"
 
 
+# Human-readable line for the dashboard log file. The review id sits early in the
+# line (extra[review_request_id], "-" outside a review) so grepping one run is a
+# single token, and the file stays readable in the panel's log view.
+REVIEW_LOG_FORMAT = (
+    "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <7} | {extra[review_request_id]} | "
+    "{name}:{function}:{line} - {message}"
+)
+
+
 def json_format(record: dict) -> str:
     return record["message"]
 
@@ -62,7 +71,46 @@ def setup_logger(level: str = "INFO", fmt: LoggingFormat = LoggingFormat.CONSOLE
             serialize=True,
         )
 
+    _add_review_log_sink(level)
+
     return logger
+
+
+def _add_review_log_sink(level: int) -> None:
+    """Also mirror logs to a rotating file the dashboard can read in-container.
+
+    achord-review otherwise logs only to stdout, which Docker keeps under a host
+    path the container itself cannot read, so the panel's log view stays empty and
+    every lookup means SSHing to the host. When ACHORD_REVIEW_LOG_FILE is set the
+    app writes its logs to a file under that path, one per process (workers share
+    the base name, each writing "<stem>.<pid><ext>"): a per-process file means
+    cross-process rotation never renames a file out from under another worker's
+    open handle. Best-effort — logging must never take the process down, and the
+    stdout sink keeps working if this fails.
+    """
+    base_path = os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip()
+    if not base_path:
+        return
+    try:
+        # A default so REVIEW_LOG_FORMAT's {extra[review_request_id]} always
+        # resolves; the reviewer's contextualize overrides it per run.
+        logger.configure(extra={"review_request_id": "-"})
+        stem, ext = os.path.splitext(base_path)
+        per_process_path = f"{stem}.{os.getpid()}{ext or '.log'}"
+        directory = os.path.dirname(per_process_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        logger.add(
+            per_process_path,
+            level=level,
+            format=REVIEW_LOG_FORMAT,
+            filter=inv_analytics_filter,
+            rotation="10 MB",
+            retention=3,
+            colorize=False,
+        )
+    except Exception as e:
+        logger.warning(f"Review log file sink not enabled ({base_path!r}), error: {e}")
 
 
 def get_logger(*args, **kwargs):

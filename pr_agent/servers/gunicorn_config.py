@@ -288,9 +288,12 @@ def post_fork(server, worker):
     # in the master. When CONFIG.ANALYTICS_FOLDER is set that opens `pr-agent.<pid>.log`
     # named for the *master*, and every worker inherits the same descriptor. Re-running it
     # here gives each worker its own file again. All three apps that use this config call
-    # setup_logger identically, so repeating that call is enough.
+    # setup_logger identically, so repeating that call is enough. ACHORD_REVIEW_LOG_FILE
+    # opens the dashboard log sink the same per-pid way, so it needs the same re-run.
+    import os
+
     from pr_agent.config_loader import get_settings
     from pr_agent.log import LoggingFormat, setup_logger
 
-    if get_settings().get("CONFIG.ANALYTICS_FOLDER", ""):
+    if get_settings().get("CONFIG.ANALYTICS_FOLDER", "") or os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip():
         setup_logger(fmt=LoggingFormat.JSON, level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))

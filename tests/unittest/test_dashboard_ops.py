@@ -166,9 +166,11 @@ def test_execute_restart_runs_fixed_bounded_command_and_releases_ticket(monkeypa
 
 
 def test_tail_logs_caps_a_single_huge_line(monkeypatch, tmp_path):
-    log_path = tmp_path / "service.log"
-    log_path.write_bytes(b"x" * (ops.MAX_LOG_TAIL_BYTES + 1024))
-    monkeypatch.setenv("ACHORD_REVIEW_LOG_FILE", str(log_path))
+    # ACHORD_REVIEW_LOG_FILE is a base path; each process writes "<stem>.<pid><ext>".
+    base = tmp_path / "service.log"
+    per_pid = tmp_path / f"service.{os.getpid()}.log"
+    per_pid.write_bytes(b"x" * (ops.MAX_LOG_TAIL_BYTES + 1024))
+    monkeypatch.setenv("ACHORD_REVIEW_LOG_FILE", str(base))
 
     lines = ops.tail_logs()
 

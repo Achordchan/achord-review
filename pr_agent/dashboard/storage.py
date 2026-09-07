@@ -868,6 +868,11 @@ class DashboardStorage:
         self._transaction(
             _finish, "finish-review transaction", timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
 
+    def get_review_request_id(self, review_id: int) -> Optional[str]:
+        """The correlation id for a review row, used to grep its log lines."""
+        rows = self._read("SELECT request_id FROM reviews WHERE id = ?", (review_id,))
+        return rows[0]["request_id"] if rows else None
+
     def get_review_by_request_id(self, request_id: str, summary_only: bool = False) -> Optional[Dict[str, Any]]:
         columns = "id, repo_name, pr_number" if summary_only else "*"
         rows = self._read(f"SELECT {columns} FROM reviews WHERE request_id = ?", (request_id,))

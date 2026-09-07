@@ -656,6 +656,23 @@ async def cancel_review(review_id: int, request: Request,
         message="已请求停止，将在下一次心跳时生效" if flagged else "该审查已结束或未在运行")
 
 
+@router.get("/reviews/{review_id}/logs")
+async def review_logs(review_id: int, request: Request,
+                      dashboard_session: Optional[str] = Cookie(None)):
+    """Server logs for one review, matched by its correlation id.
+
+    Empty when the review predates the file log sink or its lines have rotated
+    out of the recent window; the front end shows that as "no logs", not an error.
+    """
+    await require_auth(request, dashboard_session)
+    if not 1 <= review_id <= MAX_SQLITE_INTEGER:
+        raise HTTPException(status_code=404, detail="Review not found")
+    request_id = await _dashboard_storage_read("get_review_request_id", review_id)
+    if not request_id:
+        raise HTTPException(status_code=404, detail="审查记录不存在")
+    return _ok({"lines": await asyncio.to_thread(ops.tail_logs_for_request, request_id)})
+
+
 @router.get("/repos")
 async def list_repos(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     await require_auth(request, dashboard_session)

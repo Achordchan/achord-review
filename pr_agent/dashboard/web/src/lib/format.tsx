@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
+import { Check, Copy } from 'lucide-react'
 
 export function formatDuration(ms: number): string {
   if (!ms || ms <= 0) return '—'
@@ -66,6 +67,33 @@ export function severityRank(sev: string | null | undefined): number {
 
 export function countSeverity(counts: Record<string, number>, severity: string): number {
   return counts?.[severity] ?? 0
+}
+
+/** The review's number as a copyable badge — the id to quote when reporting a run. */
+export function CopyableId({ id, className = '' }: { id: number; className?: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(String(id))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    } catch {
+      // clipboard unavailable (insecure origin / denied) — the number is still visible
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title="点击复制编号"
+      className={`inline-flex items-center gap-1 rounded-md bg-surface-3 px-1.5 py-0.5 font-mono text-xs tabular-nums text-muted transition-colors hover:text-text ${className}`}
+    >
+      #{id}
+      {copied ? <Check size={11} className="text-good" /> : <Copy size={11} className="opacity-40" />}
+    </button>
+  )
 }
 
 export function Chip({ children, className = '' }: { children: ReactNode; className?: string }) {

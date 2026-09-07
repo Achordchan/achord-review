@@ -9,6 +9,7 @@ Probes (LLM relay, GitHub App credential, storage) never raise.
 
 import asyncio
 import fcntl
+import glob
 import hashlib
 import os
 import re
@@ -73,6 +74,12 @@ RESTART_COMMAND_TIMEOUT_SECONDS = 45
 # the probe deadline: an unrevoked token stays valid for an hour.
 TOKEN_REVOCATION_TIMEOUT_SECONDS = 5
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
+# Each gunicorn worker (and rotation) leaves its own "<stem>.<pid><ext>" file, so
+# the panel reads several. Cap how many are scanned per request, and prune the
+# oldest so files from long-dead workers cannot pile up in the data volume.
+MAX_LOG_FILES_SCANNED = 6
+MAX_LOG_FILES_KEPT = 24
+_LOG_LINE_TIMESTAMP = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)")
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 OPS_LOCK_PATH = os.environ.get("DASHBOARD_OPS_LOCK_PATH", "/app/data/dashboard-ops.lock")
 
@@ -1149,31 +1156,101 @@ def diagnose() -> Dict[str, Any]:
     return results
 
 
-def tail_logs(max_lines: int = 200) -> List[str]:
-    """Best-effort recent log lines for the ops console.
+def _review_log_files() -> List[str]:
+    """Per-process log files for the configured base path, newest first.
 
-    Seeks backwards from the end of the file instead of reading it whole: the
-    ops page polls this every few seconds and a multi-hundred-MB production
-    log must not be slurped into memory each time.
+    ACHORD_REVIEW_LOG_FILE is a base path; each process writes "<stem>.<pid><ext>"
+    and rotation adds dated siblings, so this globs them, prunes the oldest beyond
+    a generous cap (dead workers never clean up after themselves), and returns the
+    most recent handful to scan.
     """
+    base_path = os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip()
+    if not base_path:
+        return []
+    stem, ext = os.path.splitext(base_path)
+    ext = ext or ".log"
+    matches = [p for p in glob.glob(f"{glob.escape(stem)}.*{ext}") if os.path.isfile(p)]
+    matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for stale in matches[MAX_LOG_FILES_KEPT:]:
+        with suppress(OSError):
+            os.remove(stale)
+    return matches[:MAX_LOG_FILES_SCANNED]
+
+
+def _read_tail_text(path: str, max_bytes: int) -> str:
+    """Return the last max_bytes of a file as text, without slurping the whole file."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        start = max(0, size - max_bytes)
+        f.seek(start)
+        data = f.read(size - start)
+    return data.decode(errors="replace")
+
+
+def _split_records(text: str) -> List[tuple]:
+    """Group physical lines into (timestamp, lines) records.
+
+    A record starts at a line beginning with a timestamp; lines without one
+    (a multiline message, or a partial record at the head of a byte window)
+    attach to the record above them so merging never splits one message apart.
+    """
+    records: List[tuple] = []
+    for line in text.splitlines():
+        match = _LOG_LINE_TIMESTAMP.match(line)
+        if match or not records:
+            records.append((match.group(1) if match else "", [line]))
+        else:
+            records[-1][1].append(line)
+    return records
+
+
+def _collect_log_lines(needle: Optional[str], max_lines: int) -> List[str]:
+    """Merge recent records across per-process files, newest-preserving order.
+
+    Records are ordered by their own timestamp so two workers' lines interleave
+    the way they happened; when `needle` is set only records that contain it are
+    kept (the whole record, so a matched multiline message stays intact).
+    """
+    files = _review_log_files()
+    if not files:
+        return []
+    per_file_bytes = max(64 * 1024, MAX_LOG_TAIL_BYTES // len(files))
+    records: List[tuple] = []
+    for path in files:
+        try:
+            for record in _split_records(_read_tail_text(path, per_file_bytes)):
+                if needle is None or any(needle in line for line in record[1]):
+                    records.append(record)
+        except OSError:
+            continue  # a worker's file can rotate/vanish between glob and read
+    records.sort(key=lambda record: record[0])
+    lines: List[str] = []
+    for _timestamp, record_lines in reversed(records):
+        for line in reversed(record_lines):
+            lines.append(line)
+            if len(lines) >= max_lines:
+                lines.reverse()
+                return lines
+    lines.reverse()
+    return lines
+
+
+def tail_logs(max_lines: int = 200) -> List[str]:
+    """Best-effort recent log lines for the ops console, merged across workers."""
     try:
-        log_file = os.environ.get("ACHORD_REVIEW_LOG_FILE", "")
-        if not log_file or not os.path.isfile(log_file):
-            return []
-        chunk_size = 64 * 1024
-        with open(log_file, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            data = b""
-            pos = size
-            while (pos > 0 and data.count(b"\n") <= max_lines
-                   and len(data) < MAX_LOG_TAIL_BYTES):
-                read = min(chunk_size, pos, MAX_LOG_TAIL_BYTES - len(data))
-                pos -= read
-                f.seek(pos)
-                data = f.read(read) + data
-        lines = data.decode(errors="replace").splitlines()
-        return lines[-max_lines:]
+        return _collect_log_lines(None, max_lines)
     except Exception as e:
         get_logger().warning(f"Dashboard log tail failed, error: {e}")
+    return []
+
+
+def tail_logs_for_request(request_id: str, max_lines: int = 500) -> List[str]:
+    """Recent log lines belonging to one review, matched by its correlation id."""
+    if not request_id:
+        return []
+    try:
+        return _collect_log_lines(request_id, max_lines)
+    except Exception as e:
+        get_logger().warning(f"Dashboard per-review log lookup failed, error: {e}")
     return []
