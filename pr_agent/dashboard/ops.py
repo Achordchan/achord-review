@@ -77,7 +77,7 @@ MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
 # Each gunicorn worker (and rotation) leaves its own "<stem>.<pid><ext>" file, so
 # the panel reads several. Cap how many are scanned per request, and prune the
 # oldest so files from long-dead workers cannot pile up in the data volume.
-MAX_LOG_FILES_SCANNED = 6
+MAX_LOG_FILES_SCANNED = 8
 MAX_LOG_FILES_KEPT = 24
 _LOG_LINE_TIMESTAMP = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)")
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
@@ -1177,25 +1177,37 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
+def _safe_mtime(path: str) -> float:
+    """Modification time, or 0 if the file vanished (a concurrent worker's prune)."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def _glob_review_log_files() -> tuple:
     """(files newest-first, stem) for the configured base path, or ([], "").
 
-    ACHORD_REVIEW_LOG_FILE is a base path; each process writes "<stem>.<pid><ext>"
-    and rotation adds dated siblings. The base path itself is also read: a
-    deployment (or a pre-upgrade log) that points the env at a literal file still
-    shows up. It carries no pid, so it is read but never pruned; the "<stem>.*<ext>"
-    glob never matches "<stem><ext>", so this cannot double-count.
+    ACHORD_REVIEW_LOG_FILE is a base path; each process writes "<stem>.<pid><ext>",
+    and RotatingFileHandler names its rollovers "<stem>.<pid><ext>.1".."<ext>.N", so
+    both shapes are matched — otherwise a rolled-over file is invisible to the panel
+    and never pruned. The base path itself is also read: a deployment (or a
+    pre-upgrade log) that points the env at a literal file still shows up. It carries
+    no pid, so it is read but never pruned. A set dedups the two overlapping globs.
     """
     base_path = os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip()
     if not base_path:
         return [], ""
     stem, ext = os.path.splitext(base_path)
     ext = ext or ".log"
-    matches = [p for p in glob.glob(f"{glob.escape(stem)}.*{ext}") if os.path.isfile(p)]
+    escaped = glob.escape(stem)
+    matches = set()
+    for pattern in (f"{escaped}.*{ext}", f"{escaped}.*{ext}.*"):
+        matches.update(p for p in glob.glob(pattern) if os.path.isfile(p))
     if os.path.isfile(base_path):
-        matches.append(base_path)
-    matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return matches, stem
+        matches.add(base_path)
+    # getmtime can race a concurrent prune; _safe_mtime keeps the sort from raising.
+    return sorted(matches, key=_safe_mtime, reverse=True), stem
 
 
 def prune_review_log_files() -> None:

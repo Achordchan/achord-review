@@ -118,6 +118,43 @@ def test_review_log_files_prune_oldest_dead_owner_beyond_the_cap(log_base, monke
     assert survivors == {"achord-review.1004.log", "achord-review.1005.log", "achord-review.1006.log"}
 
 
+def test_glob_and_prune_match_numbered_rotation_backups(log_base, monkeypatch):
+    # RotatingFileHandler names rollovers "<...>.log.1"; they must be discoverable
+    # and prunable, not just the current ".log" file.
+    monkeypatch.setattr(ops, "_process_alive", lambda pid: False)
+    monkeypatch.setattr(ops, "MAX_LOG_FILES_KEPT", 0)  # any dead-owner file is prunable
+    current = log_base.parent / "achord-review.4242.log"
+    backup = log_base.parent / "achord-review.4242.log.1"
+    _write(current, ["2026-09-07 12:00:01.000 | INFO    | - | m:f:1 - current"])
+    _write(backup, ["2026-09-07 12:00:00.000 | INFO    | - | m:f:1 - rolled over"])
+    files, _stem = ops._glob_review_log_files()
+    names = {os.path.basename(p) for p in files}
+    assert {"achord-review.4242.log", "achord-review.4242.log.1"} <= names
+    ops.prune_review_log_files()
+    assert not current.exists() and not backup.exists()
+
+
+def test_writer_rollover_creates_a_numbered_backup_the_reader_sees(log_base, monkeypatch):
+    import pr_agent.log as logmod
+    from pr_agent.log import _ReviewLogWriter
+
+    monkeypatch.setattr(logmod, "REVIEW_LOG_ROTATION_BYTES", 2000)  # tiny — force real rollovers
+    stem, ext = os.path.splitext(str(log_base))
+    per_pid = f"{stem}.{os.getpid()}{ext}"
+    os.makedirs(os.path.dirname(per_pid), exist_ok=True)  # enable_review_log_sink does this in prod
+    writer = _ReviewLogWriter(per_pid)
+    try:
+        for i in range(300):
+            writer.write(
+                f"2026-09-07 12:00:{i % 60:02d}.000 | INFO    | - | m:f:1 - line {i} "
+                f"{'padding' * 5}\n")
+    finally:
+        writer.stop()  # drain + flush all rollovers before asserting
+    assert os.path.isfile(per_pid + ".1")  # RotatingFileHandler produced a numbered backup
+    files, _stem = ops._glob_review_log_files()
+    assert any(os.path.basename(p) == os.path.basename(per_pid) + ".1" for p in files)
+
+
 def test_review_log_files_never_prunes_a_live_owner_file(log_base, monkeypatch):
     monkeypatch.setattr(ops, "MAX_LOG_FILES_KEPT", 1)
     monkeypatch.setattr(ops, "MAX_LOG_FILES_SCANNED", 10)

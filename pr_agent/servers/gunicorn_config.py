@@ -312,9 +312,15 @@ def post_worker_init(worker):
         return
     from pr_agent.config_loader import get_settings
     from pr_agent.dashboard import ops
-    from pr_agent.log import enable_review_log_sink
+    from pr_agent.log import enable_review_log_sink, get_logger
 
-    enable_review_log_sink(level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))
-    # Reap files from workers that have since exited, so a restart-churning
-    # deployment cannot grow the log dir without anyone opening the panel.
-    ops.prune_review_log_files()
+    # Optional log housekeeping must never fail worker startup: pruning touches
+    # files other workers may delete concurrently, and an exception escaping this
+    # hook aborts the worker boot and can bring Gunicorn down.
+    try:
+        enable_review_log_sink(level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))
+        # Reap files from workers that have since exited, so a restart-churning
+        # deployment cannot grow the log dir without anyone opening the panel.
+        ops.prune_review_log_files()
+    except Exception as e:
+        get_logger().warning(f"Review log setup skipped at worker init, error: {e}")
