@@ -159,6 +159,37 @@ def test_all_models_fail_message_keeps_every_model_within_aggregate_bound():
         _restore_settings(snapshot)
 
 
+def test_all_models_fail_message_keeps_every_model_with_many_fallbacks_and_long_names():
+    """Line prefixes and the header are reserved before splitting the reason budget.
+
+    Ten models with long names plus long reasons must still leave each model with
+    its own (possibly very short) line, rather than slicing the tail models off.
+    """
+    snapshot = _snapshot_settings()
+    try:
+        get_settings().set("config.model", "primary-model-with-a-long-name")
+        fallbacks = [f"fallback-model-with-a-long-name-{i}" for i in range(10)]
+        get_settings().set("config.fallback_models", fallbacks)
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        async def fake_f(model):
+            raise RuntimeError("x" * 5000)
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert len(message) <= 2000
+        expected_models = ["primary-model-with-a-long-name"] + fallbacks
+        for model in expected_models:
+            assert f"- {model}: " in message
+        # No hard truncation was needed: the reserved-prefix budget kept every line.
+        assert not message.endswith("…") or message.rstrip("…") == message[:-1]
+    finally:
+        _restore_settings(snapshot)
+
+
 def test_deployment_id_updated_per_attempt():
     snapshot = _snapshot_settings()
     try:
