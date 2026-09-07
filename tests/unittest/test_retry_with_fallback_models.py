@@ -162,8 +162,10 @@ def test_all_models_fail_message_keeps_every_model_within_aggregate_bound():
 def test_all_models_fail_message_keeps_every_model_with_many_fallbacks_and_long_names():
     """Line prefixes and the header are reserved before splitting the reason budget.
 
-    Ten models with long names plus long reasons must still leave each model with
-    its own (possibly very short) line, rather than slicing the tail models off.
+    Ten models with long names plus long reasons must still leave each *listed*
+    model with its own (possibly very short) line, rather than slicing the tail
+    models off. Attempt counts beyond the listing cap are summarized in the header
+    instead of being dropped blind.
     """
     snapshot = _snapshot_settings()
     try:
@@ -181,11 +183,13 @@ def test_all_models_fail_message_keeps_every_model_with_many_fallbacks_and_long_
 
         message = str(exc_info.value)
         assert len(message) <= 2000
-        expected_models = ["primary-model-with-a-long-name"] + fallbacks
-        for model in expected_models:
+        listed = ["primary-model-with-a-long-name"] + fallbacks[:7]
+        for model in listed:
             assert f"- {model}: " in message
-        # No hard truncation was needed: the reserved-prefix budget kept every line.
-        assert not message.endswith("…") or message.rstrip("…") == message[:-1]
+        # The overflow attempts are counted in the header, not silently lost.
+        assert "(+3 more)" in message
+        for model in fallbacks[7:]:
+            assert f"- {model}: " not in message
     finally:
         _restore_settings(snapshot)
 
