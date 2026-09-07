@@ -935,3 +935,13 @@ def test_singleton_retries_initialization_after_transient_failure(tmp_path, monk
     assert first is not second
     assert calls["count"] == 2
     assert storage_module._storage is second
+
+
+def test_get_review_request_id_round_trips_and_missing_is_none(tmp_path):
+    storage = DashboardStorage(db_path=str(tmp_path / "reviews.db"))
+    storage.initialize()
+    request_id = storage.create_review(repo_name="a/b", pr_number=1, pr_url="u")
+    review_id = storage.get_review_by_request_id(request_id)["id"]
+
+    assert storage.get_review_request_id(review_id) == request_id
+    assert storage.get_review_request_id(review_id + 999) is None

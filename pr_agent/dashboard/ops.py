@@ -9,6 +9,7 @@ Probes (LLM relay, GitHub App credential, storage) never raise.
 
 import asyncio
 import fcntl
+import glob
 import hashlib
 import os
 import re
@@ -73,6 +74,19 @@ RESTART_COMMAND_TIMEOUT_SECONDS = 45
 # the probe deadline: an unrevoked token stays valid for an hour.
 TOKEN_REVOCATION_TIMEOUT_SECONDS = 5
 MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
+# Each gunicorn worker (and rotation) leaves its own "<stem>.<pid><ext>" file, so
+# the panel reads several. Cap how many are scanned per request, and prune the
+# oldest so files from long-dead workers cannot pile up in the data volume.
+MAX_LOG_FILES_SCANNED = 8
+MAX_LOG_FILES_KEPT = 24
+# A genuine record header as emitted by REVIEW_LOG_FORMAT:
+#   "<ts> | <LEVEL> | <review-id> | <name>:<func>:<line> - ...".
+# Matching the whole shape (not just a leading timestamp) keeps an interior line
+# of a multiline message that merely starts with a timestamp — a traceback, an
+# echoed log line — from being mistaken for a new record, which would strand it
+# (and its continuations) from the review it belongs to in tail_logs_for_request.
+_LOG_LINE_HEADER = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \| [A-Z]+\s+\| \S+ \| \S+:\S+:\d+ - ")
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 OPS_LOCK_PATH = os.environ.get("DASHBOARD_OPS_LOCK_PATH", "/app/data/dashboard-ops.lock")
 
@@ -1149,31 +1163,161 @@ def diagnose() -> Dict[str, Any]:
     return results
 
 
-def tail_logs(max_lines: int = 200) -> List[str]:
-    """Best-effort recent log lines for the ops console.
+def _log_owner_pid(path: str, stem: str) -> Optional[int]:
+    """The pid embedded in "<stem>.<pid><ext>" / "<stem>.<pid>.<rotation><ext>"."""
+    prefix = f"{os.path.basename(stem)}."
+    name = os.path.basename(path)
+    if not name.startswith(prefix):
+        return None
+    token = name[len(prefix):].split(".", 1)[0]
+    return int(token) if token.isdigit() else None
 
-    Seeks backwards from the end of the file instead of reading it whole: the
-    ops page polls this every few seconds and a multi-hundred-MB production
-    log must not be slurped into memory each time.
-    """
+
+def _process_alive(pid: int) -> bool:
+    """Whether a pid in this container's namespace is still running."""
     try:
-        log_file = os.environ.get("ACHORD_REVIEW_LOG_FILE", "")
-        if not log_file or not os.path.isfile(log_file):
-            return []
-        chunk_size = 64 * 1024
-        with open(log_file, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            data = b""
-            pos = size
-            while (pos > 0 and data.count(b"\n") <= max_lines
-                   and len(data) < MAX_LOG_TAIL_BYTES):
-                read = min(chunk_size, pos, MAX_LOG_TAIL_BYTES - len(data))
-                pos -= read
-                f.seek(pos)
-                data = f.read(read) + data
-        lines = data.decode(errors="replace").splitlines()
-        return lines[-max_lines:]
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists but not signalable (or cannot tell) — never prune on a maybe
+    return True
+
+
+def _safe_mtime(path: str) -> float:
+    """Modification time, or 0 if the file vanished (a concurrent worker's prune)."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _glob_review_log_files() -> tuple:
+    """(files newest-first, stem) for the configured base path, or ([], "").
+
+    ACHORD_REVIEW_LOG_FILE is a base path; each process writes "<stem>.<pid><ext>",
+    and RotatingFileHandler names its rollovers "<stem>.<pid><ext>.1".."<ext>.N", so
+    both shapes are matched — otherwise a rolled-over file is invisible to the panel
+    and never pruned. The base path itself is also read: a deployment (or a
+    pre-upgrade log) that points the env at a literal file still shows up. It carries
+    no pid, so it is read but never pruned. A set dedups the two overlapping globs.
+    """
+    base_path = os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip()
+    if not base_path:
+        return [], ""
+    stem, ext = os.path.splitext(base_path)
+    ext = ext or ".log"
+    escaped = glob.escape(stem)
+    matches = set()
+    for pattern in (f"{escaped}.*{ext}", f"{escaped}.*{ext}.*"):
+        matches.update(p for p in glob.glob(pattern) if os.path.isfile(p))
+    if os.path.isfile(base_path):
+        matches.add(base_path)
+    # getmtime can race a concurrent prune; _safe_mtime keeps the sort from raising.
+    return sorted(matches, key=_safe_mtime, reverse=True), stem
+
+
+def prune_review_log_files() -> None:
+    """Delete log files whose owning worker has exited, keeping newest MAX_LOG_FILES_KEPT.
+
+    Run at worker startup (post_worker_init) as well as on read, so retired per-pid
+    files cannot grow without bound on the data volume when nobody opens the log
+    views. A live worker's file is never removed — its sink still holds the
+    descriptor, so deleting even an old, idle one would send that worker's later
+    logs to an unlinked file no reader ever sees. Unknown owners count as live, and
+    the pid-less configured base file is never pruned.
+    """
+    matches, stem = _glob_review_log_files()
+    prunable = [
+        p for p in matches
+        if (pid := _log_owner_pid(p, stem)) is not None and not _process_alive(pid)
+    ]
+    for stale in prunable[MAX_LOG_FILES_KEPT:]:
+        with suppress(OSError):
+            os.remove(stale)
+
+
+def _review_log_files() -> List[str]:
+    """Per-process log files for the configured base path, newest first, capped."""
+    prune_review_log_files()
+    matches, _stem = _glob_review_log_files()
+    return [p for p in matches if os.path.exists(p)][:MAX_LOG_FILES_SCANNED]
+
+
+def _read_tail_text(path: str, max_bytes: int) -> str:
+    """Return the last max_bytes of a file as text, without slurping the whole file."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        start = max(0, size - max_bytes)
+        f.seek(start)
+        data = f.read(size - start)
+    return data.decode(errors="replace")
+
+
+def _split_records(text: str) -> List[tuple]:
+    """Group physical lines into (timestamp, lines) records.
+
+    A record starts at a line beginning with a timestamp; lines without one
+    (a multiline message, or a partial record at the head of a byte window)
+    attach to the record above them so merging never splits one message apart.
+    """
+    records: List[tuple] = []
+    for line in text.splitlines():
+        match = _LOG_LINE_HEADER.match(line)
+        if match or not records:
+            records.append((match.group(1) if match else "", [line]))
+        else:
+            records[-1][1].append(line)
+    return records
+
+
+def _collect_log_lines(needle: Optional[str], max_lines: int) -> List[str]:
+    """Merge recent records across per-process files, newest-preserving order.
+
+    Records are ordered by their own timestamp so two workers' lines interleave
+    the way they happened; when `needle` is set only records that contain it are
+    kept (the whole record, so a matched multiline message stays intact).
+    """
+    files = _review_log_files()
+    if not files:
+        return []
+    per_file_bytes = max(64 * 1024, MAX_LOG_TAIL_BYTES // len(files))
+    records: List[tuple] = []
+    for path in files:
+        try:
+            for record in _split_records(_read_tail_text(path, per_file_bytes)):
+                if needle is None or any(needle in line for line in record[1]):
+                    records.append(record)
+        except OSError:
+            continue  # a worker's file can rotate/vanish between glob and read
+    records.sort(key=lambda record: record[0])
+    lines: List[str] = []
+    for _timestamp, record_lines in reversed(records):
+        for line in reversed(record_lines):
+            lines.append(line)
+            if len(lines) >= max_lines:
+                lines.reverse()
+                return lines
+    lines.reverse()
+    return lines
+
+
+def tail_logs(max_lines: int = 200) -> List[str]:
+    """Best-effort recent log lines for the ops console, merged across workers."""
+    try:
+        return _collect_log_lines(None, max_lines)
     except Exception as e:
         get_logger().warning(f"Dashboard log tail failed, error: {e}")
+    return []
+
+
+def tail_logs_for_request(request_id: str, max_lines: int = 500) -> List[str]:
+    """Recent log lines belonging to one review, matched by its correlation id."""
+    if not request_id:
+        return []
+    try:
+        return _collect_log_lines(request_id, max_lines)
+    except Exception as e:
+        get_logger().warning(f"Dashboard per-review log lookup failed, error: {e}")
     return []

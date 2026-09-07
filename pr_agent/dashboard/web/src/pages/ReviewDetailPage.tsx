@@ -1,16 +1,16 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Ban, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react'
+import { ArrowLeft, Ban, ChevronDown, ChevronUp, ExternalLink, Terminal } from 'lucide-react'
 import { prHtmlUrl, repoHtmlUrl } from '../lib/github'
 import { api, ApiError } from '../lib/api'
-import type { ReviewDetail } from '../lib/types'
+import type { ReviewDetail, ReviewLogData } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/Dialogs'
 import { useToast } from '../components/Toast'
 import { SeverityBadge, StatusBadge, TriggerBadge, VerdictBadge } from '../components/badges'
 import { MarkdownView } from '../components/MarkdownView'
-import { formatDuration, formatTokens, formatDateTime, shortModel, shortSha } from '../lib/format'
+import { CopyableId, formatDuration, formatTokens, formatDateTime, shortModel, shortSha } from '../lib/format'
 
 function MetaItem({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -54,6 +54,34 @@ export default function ReviewDetailPage() {
     enabled: Number.isInteger(reviewId) && reviewId > 0,
     refetchInterval: (query) => (query.state.data?.status === 'RUNNING' ? 8_000 : false),
   })
+
+  const logsQuery = useQuery({
+    queryKey: ['review-logs', reviewId],
+    queryFn: () => api.get<ReviewLogData>(`/api/v1/dashboard/reviews/${reviewId}/logs`),
+    enabled: Number.isInteger(reviewId) && reviewId > 0,
+    // Keep pace with a running review; settle to a slow refresh once it ends.
+    refetchInterval: () => (data?.status === 'RUNNING' ? 8_000 : false),
+  })
+  const logLines = logsQuery.data?.lines ?? []
+
+  // A review can finish between log polls; the detail query then returns a
+  // terminal status and stops the interval above, freezing the card before the
+  // final lines are in. Fetch once more when the status settles — after a short
+  // delay so the asynchronous file writer has flushed them.
+  const refetchLogs = logsQuery.refetch
+  const finalLogFetchDone = useRef(false)
+  useEffect(() => {
+    const status = data?.status
+    if (!status) return
+    if (status === 'RUNNING') {
+      finalLogFetchDone.current = false
+      return
+    }
+    if (finalLogFetchDone.current) return
+    finalLogFetchDone.current = true
+    const timer = setTimeout(() => void refetchLogs(), 1500)
+    return () => clearTimeout(timer)
+  }, [data?.status, refetchLogs])
 
   const stopReview = async () => {
     if (stopping) return
@@ -121,6 +149,7 @@ export default function ReviewDetailPage() {
           <h1 className="max-w-2xl truncate text-xl font-semibold text-text">
             {data.pr_title || `PR #${data.pr_number}`}
           </h1>
+          <CopyableId id={data.id} />
         </div>
         <div className="flex items-center gap-2">
           {data.status === 'RUNNING' && (
@@ -229,6 +258,23 @@ export default function ReviewDetailPage() {
             ))}
           </ul>
         )}
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="本次审查日志"
+          description="按本条编号从服务器日志里筛出的行，无需登录服务器"
+          action={<Terminal size={14} className="text-muted" />}
+        />
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all px-5 py-4 font-mono text-[11px] leading-relaxed text-muted">
+          {logsQuery.isLoading
+            ? '加载中…'
+            : logsQuery.isError
+              ? '日志读取失败'
+              : logLines.length > 0
+                ? logLines.join('\n')
+                : '暂无日志（该审查早于日志落盘，或日志行已滚动清出；需在部署环境设置 ACHORD_REVIEW_LOG_FILE）'}
+        </pre>
       </Card>
 
       {data.raw_prediction && (

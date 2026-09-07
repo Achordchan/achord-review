@@ -294,3 +294,33 @@ def post_fork(server, worker):
 
     if get_settings().get("CONFIG.ANALYTICS_FOLDER", ""):
         setup_logger(fmt=LoggingFormat.JSON, level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))
+
+
+def post_worker_init(worker):
+    """Runs in each worker after it has loaded the app (both preloaded and not).
+
+    The dashboard log sink is installed here, not in post_fork: without preload the
+    worker imports the app — whose import-time setup_logger clears every sink —
+    *after* post_fork, so a sink installed there would be wiped. This hook runs
+    after load_wsgi() in every startup mode. The sink is enqueued, so it must live
+    in the worker and never be inherited from the preloaded master (a forked writer
+    thread would deadlock on the next remove).
+    """
+    import os
+
+    if not os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip():
+        return
+    from pr_agent.config_loader import get_settings
+    from pr_agent.dashboard import ops
+    from pr_agent.log import enable_review_log_sink, get_logger
+
+    # Optional log housekeeping must never fail worker startup: pruning touches
+    # files other workers may delete concurrently, and an exception escaping this
+    # hook aborts the worker boot and can bring Gunicorn down.
+    try:
+        enable_review_log_sink(level=get_settings().get("CONFIG.LOG_LEVEL", "DEBUG"))
+        # Reap files from workers that have since exited, so a restart-churning
+        # deployment cannot grow the log dir without anyone opening the panel.
+        ops.prune_review_log_files()
+    except Exception as e:
+        get_logger().warning(f"Review log setup skipped at worker init, error: {e}")

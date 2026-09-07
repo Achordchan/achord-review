@@ -59,6 +59,11 @@ services:
       # Exact public browser origin used by the CSRF fallback when Fetch
       # Metadata headers are unavailable. Scheme and effective port matter.
       DASHBOARD_EXTERNAL_ORIGIN: "https://review.achord.cn"
+      # Mirror logs to a file under the persistent data volume so the panel's log
+      # view and per-review logs work in-container (stdout alone is only readable
+      # via `docker logs` on the host). One file per worker: "<stem>.<pid>.log",
+      # rotated at 10 MB. Unset it to keep logs on stdout only.
+      ACHORD_REVIEW_LOG_FILE: "/app/data/logs/achord-review.log"
       # In-panel updates (opt-in) — uncomment with command and mounts above.
       #ACHORD_REVIEW_SOURCE_DIR: "/app/source"
       #ACHORD_REVIEW_RELEASES_DIR: "/app/releases"

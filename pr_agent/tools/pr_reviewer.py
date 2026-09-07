@@ -83,19 +83,18 @@ VERDICT_EVENT_TO_STATE = {"APPROVE": "APPROVED",
 _VERDICT_SNAPSHOT_UNSET = object()
 
 
-async def _audit_started(reviewer: "PRReviewer") -> str:
+async def _audit_started(reviewer: "PRReviewer", request_id: str) -> str:
     """Open a dashboard audit record for this run; best-effort, never raises.
 
     Trigger metadata comes from request-scoped context. Provider access stays
     on the review's main path so an audit timeout never races provider calls.
-    The request ID is reserved before storage starts, allowing terminal writes
-    to serialize behind a late insert without losing the completed review.
+    The request ID is reserved by the caller (and bound into the log context)
+    before storage starts, allowing terminal writes to serialize behind a late
+    insert without losing the completed review.
     """
     from starlette_context import context as request_context
 
     from pr_agent.dashboard.audit import review_started, run_audit_work
-
-    request_id = uuid.uuid4().hex
 
     def _work() -> str:
         sender, trigger_type = "", "manual"
@@ -430,6 +429,10 @@ class PRReviewer:
         terminal_audit_started = False
         self._manual_stop_requested = False
         run_task = asyncio.current_task()
+        # Reserve the run's id here (not inside the audit insert) so it is bound
+        # into the log context below even when the dashboard audit is disabled or
+        # unavailable — the id correlates the logs, the audit record just reuses it.
+        request_id = uuid.uuid4().hex
 
         async def _persist_terminal(coro) -> None:
             nonlocal terminal_audit_started
@@ -443,8 +446,14 @@ class PRReviewer:
             if run_task is not None:
                 run_task.cancel()
 
+        # Tag every log line emitted during this review with its id. Entered
+        # manually and closed in the finally below so the large body stays
+        # unindented; child tasks created inside (the heartbeat) inherit the
+        # bound context. Only meaningful when the review log file sink is on.
+        review_log_context = get_logger().contextualize(review_request_id=request_id)
+        review_log_context.__enter__()
         try:
-            audit_request_id = await _audit_started(self)
+            audit_request_id = await _audit_started(self, request_id)
             audit_heartbeat_task = _start_audit_heartbeat(
                 audit_request_id, on_cancel_requested=_request_manual_stop)
             if not self.git_provider.get_files():
@@ -588,6 +597,7 @@ class PRReviewer:
                     self.git_provider.publish_comment("Failed to review PR")
                 except Exception as e:
                     get_logger().exception(f"Failed to publish review failure result, error: {e}")
+            review_log_context.__exit__(None, None, None)
 
     def _should_publish_review_no_suggestions(self, pr_review: str) -> bool:
         return get_settings().pr_reviewer.get('publish_output_no_suggestions', True) or "No major issues detected" not in pr_review

@@ -79,6 +79,7 @@ export type AuditLogRow = {
   created_at: string
 }
 
+export type ReviewLogData = { lines: string[] }
 export type ReviewListData = { total: number; items: ReviewRow[] }
 export type AuditLogListData = { items: AuditLogRow[] }
 export type RepoRow = { repo_name: string; review_count: number; last_review_at: string | null }

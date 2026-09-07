@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import uuid
 
 import pytest
 
@@ -254,7 +255,7 @@ def test_initial_audit_write_runs_off_event_loop(monkeypatch):
         return kwargs["request_id"]
 
     monkeypatch.setattr(audit, "review_started", fake_started)
-    request_id = asyncio.run(pr_reviewer._audit_started(Reviewer()))
+    request_id = asyncio.run(pr_reviewer._audit_started(Reviewer(), uuid.uuid4().hex))
 
     assert request_id == called["kwargs"]["request_id"]
     assert "metadata_thread" not in called
@@ -288,7 +289,7 @@ def test_audit_start_does_not_access_provider_metadata(monkeypatch):
 
     monkeypatch.setattr(audit, "review_started", fake_started)
 
-    request_id = asyncio.run(pr_reviewer._audit_started(Reviewer()))
+    request_id = asyncio.run(pr_reviewer._audit_started(Reviewer(), uuid.uuid4().hex))
     assert request_id == captured["request_id"]
     assert captured["pr_url"] == Reviewer.pr_url
     assert "pr_title" not in captured
@@ -322,7 +323,7 @@ def test_audit_start_timeout_preserves_id_and_serializes_terminal_write(monkeypa
         monkeypatch.setattr(audit, "review_started", delayed_started)
         monkeypatch.setattr(audit, "review_skipped", fake_skipped)
 
-        start_task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
+        start_task = asyncio.create_task(pr_reviewer._audit_started(Reviewer(), uuid.uuid4().hex))
         assert await asyncio.to_thread(storage_started.wait, 1)
         request_id = await asyncio.wait_for(start_task, 0.2)
         assert request_id
@@ -370,7 +371,7 @@ def test_audit_startup_cancellation_closes_late_running_record(monkeypatch):
         monkeypatch.setattr(audit, "review_started", delayed_started)
         monkeypatch.setattr(pr_reviewer, "_audit_failed", fake_failed)
 
-        task = asyncio.create_task(pr_reviewer._audit_started(Reviewer()))
+        task = asyncio.create_task(pr_reviewer._audit_started(Reviewer(), uuid.uuid4().hex))
         assert await asyncio.to_thread(started.wait, 1)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -553,7 +554,7 @@ def test_audit_start_runs_on_the_dedicated_executor(monkeypatch):
         return kwargs["request_id"]
 
     monkeypatch.setattr(audit, "review_started", fake_started)
-    asyncio.run(pr_reviewer._audit_started(Reviewer()))
+    asyncio.run(pr_reviewer._audit_started(Reviewer(), uuid.uuid4().hex))
 
     assert threads and threads[0].startswith("dashboard-audit")
 
@@ -579,7 +580,7 @@ def test_audit_worker_sees_the_request_scope(monkeypatch):
     async def scenario():
         with request_cycle_context({"dashboard_sender": "octocat",
                                     "dashboard_trigger_type": "mention"}):
-            await pr_reviewer._audit_started(Reviewer())
+            await pr_reviewer._audit_started(Reviewer(), uuid.uuid4().hex)
 
     asyncio.run(scenario())
 
