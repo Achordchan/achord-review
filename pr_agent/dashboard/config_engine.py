@@ -148,6 +148,17 @@ def _validate(model_fields: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
                 errors.append(f"{name} must be between {low} and {high}")
                 continue
             clean[name] = number
+        elif name == "fallback_models":
+            if value is None:
+                continue
+            if isinstance(value, str):
+                # Comma-separated convenience form from a single input field.
+                value = [entry for entry in (part.strip() for part in value.split(",")) if entry]
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                errors.append("fallback_models must be a list of model names")
+                continue
+            # Empty is a valid choice: it disables the fallback route on purpose.
+            clean[name] = [v.strip() for v in value if v.strip()]
         elif name == "verdict_blocking_severities":
             if value is None:
                 continue
@@ -197,6 +208,8 @@ class ConfigEngine:
             values[name] = raw.get(table, {}).get(key)
         values["verdict_blocking_severities"] = list(
             raw.get("pr_reviewer", {}).get("verdict_blocking_severities", []))
+        values["fallback_models"] = list(
+            raw.get("config", {}).get("fallback_models", []) or [])
         values["ignore_glob"] = list(raw.get("ignore", {}).get("glob", []))
         return {"available": True, "path": self.config_path, "values": values}
 
@@ -318,6 +331,8 @@ class ConfigEngine:
                 raw.setdefault(table, {})[key] = value
             elif name == "verdict_blocking_severities":
                 raw.setdefault("pr_reviewer", {})["verdict_blocking_severities"] = value
+            elif name == "fallback_models":
+                raw.setdefault("config", {})["fallback_models"] = value
             elif name == "ignore_glob":
                 raw.setdefault("ignore", {})["glob"] = value
 
@@ -440,6 +455,8 @@ class ConfigEngine:
             return f"{table}.{key}"
         if name == "verdict_blocking_severities":
             return "pr_reviewer.verdict_blocking_severities"
+        if name == "fallback_models":
+            return "config.fallback_models"
         if name == "ignore_glob":
             return "ignore.glob"
         return ""

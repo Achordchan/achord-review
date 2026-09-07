@@ -52,6 +52,7 @@ export type ReviewDetail = ReviewRow & {
 export type ConfigValues = {
   model: string
   reasoning_effort: string
+  fallback_models: string[]
   api_base: string
   key: string
   custom_llm_provider: string

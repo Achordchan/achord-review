@@ -370,6 +370,35 @@ class TestWrite:
         values = engine.read()["values"]
         assert values["model"] == "openai/changed"
 
+    def test_fallback_models_round_trip_list_and_string_forms(self, engine):
+        """Absent config reads as [] (fallback off); writes persist and read back."""
+        assert engine.read()["values"]["fallback_models"] == []
+
+        ok, errors = engine.write({"fallback_models": ["gpt-5.4"]})
+        assert ok, errors
+        assert engine.read()["values"]["fallback_models"] == ["gpt-5.4"]
+
+        # Comma-separated convenience form from a single input field.
+        ok, errors = engine.write({"fallback_models": "gpt-5.4, gpt-5.5"})
+        assert ok, errors
+        assert engine.read()["values"]["fallback_models"] == ["gpt-5.4", "gpt-5.5"]
+
+    def test_fallback_models_allows_empty_list_to_disable(self, engine):
+        engine.write({"fallback_models": ["gpt-5.4"]})
+        ok, errors = engine.write({"fallback_models": []})
+        assert ok, errors
+        assert engine.read()["values"]["fallback_models"] == []
+
+    def test_fallback_models_rejects_non_string_entries(self, engine):
+        ok, errors = engine.write({"fallback_models": ["gpt-5.4", 42]})
+        assert not ok
+        assert errors == ["fallback_models must be a list of model names"]
+
+    def test_fallback_models_rejects_non_list_non_string_value(self, engine):
+        ok, errors = engine.write({"fallback_models": {"model": "gpt-5.4"}})
+        assert not ok
+        assert errors == ["fallback_models must be a list of model names"]
+
     def test_backup_created(self, engine, monkeypatch):
         monkeypatch.setattr("pr_agent.dashboard.config_engine.time.time_ns", lambda: 123456789)
         engine.write({"model": "openai/second"})
