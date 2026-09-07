@@ -46,6 +46,23 @@ def test_split_records_groups_multiline_messages():
     ]
 
 
+def test_multiline_message_with_interior_timestamp_stays_in_the_review(log_base):
+    # An interior line that merely starts with a timestamp (a traceback, an echoed
+    # log line) is NOT a new record — it must stay with the review it belongs to,
+    # not get split off and dropped by the per-review filter.
+    _write(log_base.parent / "achord-review.777.log", [
+        "2026-09-07 12:00:00.000 | ERROR   | reqAAA | m:f:1 - build failed:",
+        "2026-09-07 12:00:00 deployment failed on host X",  # looks like a timestamp, no header
+        "    stack frame 2",
+        "2026-09-07 12:00:05.000 | INFO    | reqBBB | m:f:2 - unrelated line",
+    ])
+    lines = ops.tail_logs_for_request("reqAAA")
+    assert any("build failed:" in ln for ln in lines)
+    assert "2026-09-07 12:00:00 deployment failed on host X" in lines
+    assert "    stack frame 2" in lines
+    assert not any("unrelated line" in ln for ln in lines)
+
+
 def test_tail_merges_across_worker_files_by_timestamp(log_base):
     stem, ext = os.path.splitext(str(log_base))
     _write(log_base.parent / f"{os.path.basename(stem)}.111{ext}", [

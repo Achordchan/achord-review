@@ -79,7 +79,14 @@ MAX_LOG_TAIL_BYTES = 2 * 1024 * 1024
 # oldest so files from long-dead workers cannot pile up in the data volume.
 MAX_LOG_FILES_SCANNED = 8
 MAX_LOG_FILES_KEPT = 24
-_LOG_LINE_TIMESTAMP = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)")
+# A genuine record header as emitted by REVIEW_LOG_FORMAT:
+#   "<ts> | <LEVEL> | <review-id> | <name>:<func>:<line> - ...".
+# Matching the whole shape (not just a leading timestamp) keeps an interior line
+# of a multiline message that merely starts with a timestamp — a traceback, an
+# echoed log line — from being mistaken for a new record, which would strand it
+# (and its continuations) from the review it belongs to in tail_logs_for_request.
+_LOG_LINE_HEADER = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \| [A-Z]+\s+\| \S+ \| \S+:\S+:\d+ - ")
 MAX_GIT_OUTPUT_BYTES = 1024 * 1024
 OPS_LOCK_PATH = os.environ.get("DASHBOARD_OPS_LOCK_PATH", "/app/data/dashboard-ops.lock")
 
@@ -1257,7 +1264,7 @@ def _split_records(text: str) -> List[tuple]:
     """
     records: List[tuple] = []
     for line in text.splitlines():
-        match = _LOG_LINE_TIMESTAMP.match(line)
+        match = _LOG_LINE_HEADER.match(line)
         if match or not records:
             records.append((match.group(1) if match else "", [line]))
         else:
