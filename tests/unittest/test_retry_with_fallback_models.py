@@ -224,6 +224,28 @@ def test_all_models_fail_message_bounds_very_long_model_labels():
         _restore_settings(snapshot)
 
 
+def test_all_models_fail_message_falls_back_to_exception_class_for_empty_reasons():
+    """asyncio.TimeoutError str()s to "", so its line uses the class name."""
+    snapshot = _snapshot_settings()
+    try:
+        get_settings().set("config.model", "primary-model")
+        get_settings().set("config.fallback_models", [])
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        async def fake_f(model):
+            raise asyncio.TimeoutError()
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert "- primary-model: TimeoutError" in message  # class name, not a bare label
+        assert "TimeoutError" in message
+    finally:
+        _restore_settings(snapshot)
+
+
 def test_deployment_id_updated_per_attempt():
     snapshot = _snapshot_settings()
     try:

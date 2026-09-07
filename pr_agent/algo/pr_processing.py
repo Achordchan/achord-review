@@ -335,7 +335,11 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
     all_models = _get_all_models(model_type)
     all_deployments = _get_all_deployments(all_models)
     # try each (model, deployment_id) pair until one is successful, otherwise raise exception
-    failures = []  # (model, error) per attempt, surfaced in the final exception
+    # Only the bounded reason text is kept per attempt, not the exception object: an
+    # exception pins its traceback and frame locals (prompt/response state included),
+    # and retaining one across the remaining fallback attempts holds that memory at
+    # peak for no benefit. The last exception itself is kept only for `raise ... from`.
+    failure_reasons: List[Tuple[str, str]] = []  # (model, bounded reason) per attempt
     for i, (model, deployment_id) in enumerate(zip(all_models, all_deployments)):
         try:
             get_logger().debug(
@@ -349,9 +353,9 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
                 f"Failed to generate prediction with {model}",
                 artifact={"error": e},
             )
-            failures.append((model, e))
+            failure_reasons.append((model, _bounded_failure_reason(e)))
             if i == len(all_models) - 1:  # If it's the last iteration
-                raise Exception(_format_all_models_failed(failures)) from e
+                raise Exception(_format_all_models_failed(failure_reasons)) from e
         else:
             record_model_used(model, is_fallback=i > 0)
             return result
@@ -363,14 +367,27 @@ _MAX_MODELS_IN_MESSAGE = 8
 _MAX_MODEL_LABEL_CHARS = 100  # per rendered model name; long identifiers are abbreviated
 
 
-def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
-    """One line per attempted model with its underlying error.
+def _bounded_failure_reason(error: Exception) -> str:
+    """Collapse an exception into one bounded line, never empty.
+
+    Exceptions such as asyncio.TimeoutError render as "" via str(), which would
+    show a bare `- model:` line; fall back to the class name so a timeout stays
+    distinguishable from any other provider failure.
+    """
+    reason = " ".join(str(error).split())
+    if not reason:
+        reason = type(error).__name__
+    return reason
+
+
+def _format_all_models_failed(failure_reasons: List[Tuple[str, str]]) -> str:
+    """One line per attempted model with its bounded failure reason.
 
     The model list alone tells the dashboard nothing actionable: a provider refusal
     ("flagged for possible cybersecurity risk", a quota error, a timeout) is only
     visible in the chained exception, which the audit path flattens via str(e).
-    Collapse each error's whitespace and cap it so the aggregate stays readable and
-    within the audit's 2000-char error_message bound.
+    Reasons arrive pre-collapsed and non-empty (see _bounded_failure_reason); this
+    function fits the whole message into the audit's 2000-char error_message bound.
 
     Every fixed cost is bounded before reasons are sized: at most
     _MAX_MODELS_IN_MESSAGE models are listed (the overflow is counted in the
@@ -383,8 +400,8 @@ def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
     def _label(model: str) -> str:
         return model if len(model) <= _MAX_MODEL_LABEL_CHARS else model[:_MAX_MODEL_LABEL_CHARS - 1] + "…"
 
-    listed = failures[:_MAX_MODELS_IN_MESSAGE]
-    remaining = len(failures) - len(listed)
+    listed = failure_reasons[:_MAX_MODELS_IN_MESSAGE]
+    remaining = len(failure_reasons) - len(listed)
     header = ("Failed to generate prediction with any model of "
               f"{[_label(model) for model, _ in listed]}"
               + (f" (+{remaining} more)" if remaining > 0 else "") + ":")
@@ -394,8 +411,7 @@ def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
     per_model_cap = min(reason_budget // max(len(listed), 1), _MAX_PER_MODEL_ERROR_CHARS)
     per_model_cap = max(per_model_cap, 1)
     lines = [header]
-    for model, error in listed:
-        reason = " ".join(str(error).split())
+    for model, reason in listed:
         if len(reason) > per_model_cap:
             reason = reason[:per_model_cap] + "…"
         lines.append(f"- {_label(model)}: {reason}")
