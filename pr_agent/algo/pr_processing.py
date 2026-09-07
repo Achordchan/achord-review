@@ -335,6 +335,7 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
     all_models = _get_all_models(model_type)
     all_deployments = _get_all_deployments(all_models)
     # try each (model, deployment_id) pair until one is successful, otherwise raise exception
+    failures = []  # (model, error) per attempt, surfaced in the final exception
     for i, (model, deployment_id) in enumerate(zip(all_models, all_deployments)):
         try:
             get_logger().debug(
@@ -348,11 +349,34 @@ async def retry_with_fallback_models(f: Callable, model_type: ModelType = ModelT
                 f"Failed to generate prediction with {model}",
                 artifact={"error": e},
             )
+            failures.append((model, e))
             if i == len(all_models) - 1:  # If it's the last iteration
-                raise Exception(f"Failed to generate prediction with any model of {all_models}") from e
+                raise Exception(_format_all_models_failed(failures)) from e
         else:
             record_model_used(model, is_fallback=i > 0)
             return result
+
+
+_MAX_PER_MODEL_ERROR_CHARS = 500
+
+
+def _format_all_models_failed(failures: List[Tuple[str, Exception]]) -> str:
+    """One line per attempted model with its underlying error.
+
+    The model list alone tells the dashboard nothing actionable: a provider refusal
+    ("flagged for possible cybersecurity risk", a quota error, a timeout) is only
+    visible in the chained exception, which the audit path flattens via str(e).
+    Collapse each error's whitespace and cap it so the aggregate stays readable and
+    within the audit's 2000-char error_message bound.
+    """
+    lines = ["Failed to generate prediction with any model of "
+             f"{[model for model, _ in failures]}:"]
+    for model, error in failures:
+        reason = " ".join(str(error).split())
+        if len(reason) > _MAX_PER_MODEL_ERROR_CHARS:
+            reason = reason[:_MAX_PER_MODEL_ERROR_CHARS] + "…"
+        lines.append(f"- {model}: {reason}")
+    return "\n".join(lines)
 
 
 def _get_all_models(model_type: ModelType = ModelType.REGULAR) -> List[str]:

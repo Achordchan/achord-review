@@ -172,7 +172,7 @@ export default function ReviewDetailPage() {
           </p>
         )}
         {(data.status === 'FAILED' || data.status === 'SKIPPED') && data.error_message && (
-          <p className={`mt-4 rounded-lg border px-4 py-3 text-xs leading-relaxed ${
+          <p className={`mt-4 whitespace-pre-line rounded-lg border px-4 py-3 text-xs leading-relaxed ${
             data.status === 'FAILED'
               ? 'border-bad/30 bg-bad/10 font-mono text-bad'
               : 'border-line bg-surface-2/60 text-muted'

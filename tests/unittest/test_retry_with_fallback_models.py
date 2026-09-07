@@ -93,9 +93,43 @@ def test_all_models_fail_raises_with_aggregate_message_and_cause():
             asyncio.run(retry_with_fallback_models(fake_f))
 
         assert attempted == ["primary-model", "fallback-1"]
-        assert "Failed to generate prediction with any model" in str(exc_info.value)
         # Production code uses `raise ... from e`, so the last failure should be chained.
         assert exc_info.value.__cause__ is last_error
+        message = str(exc_info.value)
+        assert "Failed to generate prediction with any model" in message
+        # The aggregate must name every attempted model...
+        assert "primary-model" in message
+        assert "fallback-1" in message
+        # ...and carry each model's underlying error, so the dashboard shows the
+        # provider's actual refusal reason instead of only the model list.
+        assert "primary failure" in message
+        assert "last failure" in message
+    finally:
+        _restore_settings(snapshot)
+
+
+def test_all_models_fail_message_collapses_and_truncates_per_model_reasons():
+    snapshot = _snapshot_settings()
+    try:
+        get_settings().set("config.model", "primary-model")
+        get_settings().set("config.fallback_models", [])
+        get_settings().set("openai.deployment_id", None)
+        get_settings().set("openai.fallback_deployments", [])
+
+        long_reason = " ".join(["word"] * 300)
+
+        async def fake_f(model):
+            raise RuntimeError(f"line one\nline two\n{long_reason}")
+
+        with pytest.raises(Exception) as exc_info:
+            asyncio.run(retry_with_fallback_models(fake_f))
+
+        message = str(exc_info.value)
+        assert message.count("\n") == 1  # header + one line per attempted model
+        assert "line one line two" in message  # newlines collapsed per model
+        assert "word word" in message
+        assert message.endswith("…")
+        assert len(message) < 600  # each model's reason is capped at 500 chars
     finally:
         _restore_settings(snapshot)
 
