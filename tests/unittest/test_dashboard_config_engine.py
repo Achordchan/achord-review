@@ -26,10 +26,15 @@ def engine(tmp_path, monkeypatch):
 
     class IsolatedSettings:
         def __init__(self):
-            self.values = {}
+            # configuration.toml defaults the panel reads through inheritance,
+            # surfaced only when the config file omits the key.
+            self.values = {"config.fallback_models": ["gpt-5.6-terra"]}
 
         def set(self, dotted, value):
             self.values[dotted] = value
+
+        def get(self, dotted, default=None):
+            return self.values.get(dotted, default)
 
     import pr_agent.config_loader as cl
     monkeypatch.setattr(cl, "global_settings", IsolatedSettings(), raising=False)
@@ -371,17 +376,26 @@ class TestWrite:
         assert values["model"] == "openai/changed"
 
     def test_fallback_models_round_trip_list_and_string_forms(self, engine):
-        """Absent config reads as [] (fallback off); writes persist and read back."""
-        assert engine.read()["values"]["fallback_models"] == []
-
+        """Absent config inherits the effective value; writes persist and read back."""
+        # Absent override: read() reports the inherited effective value, not []
+        # (configuration.toml defaults enable a fallback; showing [] would claim
+        # the fallback is off while it actually runs).
+        assert engine.read()["values"]["fallback_models"] == ["gpt-5.6-terra"]
         ok, errors = engine.write({"fallback_models": ["gpt-5.4"]})
         assert ok, errors
+        # Once the file carries an explicit value, it is authoritative.
         assert engine.read()["values"]["fallback_models"] == ["gpt-5.4"]
 
         # Comma-separated convenience form from a single input field.
         ok, errors = engine.write({"fallback_models": "gpt-5.4, gpt-5.5"})
         assert ok, errors
         assert engine.read()["values"]["fallback_models"] == ["gpt-5.4", "gpt-5.5"]
+
+    def test_fallback_models_uses_settings_inheritance_only_when_unset(self, engine):
+        """A saved explicit [] stays []; the inherited value does not resurrect."""
+        ok, errors = engine.write({"fallback_models": []})
+        assert ok, errors
+        assert engine.read()["values"]["fallback_models"] == []
 
     def test_fallback_models_allows_empty_list_to_disable(self, engine):
         engine.write({"fallback_models": ["gpt-5.4"]})
