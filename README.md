@@ -23,7 +23,7 @@ On a pull request with a real bug, the bot leaves a single review:
 
 …with the findings attached to the lines that caused them:
 
-> <sub>![P1](https://img.shields.io/badge/P1-orange?style=flat)</sub> **Append the final chunk before returning**
+> <sub><img src="https://img.shields.io/badge/P1-orange?style=flat" alt="P1"></sub> **Append the final chunk before returning**
 >
 > The remaining `current` chunk is never added to `chunks`. Any non-empty input therefore
 > loses its trailing lines; when the patch never exceeds the budget, the function returns
