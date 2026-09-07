@@ -245,7 +245,7 @@ class TestSeverityBadge:
     def test_known_levels_render_a_coloured_chip(self, severity, color):
         badge = format_severity_badge(severity)
         assert f"{severity}-{color}" in badge
-        assert badge.startswith("<sub>![")
+        assert badge.startswith("<sub><img src=")
 
     @pytest.mark.parametrize("severity, icon", [
         ("P0", "\U0001F534"), ("P1", "\U0001F7E0"),
@@ -269,6 +269,13 @@ class TestSeverityBadge:
         assert "&nbsp;" not in badge
         assert "img.shields.io" not in badge
         assert "`P1`" in badge
+
+    @pytest.mark.parametrize("severity", ["P0", "P1", "P2", "P3"])
+    def test_badge_survives_a_raw_html_block(self, severity):
+        """The badge sits inside <details>/<tr> lines, where markdown images are not parsed."""
+        badge = format_severity_badge(severity)
+        assert "![" not in badge
+        assert f'alt="{severity}"' in badge
 
     def test_badge_ends_with_a_separator_so_titles_do_not_collide(self):
         assert format_severity_badge("P0").endswith("&nbsp;")

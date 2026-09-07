@@ -23,7 +23,7 @@ PR 里有真 bug 时，机器人留下一条评审：
 
 发现直接挂在出问题的代码行上：
 
-> <sub>![P1](https://img.shields.io/badge/P1-orange?style=flat)</sub> **Append the final chunk before returning**
+> <sub><img src="https://img.shields.io/badge/P1-orange?style=flat" alt="P1"></sub> **Append the final chunk before returning**
 >
 > The remaining `current` chunk is never added to `chunks`. Any non-empty input therefore
 > loses its trailing lines; when the patch never exceeds the budget, the function returns

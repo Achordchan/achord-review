@@ -264,7 +264,11 @@ def format_severity_badge(severity, gfm_supported: bool = True) -> str:
     if not gfm_supported:
         return f"{SEVERITY_ICONS[level]} `{level}` "
     badge = f"https://img.shields.io/badge/{level}-{color}?style=flat"
-    return f"<sub>![{level}]({badge})</sub>&nbsp;"
+    # Raw <img> rather than a markdown image: callers embed this badge inside lines that
+    # start with a block-level tag (<details>, <tr>), and GFM passes such a line through
+    # as raw HTML without running inline markdown on it, which would leave "![P1](...)"
+    # showing as literal text. HTML renders in both contexts.
+    return f'<sub><img src="{badge}" alt="{level}"></sub>&nbsp;'
 
 
 CLEAN_REVIEW_MESSAGES = (
