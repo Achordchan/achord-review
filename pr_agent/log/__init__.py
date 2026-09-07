@@ -196,8 +196,12 @@ def enable_review_log_sink(level="INFO"):
         if directory:
             os.makedirs(directory, exist_ok=True)
         _REVIEW_LOG_WRITER = _ReviewLogWriter(per_process_path)
+        # Register the writer object (not its bound write method): loguru wraps an
+        # object exposing write()+stop() as a stream sink and calls stop() when the
+        # sink is removed and at interpreter exit, so a graceful worker shutdown
+        # drains the queue (bounded) instead of dropping the final review's lines.
         _REVIEW_SINK_ID = logger.add(
-            _REVIEW_LOG_WRITER.write,
+            _REVIEW_LOG_WRITER,
             level=level,
             format=REVIEW_LOG_FORMAT,
             filter=inv_analytics_filter,

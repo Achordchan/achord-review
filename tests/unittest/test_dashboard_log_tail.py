@@ -195,6 +195,29 @@ def test_enable_review_log_sink_writes_a_per_pid_file_carrying_the_review_id(log
         get_logger().configure(extra={})
 
 
+def test_removing_the_sink_drains_the_writer(log_base):
+    # loguru wraps the writer object as a stream sink and calls stop() on remove
+    # (and at exit), so a graceful shutdown flushes the queue instead of dropping
+    # the final lines with the daemon thread.
+    import pr_agent.log as logmod
+    from pr_agent.log import enable_review_log_sink, get_logger
+
+    sink_id = enable_review_log_sink()
+    writer = logmod._REVIEW_LOG_WRITER
+    try:
+        with get_logger().contextualize(review_request_id="reqZZZ"):
+            get_logger().info("line before shutdown")
+        get_logger().remove(sink_id)  # must drain + stop the writer via StreamSink.stop()
+        assert not writer._thread.is_alive()
+        stem, ext = os.path.splitext(str(log_base))
+        content = open(f"{stem}.{os.getpid()}{ext}", encoding="utf-8").read()
+        assert "line before shutdown" in content
+    finally:
+        logmod._REVIEW_SINK_ID = None
+        logmod._REVIEW_LOG_WRITER = None
+        get_logger().configure(extra={})
+
+
 def test_review_log_writer_drops_instead_of_blocking_when_full(tmp_path):
     import queue as _queue
 
