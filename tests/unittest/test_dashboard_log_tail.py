@@ -92,36 +92,56 @@ def test_per_request_filter_keeps_only_that_review_including_continuations(log_b
     assert ops.tail_logs_for_request("") == []
 
 
-def test_review_log_files_prune_oldest_beyond_the_cap(log_base, monkeypatch):
+def test_review_log_files_prune_oldest_dead_owner_beyond_the_cap(log_base, monkeypatch):
     monkeypatch.setattr(ops, "MAX_LOG_FILES_KEPT", 3)
     monkeypatch.setattr(ops, "MAX_LOG_FILES_SCANNED", 3)
+    monkeypatch.setattr(ops, "_process_alive", lambda pid: False)  # all owners exited
     created = []
-    for pid in range(6):
+    for pid in range(1001, 1007):
         path = log_base.parent / f"achord-review.{pid}.log"
-        _write(path, [f"2026-09-07 12:00:0{pid}.000 | INFO | - | m:f:1 - {pid}"])
+        _write(path, [f"2026-09-07 12:00:00.000 | INFO | - | m:f:1 - {pid}"])
         os.utime(path, (pid, pid))  # ascending mtime: higher pid is newer
         created.append(path)
     ops._review_log_files()
     survivors = {os.path.basename(p) for p in created if p.exists()}
-    assert survivors == {"achord-review.3.log", "achord-review.4.log", "achord-review.5.log"}
+    assert survivors == {"achord-review.1004.log", "achord-review.1005.log", "achord-review.1006.log"}
 
 
-def test_setup_logger_writes_a_per_pid_file_carrying_the_review_id(log_base, monkeypatch):
-    from pr_agent.log import LoggingFormat, get_logger, setup_logger
+def test_review_log_files_never_prunes_a_live_owner_file(log_base, monkeypatch):
+    monkeypatch.setattr(ops, "MAX_LOG_FILES_KEPT", 1)
+    monkeypatch.setattr(ops, "MAX_LOG_FILES_SCANNED", 10)
+    # 9999 is a live worker; everyone else has exited.
+    monkeypatch.setattr(ops, "_process_alive", lambda pid: pid == 9999)
+    live = log_base.parent / "achord-review.9999.log"
+    _write(live, ["2026-09-07 11:00:00.000 | INFO | - | m:f:1 - live but idle"])
+    os.utime(live, (1, 1))  # oldest by far — would be pruned if ownership were ignored
+    for pid in range(2001, 2006):
+        path = log_base.parent / f"achord-review.{pid}.log"
+        _write(path, [f"2026-09-07 12:00:00.000 | INFO | - | m:f:1 - {pid}"])
+        os.utime(path, (pid, pid))
+    ops._review_log_files()
+    assert live.exists()  # the live worker's file is kept despite being the oldest
 
-    logger = setup_logger(fmt=LoggingFormat.JSON)
+
+def test_enable_review_log_sink_writes_a_per_pid_file_carrying_the_review_id(log_base, monkeypatch):
+    import pr_agent.log as logmod
+    from pr_agent.log import enable_review_log_sink, get_logger
+
+    sink_id = enable_review_log_sink()
+    assert sink_id is not None
     try:
-        with logger.contextualize(review_request_id="req12345"):
-            logger.info("hello inside a review")
-        logger.complete()
+        with get_logger().contextualize(review_request_id="req12345"):
+            get_logger().info("hello inside a review")
+        get_logger().complete()  # drain the enqueued writer thread before reading
         stem, ext = os.path.splitext(str(log_base))
         expected = f"{stem}.{os.getpid()}{ext}"
         assert os.path.isfile(expected)
         content = open(expected, encoding="utf-8").read()
         assert "req12345" in content and "hello inside a review" in content
     finally:
-        # Detach the file sink and clear the default extra so nothing points at
-        # this tmp file (deleted on teardown) or leaks into other tests' logging.
-        monkeypatch.delenv("ACHORD_REVIEW_LOG_FILE", raising=False)
-        setup_logger()
+        # Detach the enqueued sink (joins its writer thread — safe in-process) and
+        # clear the default extra so nothing points at this tmp file (deleted on
+        # teardown) or leaks into other tests' logging.
+        get_logger().remove(sink_id)
+        logmod._REVIEW_SINK_ID = None
         get_logger().configure(extra={})

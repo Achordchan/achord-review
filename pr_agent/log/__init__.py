@@ -71,13 +71,19 @@ def setup_logger(level: str = "INFO", fmt: LoggingFormat = LoggingFormat.CONSOLE
             serialize=True,
         )
 
-    _add_review_log_sink(level)
-
     return logger
 
 
-def _add_review_log_sink(level: int) -> None:
-    """Also mirror logs to a rotating file the dashboard can read in-container.
+# The review log sink's handler id in THIS process, so a repeated enable replaces
+# rather than stacks it. Never set in the gunicorn master: the sink is enqueued
+# (its own writer thread), and a writer thread cannot survive fork — a worker that
+# inherited one would deadlock joining it on the next logger.remove(). So it is
+# added only from the worker (post_fork), and this stays None everywhere else.
+_REVIEW_SINK_ID = None
+
+
+def enable_review_log_sink(level="INFO"):
+    """Mirror logs to a rotating file the dashboard can read in-container.
 
     achord-review otherwise logs only to stdout, which Docker keeps under a host
     path the container itself cannot read, so the panel's log view stays empty and
@@ -85,32 +91,45 @@ def _add_review_log_sink(level: int) -> None:
     app writes its logs to a file under that path, one per process (workers share
     the base name, each writing "<stem>.<pid><ext>"): a per-process file means
     cross-process rotation never renames a file out from under another worker's
-    open handle. Best-effort — logging must never take the process down, and the
-    stdout sink keeps working if this fails.
+    open handle. enqueue=True keeps the filesystem write off the caller — reviews
+    run on the event loop, and a slow /app/data must not block them. Best-effort:
+    logging must never take the process down, and the stdout sink keeps working if
+    this fails. Call only from a worker/single process, never the preloaded master.
     """
+    global _REVIEW_SINK_ID
     base_path = os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip()
     if not base_path:
-        return
+        return None
     try:
         # A default so REVIEW_LOG_FORMAT's {extra[review_request_id]} always
         # resolves; the reviewer's contextualize overrides it per run.
         logger.configure(extra={"review_request_id": "-"})
+        if _REVIEW_SINK_ID is not None:
+            try:
+                logger.remove(_REVIEW_SINK_ID)
+            except ValueError:
+                pass  # already gone (e.g. a prior setup_logger removed all sinks)
+            _REVIEW_SINK_ID = None
         stem, ext = os.path.splitext(base_path)
         per_process_path = f"{stem}.{os.getpid()}{ext or '.log'}"
         directory = os.path.dirname(per_process_path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        logger.add(
+        _REVIEW_SINK_ID = logger.add(
             per_process_path,
             level=level,
             format=REVIEW_LOG_FORMAT,
             filter=inv_analytics_filter,
             rotation="10 MB",
             retention=3,
+            enqueue=True,
+            catch=True,
             colorize=False,
         )
+        return _REVIEW_SINK_ID
     except Exception as e:
         logger.warning(f"Review log file sink not enabled ({base_path!r}), error: {e}")
+        return None
 
 
 def get_logger(*args, **kwargs):

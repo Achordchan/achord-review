@@ -142,6 +142,10 @@ class TestPostFork:
 
         calls = []
         monkeypatch.setattr(pr_agent.log, "setup_logger", lambda **kwargs: calls.append(kwargs))
+        # Record (and neutralize) the review-log sink so no real file sink is opened.
+        self.sink_calls = []
+        monkeypatch.setattr(
+            pr_agent.log, "enable_review_log_sink", lambda **kwargs: self.sink_calls.append(kwargs))
         # The other post_fork trigger; clear it so these cases isolate the analytics one.
         monkeypatch.delenv("ACHORD_REVIEW_LOG_FILE", raising=False)
         return calls
@@ -162,6 +166,7 @@ class TestPostFork:
         analytics_folder("")
         gunicorn_config.post_fork(server=None, worker=None)
         assert recorded_setup_logger == []
+        assert self.sink_calls == []
 
     def test_reopens_analytics_log_in_the_worker(self, recorded_setup_logger, analytics_folder, tmp_path):
         # Under preload the sink was opened in the master and named for the master's pid;
@@ -172,12 +177,13 @@ class TestPostFork:
 
     def test_reopens_review_log_file_in_the_worker(self, recorded_setup_logger, analytics_folder,
                                                    monkeypatch, tmp_path):
-        # The review log file sink is per-pid too, so the worker must reopen it even
-        # when the analytics folder is unset.
+        # The enqueued review-log sink must be opened in the worker (never inherited
+        # from the preloaded master), even when the analytics folder is unset.
         analytics_folder("")
         monkeypatch.setenv("ACHORD_REVIEW_LOG_FILE", str(tmp_path / "achord-review.log"))
         gunicorn_config.post_fork(server=None, worker=None)
         assert len(recorded_setup_logger) == 1
+        assert len(self.sink_calls) == 1
 
 
 def test_when_ready_freezes_gc(monkeypatch):

@@ -1156,13 +1156,36 @@ def diagnose() -> Dict[str, Any]:
     return results
 
 
+def _log_owner_pid(path: str, stem: str) -> Optional[int]:
+    """The pid embedded in "<stem>.<pid><ext>" / "<stem>.<pid>.<rotation><ext>"."""
+    prefix = f"{os.path.basename(stem)}."
+    name = os.path.basename(path)
+    if not name.startswith(prefix):
+        return None
+    token = name[len(prefix):].split(".", 1)[0]
+    return int(token) if token.isdigit() else None
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether a pid in this container's namespace is still running."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists but not signalable (or cannot tell) — never prune on a maybe
+    return True
+
+
 def _review_log_files() -> List[str]:
     """Per-process log files for the configured base path, newest first.
 
     ACHORD_REVIEW_LOG_FILE is a base path; each process writes "<stem>.<pid><ext>"
-    and rotation adds dated siblings, so this globs them, prunes the oldest beyond
-    a generous cap (dead workers never clean up after themselves), and returns the
-    most recent handful to scan.
+    and rotation adds dated siblings, so this globs them and returns the most recent
+    handful to scan. Pruning removes only files whose owning worker has exited: a
+    live worker keeps its sink's descriptor open, so deleting its file — even an
+    old, idle one that fell behind newer workers' — would send that worker's later
+    logs to an unlinked file no reader ever sees. Unknown owners count as live.
     """
     base_path = os.environ.get("ACHORD_REVIEW_LOG_FILE", "").strip()
     if not base_path:
@@ -1171,10 +1194,14 @@ def _review_log_files() -> List[str]:
     ext = ext or ".log"
     matches = [p for p in glob.glob(f"{glob.escape(stem)}.*{ext}") if os.path.isfile(p)]
     matches.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    for stale in matches[MAX_LOG_FILES_KEPT:]:
+    prunable = [
+        p for p in matches
+        if (pid := _log_owner_pid(p, stem)) is not None and not _process_alive(pid)
+    ]
+    for stale in prunable[MAX_LOG_FILES_KEPT:]:
         with suppress(OSError):
             os.remove(stale)
-    return matches[:MAX_LOG_FILES_SCANNED]
+    return [p for p in matches if os.path.exists(p)][:MAX_LOG_FILES_SCANNED]
 
 
 def _read_tail_text(path: str, max_bytes: int) -> str:
