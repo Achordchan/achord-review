@@ -56,6 +56,38 @@ class TestEventStorage:
         assert events[0]["payload"]["pr_number"] == 7  # numbers stay numbers
         assert events[1]["payload"]["verdict"] == "APPROVE"
 
+    def test_terminal_methods_report_whether_the_transition_persisted(self, storage):
+        request_id = storage.create_review(repo_name="r", pr_number=1, pr_url="u")
+        assert storage.finish_review(request_id, [], verdict="APPROVE") is True
+        # already terminal: a second finish must report no transition
+        assert storage.finish_review(request_id, [], verdict="APPROVE") is False
+
+        other = storage.create_review(repo_name="r", pr_number=2, pr_url="u")
+        assert storage.fail_review(other, "boom") is True
+        assert storage.fail_review(other, "boom again") is False
+        third = storage.create_review(repo_name="r", pr_number=3, pr_url="u")
+        assert storage.skip_review(third, "gate") is True
+        assert storage.skip_review(third, "gate again") is False
+
+    def test_no_completion_event_when_the_transition_never_persisted(self, storage, monkeypatch):
+        # the audit layer emits terminal events only after the persisted
+        # status matches; simulate a finish that never lands by leaving the
+        # row RUNNING and calling the audit path directly
+        monkeypatch.setattr(storage_module, "_storage", storage)
+        import asyncio
+
+        from pr_agent.dashboard import audit
+        request_id = audit.review_started("https://github.com/octo/repo/pull/9")
+        audit._record_terminal_event(request_id, "review.completed")
+        assert [event["event_type"] for event in storage.list_events()] == ["review.requested"]
+
+        # a real finish emits the event with the persisted verdict
+        asyncio.run(audit.review_finished(request_id, verdict="APPROVE"))
+        events = storage.list_events()
+        assert [event["event_type"] for event in events] == ["review.requested", "review.completed"]
+        assert events[-1]["payload"]["verdict"] == "APPROVE"
+        assert events[-1]["payload"]["status"] == "COMPLETED"
+
     def test_list_events_after_id_resumes_the_stream(self, storage):
         for index in range(3):
             storage.add_event("review.requested", payload={"pr_number": index})

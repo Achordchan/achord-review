@@ -829,10 +829,17 @@ class DashboardStorage:
     def _finish_without_issues(self, request_id: str, status: str, message: str,
                                model: str = "", reasoning_effort: str = "",
                                prompt_tokens: int = 0, completion_tokens: int = 0,
-                               total_tokens: int = 0, duration_ms: int = 0) -> None:
-        """Atomically persist usage and a FAILED/SKIPPED terminal state."""
+                               total_tokens: int = 0, duration_ms: int = 0) -> bool:
+        """Atomically persist usage and a FAILED/SKIPPED terminal state.
+
+        True only when a RUNNING row actually transitioned; callers use this
+        to decide whether a terminal event may be announced.
+        """
+        transitioned = False
+
         def _finish(conn: sqlite3.Connection) -> None:
-            conn.execute(
+            nonlocal transitioned
+            cursor = conn.execute(
                 "UPDATE reviews SET status=?, error_message=?,"
                 " model=COALESCE(NULLIF(?, ''), model),"
                 " reasoning_effort=COALESCE(NULLIF(?, ''), reasoning_effort),"
@@ -845,19 +852,20 @@ class DashboardStorage:
                  prompt_tokens, prompt_tokens, completion_tokens, completion_tokens,
                  total_tokens, total_tokens, duration_ms, duration_ms,
                  _utcnow(), request_id))
+            transitioned = cursor.rowcount == 1
 
-        self._transaction(
+        return self._transaction(
             _finish, f"{status.lower()}-review transaction",
-            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS) and transitioned
 
-    def fail_review(self, request_id: str, error_message: str, **usage) -> None:
-        self._finish_without_issues(request_id, "FAILED", error_message, **usage)
+    def fail_review(self, request_id: str, error_message: str, **usage) -> bool:
+        return self._finish_without_issues(request_id, "FAILED", error_message, **usage)
 
-    def skip_review(self, request_id: str, reason: str, **usage) -> None:
+    def skip_review(self, request_id: str, reason: str, **usage) -> bool:
         """Close a RUNNING record that exited before publishing (no files,
         incremental gate, empty model output). Distinct from FAILED so a
         genuine model/transport error stays distinguishable in the history."""
-        self._finish_without_issues(request_id, "SKIPPED", reason, **usage)
+        return self._finish_without_issues(request_id, "SKIPPED", reason, **usage)
 
     def set_review_usage(self, request_id: str, model: str = "", reasoning_effort: str = "",
                          prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0,
@@ -904,20 +912,23 @@ class DashboardStorage:
                       raw_prediction: str = "", model: str = "", reasoning_effort: str = "",
                       prompt_tokens: int = 0, completion_tokens: int = 0,
                       total_tokens: int = 0, duration_ms: int = 0,
-                      review_comment_url: str = "") -> None:
+                      review_comment_url: str = "") -> bool:
         """Atomically persist usage, findings and the terminal COMPLETED state.
 
         One transaction so a reader that sees status=COMPLETED also sees every
         finding — the detail page polls on status and would otherwise render a
         permanent empty/partial finding list for a review finished mid-write.
         Usage columns accept the run's live values; a stored value wins when
-        the incoming one is empty/zero.
+        the incoming one is empty/zero. True only when a RUNNING row actually
+        transitioned, so callers announce completion only when it persisted.
         """
         markdown_output = _truncate_payload(markdown_output)
         raw_prediction = _truncate_payload(raw_prediction)
         issues = _bounded_review_issues(issues)
+        transitioned = False
 
         def _finish(conn: sqlite3.Connection) -> None:
+            nonlocal transitioned
             cursor = conn.execute(
                 "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
                 " markdown_output=?, raw_prediction=?,"
@@ -936,6 +947,7 @@ class DashboardStorage:
                  _utcnow(), request_id))
             if cursor.rowcount != 1:
                 return
+            transitioned = True
             row = conn.execute("SELECT id FROM reviews WHERE request_id = ?",
                                (request_id,)).fetchone()
             if row is not None and issues:
@@ -949,8 +961,9 @@ class DashboardStorage:
                       issue.get("issue_summary"), issue.get("suggestion"), now)
                      for issue in issues])
 
-        self._transaction(
-            _finish, "finish-review transaction", timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+        return self._transaction(
+            _finish, "finish-review transaction",
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS) and transitioned
 
     def get_review_request_id(self, review_id: int) -> Optional[str]:
         """The correlation id for a review row, used to grep its log lines."""
@@ -958,7 +971,8 @@ class DashboardStorage:
         return rows[0]["request_id"] if rows else None
 
     def get_review_by_request_id(self, request_id: str, summary_only: bool = False) -> Optional[Dict[str, Any]]:
-        columns = "id, repo_name, pr_number" if summary_only else "*"
+        columns = ("id, repo_name, pr_number, pr_title, status, verdict"
+                   if summary_only else "*")
         rows = self._read(f"SELECT {columns} FROM reviews WHERE request_id = ?", (request_id,))
         return rows[0] if rows else None
 

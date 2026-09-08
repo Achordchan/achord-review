@@ -202,33 +202,51 @@ async def review_finished(request_id: str, verdict: str = "", verdict_reason: st
                 })
             # single transaction: usage, findings and the COMPLETED status land
             # together, so a status=COMPLETED read never races a missing finding
-            storage.finish_review(
+            transitioned = storage.finish_review(
                 request_id, clean_issues, verdict=verdict, verdict_reason=verdict_reason,
                 markdown_output=markdown_output, raw_prediction=raw_prediction,
                 review_comment_url=(review_comment_url or "")[:500], **fields)
-            _record_terminal_event(request_id, "review.completed", verdict)
+            if transitioned:
+                _record_terminal_event(request_id, "review.completed")
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_finished) failed, error: {e}")
 
     await run_audit_work(_work)
 
 
-def _record_terminal_event(request_id: str, event_type: str, verdict: str = "") -> None:
+# persisted status each terminal event type must observe before it may be
+# announced — the event describes the database, not the caller's intent
+_TERMINAL_EVENT_STATUS = {
+    "review.completed": "COMPLETED",
+    "review.failed": "FAILED",
+    "review.skipped": "SKIPPED",
+}
+
+
+def _record_terminal_event(request_id: str, event_type: str) -> None:
     """Emit a terminal event with the row's stored repo/PR context.
 
     The audit layer does not carry the PR coordinates through to the terminal
     call, so they are read back from the review row — one cheap summary query
-    on the audit pool, never the review path itself.
+    on the audit pool, never the review path itself. The row's *persisted*
+    status must match the event and the *persisted* verdict is announced: a
+    write that failed under lock contention leaves the row RUNNING, and
+    announcing a completion that never landed would toast and celebrate a
+    review the dashboard still shows as running.
     """
     try:
         storage = _run_audit()
         if storage is None:
             return
         row = storage.get_review_by_request_id(request_id, summary_only=True)
-        if not row:
+        if not row or row.get("status") != _TERMINAL_EVENT_STATUS.get(event_type):
+            get_logger().debug(
+                f"Dashboard terminal event ({event_type}) skipped: persisted"
+                f" status is {row.get('status') if row else 'missing'}")
             return
         _record_event(event_type, request_id=request_id, repo_name=row.get("repo_name", ""),
-                      pr_number=row.get("pr_number", 0), status="TERMINAL", verdict=verdict)
+                      pr_number=row.get("pr_number", 0), pr_title=row.get("pr_title", ""),
+                      status=row.get("status", ""), verdict=row.get("verdict") or "")
     except Exception as e:
         get_logger().debug(f"Dashboard event ({event_type}) failed, error: {e}")
 
@@ -243,8 +261,8 @@ async def review_failed(request_id: str, error_message: str) -> None:
             if storage is None:
                 return
             fields = _run_payload_fields()
-            storage.fail_review(request_id, error_message[:2000], **fields)
-            _record_terminal_event(request_id, "review.failed")
+            if storage.fail_review(request_id, error_message[:2000], **fields):
+                _record_terminal_event(request_id, "review.failed")
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_failed) failed, error: {e}")
 
@@ -266,8 +284,8 @@ async def review_skipped(request_id: str, reason: str) -> None:
             if storage is None:
                 return
             fields = _run_payload_fields()
-            storage.skip_review(request_id, reason[:2000], **fields)
-            _record_terminal_event(request_id, "review.skipped")
+            if storage.skip_review(request_id, reason[:2000], **fields):
+                _record_terminal_event(request_id, "review.skipped")
         except Exception as e:
             get_logger().warning(f"Dashboard audit (review_skipped) failed, error: {e}")
 
