@@ -288,6 +288,24 @@ export function useDashboardEvents() {
         })
     }
 
+    // followers receive the leader's frames and status verbatim
+    if (channel) {
+      channel.onmessage = (raw: MessageEvent<ChannelMessage>) => {
+        const message = raw.data
+        if (!message || typeof message !== 'object') return
+        if (message.kind === 'event') {
+          // a frame proves the leader's stream is alive even if this tab
+          // joined after the last status broadcast
+          if (!leader) {
+            dispatchEventsStatus('live')
+            handleFrame(message.event)
+          }
+        } else if (message.kind === 'status') {
+          if (!leader) dispatchEventsStatus(message.status)
+        }
+      }
+    }
+
     // ---- leadership --------------------------------------------------
 
     /**
@@ -305,12 +323,22 @@ export function useDashboardEvents() {
       return true
     }
 
+    const stopLeading = () => {
+      leader = false
+      if (leaseTimer !== null) window.clearInterval(leaseTimer)
+      leaseTimer = null
+      stopStream()
+      clearLease(tabId)
+    }
+
     const becomeLeader = () => {
       if (leader || closed) return
       leader = true
       dispatchEventsStatus('connecting')
       resolveHead()
+      if (!channel) return // single-tab fallback: no lease to defend
       leaseTimer = window.setInterval(() => {
+        if (closed || !leader) return
         if (!tryAcquireLease()) {
           // another tab took over (lower id); stop streaming, become follower
           leader = false
@@ -318,39 +346,39 @@ export function useDashboardEvents() {
           leaseTimer = null
           stopStream()
           dispatchEventsStatus('polling')
+          return
         }
+        // re-announce the status with every lease heartbeat, so a tab that
+        // joined between transitions learns the stream state within one beat
+        channel.postMessage({ kind: 'status', status: currentEventsStatus() } satisfies ChannelMessage)
       }, LEASE_HEARTBEAT_MS)
     }
 
     const takeoverCheck = () => {
       if (closed || leader) return
+      // without a channel a lease holder cannot share its events; every tab
+      // streams for itself instead of honoring a lease it cannot benefit from
+      if (!channel) {
+        becomeLeader()
+        return
+      }
       const lease = readLease()
       if (!lease || lease.id === tabId || Date.now() - lease.ts >= LEASE_TTL_MS) {
         if (tryAcquireLease()) becomeLeader()
       }
     }
 
-    // followers receive the leader's frames and status verbatim
-    if (channel) {
-      channel.onmessage = (raw: MessageEvent<ChannelMessage>) => {
-        const message = raw.data
-        if (!message || typeof message !== 'object') return
-        if (message.kind === 'event') {
-          if (!leader) handleFrame(message.event)
-        } else if (message.kind === 'status') {
-          if (!leader) dispatchEventsStatus(message.status)
-        }
-      }
-    }
     const followerTimer = window.setInterval(takeoverCheck, LEASE_HEARTBEAT_MS)
-    // hand the lease back promptly when this tab closes or navigates away
+    // bfcache: stop streaming and release the lease on hide, re-acquire on
+    // show — otherwise restoration stacks a second stream on live callbacks
     const onLeave = () => {
-      if (leader) {
-        leader = false
-        clearLease(tabId)
-      }
+      if (leader) stopLeading()
+    }
+    const onReturn = () => {
+      takeoverCheck()
     }
     window.addEventListener('pagehide', onLeave)
+    window.addEventListener('pageshow', onReturn)
 
     // first attempt: become the leader right away when the lease is free
     takeoverCheck()
@@ -358,6 +386,7 @@ export function useDashboardEvents() {
     return () => {
       closed = true
       window.removeEventListener('pagehide', onLeave)
+      window.removeEventListener('pageshow', onReturn)
       window.clearInterval(followerTimer)
       if (leaseTimer !== null) window.clearInterval(leaseTimer)
       stopStream()
