@@ -19,8 +19,22 @@ export type DashboardEvent = {
 export type EventsStatus = 'connecting' | 'live' | 'polling'
 
 const LAST_EVENT_ID_KEY = 'dashboard-last-event-id'
+const LEASE_KEY = 'dashboard-stream-leader'
+// One tab (the lease holder) owns the SSE connection; the others receive its
+// events over a BroadcastChannel. Without this, every tab holds its own
+// hour-long stream and six tabs exhaust the browser's per-origin HTTP/1.1
+// connection limit — dashboard API calls then queue behind the streams.
+const CHANNEL_NAME = 'dashboard-events-stream'
+const LEASE_TTL_MS = 8000
+const LEASE_HEARTBEAT_MS = 3000
 export const EVENTS_STATUS_EVENT = 'dashboard:events-status'
 export const DASHBOARD_EVENT = 'dashboard:event'
+
+type ChannelMessage =
+  | { kind: 'event'; event: DashboardEvent }
+  | { kind: 'status'; status: EventsStatus }
+
+type LeaderLease = { id: string; ts: number }
 
 // The live status is module-scoped, not hook-scoped: a subscriber mounted
 // after the connection already opened (page navigation within the panel)
@@ -48,6 +62,37 @@ function storeLastEventId(id: number) {
   }
 }
 
+function readLease(): LeaderLease | null {
+  try {
+    const raw = localStorage.getItem(LEASE_KEY)
+    if (raw === null) return null
+    const lease = JSON.parse(raw) as LeaderLease
+    return typeof lease.id === 'string' && Number.isFinite(lease.ts) ? lease : null
+  } catch {
+    return null
+  }
+}
+
+function writeLease(lease: LeaderLease) {
+  try {
+    localStorage.setItem(LEASE_KEY, JSON.stringify(lease))
+  } catch {
+    // storage blocked: leadership still works per-tab via the in-memory flag,
+    // the lease simply cannot be seen by other tabs
+  }
+}
+
+function clearLease(tabId: string) {
+  const lease = readLease()
+  if (lease?.id === tabId) {
+    try {
+      localStorage.removeItem(LEASE_KEY)
+    } catch {
+      // nothing to clean up
+    }
+  }
+}
+
 export function dispatchEventsStatus(status: EventsStatus) {
   sharedStatus = status
   window.dispatchEvent(new CustomEvent<EventsStatus>(EVENTS_STATUS_EVENT, { detail: status }))
@@ -57,17 +102,29 @@ export function currentEventsStatus(): EventsStatus {
   return sharedStatus
 }
 
+function randomTabId(): string {
+  try {
+    return crypto.randomUUID()
+  } catch {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  }
+}
+
 /**
- * The single SSE connection for the whole panel, mounted in DashboardLayout.
+ * The panel's event stream, mounted once in DashboardLayout.
  *
- * A fresh subscriber (no saved cursor) starts at the stream's current head
- * via /events/head so retained history is never replayed as notifications;
- * a saved cursor (reconnect after sleep, reload) resumes exactly where it
- * stopped. On every dashboard event the hook (1) invalidates the affected
- * react-query caches and (2) re-dispatches the event for the notification
- * layer. EventSource reconnects on its own with Last-Event-ID; while the
- * connection is down the status signal tells data queries to fall back to
- * their polling intervals.
+ * Cross-tab model: exactly one tab — the lease holder — holds the SSE
+ * connection and re-broadcasts every event over a BroadcastChannel; the
+ * others stay fully functional (instant cache invalidation, notifications,
+ * confetti) without their own connection. If the holder closes or stalls,
+ * another tab's takeover check acquires the expired lease within LEASE_TTL.
+ *
+ * Within the holder tab: a fresh subscription resolves the stream head first
+ * so retained history is never replayed as notifications; a saved cursor
+ * (reconnect after sleep, reload, or leadership takeover) resumes exactly
+ * where it stopped. The connection's cursor lives in memory (advanced per
+ * frame, persisted on connect and per frame) — localStorage only bootstraps
+ * a brand-new subscription.
  */
 export function useDashboardEvents() {
   const queryClient = useQueryClient()
@@ -75,24 +132,62 @@ export function useDashboardEvents() {
   useEffect(() => {
     let source: EventSource | null = null
     let closed = false
+    let leader = false
     let attempt = 0
     let retryTimer: number | null = null
-    // The connection's authoritative cursor. localStorage is only a
-    // bootstrap for a brand-new subscription: it is written opportunistically
-    // per frame but never read back here — writes can fail, and multiple
-    // dashboard tabs share one key, so a sibling tab's cursor must not
-    // advance this tab past events it has not received.
+    let leaseTimer: number | null = null
+    const tabId = randomTabId()
+
+    let channel: BroadcastChannel | null = null
+    try {
+      channel = new BroadcastChannel(CHANNEL_NAME)
+    } catch {
+      channel = null // very old browsers: single-tab mode, still functional
+    }
+
+    // The connection's authoritative cursor (leader only). localStorage is
+    // only a bootstrap for a brand-new subscription: it is written by the
+    // leader on connect and per frame, and never read back mid-connection —
+    // a sibling tab's value must not advance this stream past missed events.
     let cursor: number | null = null
     // Consecutive connection failures with a healthy head lookup. Native
     // EventSource cannot send an Authorization header, so a pure bearer
     // session (no usable cookie) fails the stream while the head query
-    // succeeds — without backoff that combination would retry every second.
-    // The counter only escalates the delay; retries never stop, so a
+    // succeeds — the counter escalates the delay; retries never stop, so a
     // transient proxy failure that heals also recovers on its own.
     let connectFailures = 0
     const STREAM_RETRY_FAST = 1000
     const STREAM_RETRY_SLOW = 60_000
     const FAST_FAILURES_BEFORE_SLOW = 3
+
+    // Invalidation debounce: an event replay backlog can deliver hundreds of
+    // events per poll tick, and each invalidation restarts active refetches —
+    // unbatched that is a request storm. Coalesce them into one invalidation
+    // pass per burst; cursor advancement, notifications and confetti stay
+    // per-event.
+    let invalidateTimer: number | null = null
+    const invalidateSoon = () => {
+      if (invalidateTimer !== null) return
+      invalidateTimer = window.setTimeout(() => {
+        invalidateTimer = null
+        queryClient.invalidateQueries({ queryKey: ['reviews'] })
+        queryClient.invalidateQueries({ queryKey: ['review-detail'] })
+        queryClient.invalidateQueries({ queryKey: ['review-logs'] })
+        queryClient.invalidateQueries({ queryKey: ['stats-overview'] })
+      }, 100)
+    }
+
+    /** Every frame, however it arrives (own stream or leader broadcast). */
+    const handleFrame = (event: DashboardEvent) => {
+      invalidateSoon()
+      window.dispatchEvent(new CustomEvent<DashboardEvent>(DASHBOARD_EVENT, { detail: event }))
+    }
+
+    /** Status the whole tab should see; the leader also broadcasts it. */
+    const publishStatus = (status: EventsStatus) => {
+      dispatchEventsStatus(status)
+      channel?.postMessage({ kind: 'status', status } satisfies ChannelMessage)
+    }
 
     const scheduleRetry = (delayMs: number, resetBackoff: boolean) => {
       if (retryTimer !== null) window.clearTimeout(retryTimer)
@@ -105,6 +200,17 @@ export function useDashboardEvents() {
       }, delayMs)
     }
 
+    const stopStream = () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
+      retryTimer = null
+      if (invalidateTimer !== null) window.clearTimeout(invalidateTimer)
+      invalidateTimer = null
+      source?.close()
+      source = null
+      cursor = null
+      connectFailures = 0
+    }
+
     const connect = (fromId: number) => {
       cursor = fromId
       // Persist the validated starting position immediately: if the tab
@@ -112,30 +218,13 @@ export function useDashboardEvents() {
       // from here and still sees everything that happened in between,
       // instead of jumping to the (new) head and skipping it silently.
       storeLastEventId(fromId)
-      // Invalidation debounce: an event replay backlog can deliver hundreds
-      // of events per poll tick, and each invalidation restarts active
-      // refetches — unbatched that is a request storm. Coalesce them into
-      // one invalidation pass per burst (short trailing window); cursor
-      // advancement, notifications and confetti stay per-event.
-      let invalidateTimer: number | null = null
-      const invalidateSoon = () => {
-        if (invalidateTimer !== null) return
-        invalidateTimer = window.setTimeout(() => {
-          invalidateTimer = null
-          queryClient.invalidateQueries({ queryKey: ['reviews'] })
-          queryClient.invalidateQueries({ queryKey: ['review-detail'] })
-          queryClient.invalidateQueries({ queryKey: ['review-logs'] })
-          queryClient.invalidateQueries({ queryKey: ['stats-overview'] })
-        }, 100)
-      }
       source = new EventSource(`/api/v1/dashboard/events/stream?lastEventId=${fromId}`)
-      dispatchEventsStatus('connecting')
+      publishStatus('connecting')
       source.addEventListener('open', () => {
         connectFailures = 0
-        dispatchEventsStatus('live')
+        publishStatus('live')
       })
       source.addEventListener('dashboard', (raw) => {
-        dispatchEventsStatus('live')
         const frame = raw as MessageEvent<string>
         let event: DashboardEvent
         try {
@@ -145,8 +234,8 @@ export function useDashboardEvents() {
         }
         cursor = event.id
         storeLastEventId(event.id)
-        invalidateSoon()
-        window.dispatchEvent(new CustomEvent<DashboardEvent>(DASHBOARD_EVENT, { detail: event }))
+        handleFrame(event)
+        channel?.postMessage({ kind: 'event', event } satisfies ChannelMessage)
       })
       source.addEventListener('error', () => {
         // EventSource auto-reconnects, but its Last-Event-ID is whatever the
@@ -154,11 +243,10 @@ export function useDashboardEvents() {
         // our back, that cursor is too high and the server would silently
         // filter every new event while the connection looks healthy. Take
         // reconnection into our own hands: close, re-validate the cursor
-        // against the current head, reconnect from there. Until it succeeds
-        // the status signal keeps queries polling.
+        // against the current head, reconnect from there.
         source?.close()
         source = null
-        dispatchEventsStatus('polling')
+        publishStatus('polling')
         connectFailures += 1
         // Escalate rather than stop: a bearer-only session (EventSource
         // cannot send the token) stays near-polling frequency with a
@@ -182,29 +270,99 @@ export function useDashboardEvents() {
     const resolveHead = () => {
       api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
         .then((data) => {
-          if (closed) return
+          if (closed || !leader) return
           const head = Math.max(0, data.last_event_id ?? 0)
           const saved = cursor ?? readLastEventId()
           const fromId = saved === null || saved > head ? head : saved
           connect(fromId)
         })
         .catch(() => {
-          if (closed) return
+          if (closed || !leader) return
           // A failed head lookup must NOT fall back to connecting blindly —
           // cursor 0 would replay retained history, a stale cursor may be
           // ahead of a rebuilt database. Keep retrying with capped backoff
           // while polling, and give up never — cleanup cancels the timer.
-          dispatchEventsStatus('polling')
+          publishStatus('polling')
           attempt += 1
           scheduleRetry(Math.min(30_000, attempt * 2000), false)
         })
     }
-    resolveHead()
+
+    // ---- leadership --------------------------------------------------
+
+    /**
+     * Acquire or refresh the stream lease. Own lease refreshes in place; a
+     * foreign live lease loses; a stale one is taken over. Concurrent
+     * acquisitions converge because the lowest tab id wins on re-read.
+     */
+    const tryAcquireLease = (): boolean => {
+      const now = Date.now()
+      const lease = readLease()
+      if (lease && lease.id !== tabId && now - lease.ts < LEASE_TTL_MS) return false
+      writeLease({ id: tabId, ts: now })
+      const after = readLease()
+      if (after && after.id !== tabId && after.id < tabId) return false // lower id wins
+      return true
+    }
+
+    const becomeLeader = () => {
+      if (leader || closed) return
+      leader = true
+      dispatchEventsStatus('connecting')
+      resolveHead()
+      leaseTimer = window.setInterval(() => {
+        if (!tryAcquireLease()) {
+          // another tab took over (lower id); stop streaming, become follower
+          leader = false
+          if (leaseTimer !== null) window.clearInterval(leaseTimer)
+          leaseTimer = null
+          stopStream()
+          dispatchEventsStatus('polling')
+        }
+      }, LEASE_HEARTBEAT_MS)
+    }
+
+    const takeoverCheck = () => {
+      if (closed || leader) return
+      const lease = readLease()
+      if (!lease || lease.id === tabId || Date.now() - lease.ts >= LEASE_TTL_MS) {
+        if (tryAcquireLease()) becomeLeader()
+      }
+    }
+
+    // followers receive the leader's frames and status verbatim
+    if (channel) {
+      channel.onmessage = (raw: MessageEvent<ChannelMessage>) => {
+        const message = raw.data
+        if (!message || typeof message !== 'object') return
+        if (message.kind === 'event') {
+          if (!leader) handleFrame(message.event)
+        } else if (message.kind === 'status') {
+          if (!leader) dispatchEventsStatus(message.status)
+        }
+      }
+    }
+    const followerTimer = window.setInterval(takeoverCheck, LEASE_HEARTBEAT_MS)
+    // hand the lease back promptly when this tab closes or navigates away
+    const onLeave = () => {
+      if (leader) {
+        leader = false
+        clearLease(tabId)
+      }
+    }
+    window.addEventListener('pagehide', onLeave)
+
+    // first attempt: become the leader right away when the lease is free
+    takeoverCheck()
 
     return () => {
       closed = true
-      if (retryTimer !== null) window.clearTimeout(retryTimer)
-      source?.close()
+      window.removeEventListener('pagehide', onLeave)
+      window.clearInterval(followerTimer)
+      if (leaseTimer !== null) window.clearInterval(leaseTimer)
+      stopStream()
+      clearLease(tabId)
+      if (channel) channel.close()
       dispatchEventsStatus('polling')
     }
   }, [queryClient])
