@@ -23,8 +23,10 @@ export function notificationsEnabled(): boolean {
   if (notificationPermission() !== 'granted') return false
   try {
     // granted permission means the user opted in (bell or browser padlock);
-    // only an explicit 'off' set by the bell toggle disables
-    return localStorage.getItem(NOTIFICATION_PREF_KEY) !== 'off' || sessionNotificationsEnabled
+    // only an explicit 'off' set by the bell toggle disables. When storage
+    // is readable the persisted value is authoritative across tabs — a
+    // session flag from another tab must not override it.
+    return localStorage.getItem(NOTIFICATION_PREF_KEY) !== 'off'
   } catch {
     return sessionNotificationsEnabled
   }
