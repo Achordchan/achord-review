@@ -32,7 +32,9 @@ function readLastEventId(): number | null {
     const raw = localStorage.getItem(LAST_EVENT_ID_KEY)
     if (raw === null) return null
     const value = Number(raw)
-    return Number.isFinite(value) && value > 0 ? value : null
+    // a stored 0 is a real position (subscription established against an
+    // empty stream) and must not read as "never stored"
+    return Number.isFinite(value) && value >= 0 ? value : null
   } catch {
     return null
   }
@@ -105,6 +107,11 @@ export function useDashboardEvents() {
 
     const connect = (fromId: number) => {
       cursor = fromId
+      // Persist the validated starting position immediately: if the tab
+      // closes before any event arrives, a returning subscription resumes
+      // from here and still sees everything that happened in between,
+      // instead of jumping to the (new) head and skipping it silently.
+      storeLastEventId(fromId)
       // Invalidation debounce: an event replay backlog can deliver hundreds
       // of events per poll tick, and each invalidation restarts active
       // refetches — unbatched that is a request storm. Coalesce them into
