@@ -48,40 +48,60 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     <ToastContext.Provider value={value}>
       {children}
       <div className="pointer-events-none fixed bottom-5 right-5 z-50 flex w-80 flex-col gap-2">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            role="status"
-            onClick={() => {
-              if (toast.onClick) {
-                toast.onClick()
-                dismiss(toast.id)
-              }
-            }}
-            className={`animate-fade-in pointer-events-auto flex items-start gap-2.5 rounded-lg border px-3.5 py-3 shadow-lg backdrop-blur ${
-              toast.onClick ? 'cursor-pointer transition-colors hover:border-accent/50' : ''
-            } ${
-              toast.kind === 'success' ? 'border-good/40 bg-surface-2/95' :
-              toast.kind === 'error' ? 'border-bad/40 bg-surface-2/95' :
-              'border-info/40 bg-surface-2/95'
-            }`}
-          >
-            {toast.kind === 'success' ? <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-good" /> :
-             toast.kind === 'error' ? <TriangleAlert size={16} className="mt-0.5 shrink-0 text-bad" /> :
-             <Info size={16} className="mt-0.5 shrink-0 text-info" />}
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-text">{toast.title}</p>
-              {toast.detail && <p className="mt-0.5 break-words text-xs text-muted">{toast.detail}</p>}
+        {toasts.map((toast) => {
+          const classes = `animate-fade-in pointer-events-auto flex items-start gap-2.5 rounded-lg border px-3.5 py-3 shadow-lg backdrop-blur ${
+            toast.kind === 'success' ? 'border-good/40 bg-surface-2/95' :
+            toast.kind === 'error' ? 'border-bad/40 bg-surface-2/95' :
+            'border-info/40 bg-surface-2/95'
+          }`
+          const activate = () => {
+            if (toast.onClick) {
+              toast.onClick()
+              dismiss(toast.id)
+            }
+          }
+          const body = (
+            <>
+              {toast.kind === 'success' ? <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-good" /> :
+               toast.kind === 'error' ? <TriangleAlert size={16} className="mt-0.5 shrink-0 text-bad" /> :
+               <Info size={16} className="mt-0.5 shrink-0 text-info" />}
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-text">{toast.title}</p>
+                {toast.detail && <p className="mt-0.5 break-words text-xs text-muted">{toast.detail}</p>}
+              </div>
+              <button
+                onClick={() => dismiss(toast.id)}
+                className="shrink-0 rounded p-0.5 text-muted transition-colors hover:text-text"
+                aria-label="关闭"
+              >
+                <X size={14} />
+              </button>
+            </>
+          )
+          // keyboard-accessible navigation for actionable toasts; plain
+          // announcements stay a status region
+          if (toast.onClick) {
+            return (
+              <a
+                key={toast.id}
+                role="status"
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault()
+                  activate()
+                }}
+                className={`${classes} cursor-pointer transition-colors hover:border-accent/50 focus:border-accent/50 focus:outline-none`}
+              >
+                {body}
+              </a>
+            )
+          }
+          return (
+            <div key={toast.id} role="status" className={classes}>
+              {body}
             </div>
-            <button
-              onClick={() => dismiss(toast.id)}
-              className="shrink-0 rounded p-0.5 text-muted transition-colors hover:text-text"
-              aria-label="关闭"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </ToastContext.Provider>
   )
