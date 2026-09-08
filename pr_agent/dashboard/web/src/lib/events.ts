@@ -95,17 +95,35 @@ export function useDashboardEvents() {
         window.dispatchEvent(new CustomEvent<DashboardEvent>(DASHBOARD_EVENT, { detail: event }))
       })
       source.addEventListener('error', () => {
-        // EventSource auto-reconnects; until it does, queries poll instead
+        // EventSource auto-reconnects, but its Last-Event-ID is whatever the
+        // stream last sent: if the database was recreated or restored behind
+        // our back, that cursor is too high and the server would silently
+        // filter every new event while the connection looks healthy. Take
+        // reconnection into our own hands: close, re-validate the cursor
+        // against the current head, reconnect from there. Until it succeeds
+        // the status signal keeps queries polling.
+        source?.close()
+        source = null
         dispatchEventsStatus('polling')
+        attempt = 0
+        if (retryTimer === null) {
+          const delay = Math.min(5_000, 1000)
+          retryTimer = window.setTimeout(() => {
+            retryTimer = null
+            resolveHead()
+          }, delay)
+        }
       })
     }
 
-    const saved = readLastEventId()
     // Every subscription resolves the head first: a fresh browser starts
-    // there (never replaying retained history), and a saved cursor is
+    // there (never replaying retained history), and the saved cursor is
     // validated against it — a database recreated or restored from an older
     // backup restarts the sequence lower, and a stale-high cursor would
     // silently filter out every new event until the sequence caught up.
+    // The cursor is re-read on every resolution, so the reconnection path
+    // validates the position the stream actually reached, not the one at
+    // mount time.
     let attempt = 0
     let retryTimer: number | null = null
     const resolveHead = () => {
@@ -113,6 +131,7 @@ export function useDashboardEvents() {
         .then((data) => {
           if (closed) return
           const head = Math.max(0, data.last_event_id ?? 0)
+          const saved = readLastEventId()
           const fromId = saved === null || saved > head ? head : saved
           connect(fromId)
         })
@@ -121,9 +140,8 @@ export function useDashboardEvents() {
           // A failed head lookup must NOT fall back to connecting blindly —
           // cursor 0 would replay retained history, a stale saved cursor may
           // be ahead of a rebuilt database. Keep retrying with capped
-          // backoff while polling (an established EventSource reconnects on
-          // its own; this initialization path must recover the same way),
-          // and give up never — cleanup cancels the pending timer.
+          // backoff while polling, and give up never — cleanup cancels the
+          // pending timer.
           dispatchEventsStatus('polling')
           attempt += 1
           const delay = Math.min(30_000, attempt * 2000)
