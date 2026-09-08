@@ -78,6 +78,18 @@ function eventText(event: DashboardEvent): { title: string; body: string } {
   }
 }
 
+// Events older than this are replayed backlog (a returning tab resuming
+// from its saved cursor), not live news: they still reconcile the caches
+// (the events hook invalidates queries per event regardless) but stay
+// silent — no toasts, no desktop notifications, no confetti. A real review
+// completes minutes after its request, so a fresh event is always recent.
+const REPLAY_MAX_AGE_MS = 5 * 60_000
+
+function isReplayed(event: DashboardEvent): boolean {
+  const createdAt = Date.parse(event.created_at)
+  return Number.isFinite(createdAt) && Date.now() - createdAt > REPLAY_MAX_AGE_MS
+}
+
 /**
  * Listens to the shared SSE event dispatch and turns review-lifecycle events
  * into toasts, desktop notifications and — when a review passes — confetti.
@@ -89,6 +101,7 @@ export function useEventNotifications() {
 
   useEffect(() => {
     return onDashboardEvent((event) => {
+      if (isReplayed(event)) return
       const { title, body } = eventText(event)
       const detail = event.review_id ? `${body}（点击查看详情）` : body
       const openDetail = event.review_id
