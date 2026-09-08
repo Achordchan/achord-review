@@ -70,7 +70,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 {toast.detail && <p className="mt-0.5 break-words text-xs text-muted">{toast.detail}</p>}
               </div>
               <button
-                onClick={() => dismiss(toast.id)}
+                onClick={(e) => {
+                  // inside the navigation link, an un-stopped click bubbles
+                  // up and triggers navigation instead of dismissal
+                  e.stopPropagation()
+                  dismiss(toast.id)
+                }}
                 className="shrink-0 rounded p-0.5 text-muted transition-colors hover:text-text"
                 aria-label="关闭"
               >
