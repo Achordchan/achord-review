@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -12,7 +12,7 @@ import { useDashboardEvents } from '../lib/events'
 import type { VersionInfo } from '../lib/types'
 import { ComingSoonBadge } from './badges'
 import { VersionCenter } from './VersionCenter'
-import { disableNotifications, enableNotifications, notificationPermission, notificationsEnabled, useEventNotifications } from './Notifications'
+import { disableNotifications, enableNotifications, notificationPermission, notificationsEnabled, onNotificationPrefChange, useEventNotifications } from './Notifications'
 import { useEventsStatus } from '../lib/events'
 import { getStoredTheme, setTheme, type Theme } from '../lib/theme'
 import { useToast } from './Toast'
@@ -100,6 +100,9 @@ export default function DashboardLayout() {
   const eventsStatus = useEventsStatus()
   const [notifyPermission, setNotifyPermission] = useState(() => notificationPermission())
   const [notifyEnabled, setNotifyOn] = useState(() => notificationsEnabled())
+  // the preference is shared across tabs via localStorage; the storage event
+  // fires in every other tab on change, keeping this bell's display honest
+  useEffect(() => onNotificationPrefChange(() => setNotifyOn(notificationsEnabled())), [])
   const [pendingItem, setPendingItem] = useState<NavItem | null>(null)
   const [logoutPending, setLogoutPending] = useState(false)
   const [versionOpen, setVersionOpen] = useState(false)

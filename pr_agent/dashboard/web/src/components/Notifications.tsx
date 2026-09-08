@@ -13,6 +13,20 @@ type PermissionState = 'default' | 'granted' | 'denied' | 'unsupported'
 // via an explicit click, so the preference must survive storage failure for
 // the rest of the tab session — otherwise "enabled" silently means "off".
 let sessionNotificationsEnabled = false
+// This session's intent when a preference WRITE failed (e.g. storage full
+// while reads still work): the stored value is stale, so the override wins
+// until a later write succeeds and clears it.
+let sessionOverride: boolean | null = null
+
+function persistNotificationPref(value: 'on' | 'off'): boolean {
+  try {
+    localStorage.setItem(NOTIFICATION_PREF_KEY, value)
+    sessionOverride = null
+    return true
+  } catch {
+    return false
+  }
+}
 
 export function notificationPermission(): PermissionState {
   if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported'
@@ -21,6 +35,9 @@ export function notificationPermission(): PermissionState {
 
 export function notificationsEnabled(): boolean {
   if (notificationPermission() !== 'granted') return false
+  // a write that failed this session left the stored value stale; the
+  // session override outranks it until a successful write replaces it
+  if (sessionOverride !== null) return sessionOverride
   try {
     // granted permission means the user opted in (bell or browser padlock);
     // only an explicit 'off' set by the bell toggle disables. When storage
@@ -38,10 +55,9 @@ export async function enableNotifications(): Promise<PermissionState> {
   const permission = await Notification.requestPermission()
   if (permission === 'granted') {
     sessionNotificationsEnabled = true
-    try {
-      localStorage.setItem(NOTIFICATION_PREF_KEY, 'on')
-    } catch {
-      // preference won't persist across reloads; this session still works
+    if (!persistNotificationPref('on')) {
+      // preference won't persist across reloads or tabs; this session still works
+      sessionOverride = true
     }
   }
   return permission
@@ -50,11 +66,22 @@ export async function enableNotifications(): Promise<PermissionState> {
 /** The bell's off switch: keep the browser permission, silence this panel. */
 export function disableNotifications() {
   sessionNotificationsEnabled = false
-  try {
-    localStorage.setItem(NOTIFICATION_PREF_KEY, 'off')
-  } catch {
-    // toggling off still applies for this session via the flag above
+  if (!persistNotificationPref('off')) {
+    sessionOverride = false
   }
+}
+
+/**
+ * Notify me when another tab changes the shared preference. The storage
+ * event fires in every OTHER tab, which is exactly the cross-tab signal the
+ * bell display needs so its on/off state never goes stale.
+ */
+export function onNotificationPrefChange(handler: () => void) {
+  const listener = (event: StorageEvent) => {
+    if (event.key === null || event.key === NOTIFICATION_PREF_KEY) handler()
+  }
+  window.addEventListener('storage', listener)
+  return () => window.removeEventListener('storage', listener)
 }
 
 function notify(title: string, body: string, tag: string, onClick: () => void) {
