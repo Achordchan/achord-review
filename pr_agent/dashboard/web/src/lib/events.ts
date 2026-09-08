@@ -81,6 +81,14 @@ export function useDashboardEvents() {
     // dashboard tabs share one key, so a sibling tab's cursor must not
     // advance this tab past events it has not received.
     let cursor: number | null = null
+    // Consecutive connection failures with a healthy head lookup. Native
+    // EventSource cannot send an Authorization header, so a pure bearer
+    // session (no usable cookie) fails the stream while the head query
+    // succeeds — without this counter that combination would retry forever,
+    // opening an unauthenticated stream every second. After a few failures
+    // the tab settles into polling mode instead.
+    let connectFailures = 0
+    const MAX_CONNECT_FAILURES = 3
 
     const scheduleRetry = (delayMs: number, resetBackoff: boolean) => {
       if (retryTimer !== null) window.clearTimeout(retryTimer)
@@ -97,7 +105,10 @@ export function useDashboardEvents() {
       cursor = fromId
       source = new EventSource(`/api/v1/dashboard/events/stream?lastEventId=${fromId}`)
       dispatchEventsStatus('connecting')
-      source.addEventListener('open', () => dispatchEventsStatus('live'))
+      source.addEventListener('open', () => {
+        connectFailures = 0
+        dispatchEventsStatus('live')
+      })
       source.addEventListener('dashboard', (raw) => {
         dispatchEventsStatus('live')
         const frame = raw as MessageEvent<string>
@@ -126,6 +137,12 @@ export function useDashboardEvents() {
         source?.close()
         source = null
         dispatchEventsStatus('polling')
+        connectFailures += 1
+        // A healthy head lookup plus repeated stream failure means the
+        // stream itself is unreachable in this session (native EventSource
+        // cannot send the bearer token). Stop reopening it: polling carries
+        // the data, and a reload re-evaluates the auth mode.
+        if (connectFailures >= MAX_CONNECT_FAILURES) return
         scheduleRetry(1000, true)
       })
     }
