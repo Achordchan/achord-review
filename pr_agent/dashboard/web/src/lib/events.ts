@@ -84,11 +84,13 @@ export function useDashboardEvents() {
     // Consecutive connection failures with a healthy head lookup. Native
     // EventSource cannot send an Authorization header, so a pure bearer
     // session (no usable cookie) fails the stream while the head query
-    // succeeds — without this counter that combination would retry forever,
-    // opening an unauthenticated stream every second. After a few failures
-    // the tab settles into polling mode instead.
+    // succeeds — without backoff that combination would retry every second.
+    // The counter only escalates the delay; retries never stop, so a
+    // transient proxy failure that heals also recovers on its own.
     let connectFailures = 0
-    const MAX_CONNECT_FAILURES = 3
+    const STREAM_RETRY_FAST = 1000
+    const STREAM_RETRY_SLOW = 60_000
+    const FAST_FAILURES_BEFORE_SLOW = 3
 
     const scheduleRetry = (delayMs: number, resetBackoff: boolean) => {
       if (retryTimer !== null) window.clearTimeout(retryTimer)
@@ -138,12 +140,14 @@ export function useDashboardEvents() {
         source = null
         dispatchEventsStatus('polling')
         connectFailures += 1
-        // A healthy head lookup plus repeated stream failure means the
-        // stream itself is unreachable in this session (native EventSource
-        // cannot send the bearer token). Stop reopening it: polling carries
-        // the data, and a reload re-evaluates the auth mode.
-        if (connectFailures >= MAX_CONNECT_FAILURES) return
-        scheduleRetry(1000, true)
+        // Escalate rather than stop: a bearer-only session (EventSource
+        // cannot send the token) stays near-polling frequency with a
+        // once-a-minute probe instead of a per-second storm, while a
+        // transient failure heals and the next open resets the counter.
+        const delay = connectFailures >= FAST_FAILURES_BEFORE_SLOW
+          ? STREAM_RETRY_SLOW
+          : STREAM_RETRY_FAST
+        scheduleRetry(delay, true)
       })
     }
 
