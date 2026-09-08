@@ -101,31 +101,35 @@ export function useDashboardEvents() {
     }
 
     const saved = readLastEventId()
-    if (saved !== null) {
-      connect(saved)
-    } else {
-      // fresh subscription: skip history, start at the current head. A failed
-      // head lookup must NOT fall back to 0 — that would replay every retained
-      // event as notifications. Retry with backoff, and give up into polling
-      // mode (the status signal keeps queries polling) rather than subscribe.
-      let attempt = 0
-      const resolveHead = () => {
-        api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
-          .then((data) => {
-            if (!closed) connect(data.last_event_id ?? 0)
-          })
-          .catch(() => {
-            if (closed) return
-            if (attempt < 3) {
-              attempt += 1
-              window.setTimeout(resolveHead, attempt * 2000)
-            } else {
-              dispatchEventsStatus('polling')
-            }
-          })
-      }
-      resolveHead()
+    // Every subscription resolves the head first: a fresh browser starts
+    // there (never replaying retained history), and a saved cursor is
+    // validated against it — a database recreated or restored from an older
+    // backup restarts the sequence lower, and a stale-high cursor would
+    // silently filter out every new event until the sequence caught up.
+    let attempt = 0
+    const resolveHead = () => {
+      api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
+        .then((data) => {
+          if (closed) return
+          const head = Math.max(0, data.last_event_id ?? 0)
+          const fromId = saved === null || saved > head ? head : saved
+          connect(fromId)
+        })
+        .catch(() => {
+          if (closed) return
+          // A failed head lookup must NOT fall back to connecting blindly —
+          // cursor 0 would replay retained history, a stale saved cursor may
+          // be ahead of a rebuilt database. Retry with backoff, and give up
+          // into polling mode (the status signal keeps queries polling).
+          if (attempt < 3) {
+            attempt += 1
+            window.setTimeout(resolveHead, attempt * 2000)
+          } else {
+            dispatchEventsStatus('polling')
+          }
+        })
     }
+    resolveHead()
 
     return () => {
       closed = true
