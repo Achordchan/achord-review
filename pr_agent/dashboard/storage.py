@@ -48,6 +48,11 @@ MAX_FINDING_FILE_BYTES = 4 * 1024
 MAX_FINDING_SUMMARY_BYTES = 16 * 1024
 MAX_FINDING_SUGGESTION_BYTES = 64 * 1024
 MAX_DASHBOARD_SESSIONS = 1000
+# SSE event bus rows. The autoincrement id doubles as the SSE event id, so the
+# retention window only bounds disk usage; a browser that reconnects inside it
+# resumes exactly where it stopped.
+MAX_DASHBOARD_EVENT_ROWS = bounded_env_int("DASHBOARD_MAX_EVENT_ROWS", 5000, 100)
+DASHBOARD_EVENT_RETENTION_DAYS = bounded_env_int("DASHBOARD_EVENT_RETENTION_DAYS", 7, 1)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reviews (
@@ -126,6 +131,16 @@ CREATE TABLE IF NOT EXISTS dashboard_login_attempts (
     lockout_key TEXT NOT NULL,
     attempted_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS dashboard_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    request_id TEXT NOT NULL DEFAULT '',
+    review_id INTEGER,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
 
 CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo_name, pr_number);
 CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
@@ -392,6 +407,18 @@ class DashboardStorage:
             " (SELECT id FROM reviews WHERE status != 'RUNNING' ORDER BY id DESC LIMIT ?)",
             (terminal_limit,))
         self._maintain_audit_logs(conn, now)
+        self._maintain_event_rows(conn, now)
+
+    @staticmethod
+    def _maintain_event_rows(conn: sqlite3.Connection, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        conn.execute(
+            "DELETE FROM dashboard_events WHERE created_at < ?",
+            (_utc_at(now - DASHBOARD_EVENT_RETENTION_DAYS * 24 * 3600),))
+        conn.execute(
+            "DELETE FROM dashboard_events WHERE id NOT IN"
+            " (SELECT id FROM dashboard_events ORDER BY id DESC LIMIT ?)",
+            (MAX_DASHBOARD_EVENT_ROWS,))
 
     @staticmethod
     def _maintain_audit_logs(conn: sqlite3.Connection, now: Optional[float] = None) -> None:
@@ -403,6 +430,63 @@ class DashboardStorage:
             "DELETE FROM audit_logs WHERE id NOT IN"
             " (SELECT id FROM audit_logs ORDER BY id DESC LIMIT ?)",
             (MAX_AUDIT_LOG_ROWS,))
+
+    # ------------------------------------------------------------------- events
+
+    def add_event(self, event_type: str, request_id: str = "", review_id: Optional[int] = None,
+                  payload: Optional[Dict[str, Any]] = None) -> int:
+        """Append one review-lifecycle event for the dashboard event stream.
+
+        The autoincrement id is the SSE event id: the stream endpoint reads
+        "everything after id N", so ordering and resume position come for free.
+        Fail-safe like every other write here — the event bus must never
+        disturb the review flow that produced the event.
+        """
+        bounded_payload = {}
+        for key, value in (payload or {}).items():
+            if value is None:
+                continue
+            # numbers and booleans pass through unchanged; the frontend reads
+            # pr_number/review_id as real JSON numbers, everything text is bounded
+            bounded_payload[key] = (
+                value if isinstance(value, (int, float, bool))
+                else _truncate_text_bytes(value, 2000))
+        inserted = self._write(
+            "INSERT INTO dashboard_events (event_type, request_id, review_id, payload_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (event_type, request_id or "", review_id,
+             json.dumps(bounded_payload, ensure_ascii=False, separators=(",", ":")),
+             _utcnow()),
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+        return inserted or 0
+
+    def list_events(self, after_id: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+        """Events with id greater than after_id, oldest first (SSE send order)."""
+        limit = max(1, min(limit, 500))
+        rows = self._read(
+            "SELECT id, event_type, request_id, review_id, payload_json, created_at"
+            " FROM dashboard_events WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (max(0, after_id), limit))
+        for row in rows:
+            try:
+                row["payload"] = json.loads(row.pop("payload_json") or "{}")
+            except ValueError:
+                row["payload"] = {}
+        return rows
+
+    def latest_event_id(self) -> int:
+        """Current head of the event stream (0 when empty)."""
+        rows = self._read("SELECT MAX(id) AS max_id FROM dashboard_events")
+        return int(rows[0]["max_id"] or 0) if rows else 0
+
+    def latest_request_id_for_pr(self, repo_name: str, pr_number: int) -> Optional[str]:
+        """Most recent review run on a PR, for attributing a comment event."""
+        if not repo_name or not pr_number:
+            return None
+        rows = self._read(
+            "SELECT request_id FROM reviews WHERE repo_name = ? AND pr_number = ?"
+            " ORDER BY id DESC LIMIT 1", (repo_name, int(pr_number)))
+        return rows[0]["request_id"] if rows else None
 
     def _write(self, sql: str, params: tuple = (), timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS,
                max_retry: int = _MAX_RETRY) -> Optional[int]:

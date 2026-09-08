@@ -105,6 +105,31 @@ def normalize_mention_command(comment_body: str) -> str:
     return command
 
 
+def _record_review_reply_event(body: Dict[str, Any], sender: str) -> None:
+    """Notify the dashboard stream that a human replied on a reviewed PR.
+
+    The comment path has already decided not to run a command, so this only
+    feeds the event bus — the dashboard never broke on a notification failure
+    and the webhook path must not either.
+    """
+    try:
+        from pr_agent.dashboard import audit
+        repo_name = body.get("repository", {}).get("full_name", "")
+        pr_url = body.get("issue", {}).get("html_url") or body.get("comment", {}).get("html_url", "")
+        parsed_repo, pr_number = audit._parse_pr_url(pr_url)
+        pr_title = body.get("issue", {}).get("title", "")
+        review = audit._run_audit()
+        request_id = ""
+        if review is not None:
+            request_id = review.latest_request_id_for_pr(
+                parsed_repo or repo_name, pr_number) or ""
+        audit._record_event(
+            "review.reply", request_id=request_id, repo_name=parsed_repo or repo_name,
+            pr_number=pr_number, pr_title=pr_title, sender=sender)
+    except Exception as e:
+        get_logger().debug(f"Dashboard reply event failed, error: {e}")
+
+
 async def handle_comments_on_pr(body: Dict[str, Any],
                                 event: str,
                                 sender: str,
@@ -124,6 +149,7 @@ async def handle_comments_on_pr(body: Dict[str, Any],
             get_logger().info(f"Reformatting comment_body so command is at the beginning: {comment_body}")
         else:
             get_logger().info("Ignoring comment not starting with /")
+            _record_review_reply_event(body, sender)
             return {}
     disable_eyes = False
     if "issue" in body and "pull_request" in body["issue"] and "url" in body["issue"]["pull_request"]:

@@ -1,0 +1,112 @@
+import { useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
+import confetti from 'canvas-confetti'
+import { onDashboardEvent } from '../lib/events'
+import type { DashboardEvent } from '../lib/events'
+import { useToast } from './Toast'
+
+const NOTIFICATION_PREF_KEY = 'dashboard-notifications'
+
+type PermissionState = 'default' | 'granted' | 'denied' | 'unsupported'
+
+export function notificationPermission(): PermissionState {
+  if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported'
+  return Notification.permission
+}
+
+export function notificationsEnabled(): boolean {
+  try {
+    if (localStorage.getItem(NOTIFICATION_PREF_KEY) !== 'on') return false
+  } catch {
+    return false
+  }
+  return notificationPermission() === 'granted'
+}
+
+export async function enableNotifications(): Promise<PermissionState> {
+  if (!('Notification' in window)) return 'unsupported'
+  // requestPermission must come from a user gesture — this is the click handler
+  const permission = await Notification.requestPermission()
+  if (permission === 'granted') {
+    try {
+      localStorage.setItem(NOTIFICATION_PREF_KEY, 'on')
+    } catch {
+      // preference won't persist; session notifications still work
+    }
+  }
+  return permission
+}
+
+function notify(title: string, body: string, tag: string, onClick: () => void) {
+  if (!notificationsEnabled()) return
+  try {
+    const notification = new Notification(title, { body, tag })
+    notification.onclick = () => {
+      window.focus()
+      onClick()
+      notification.close()
+    }
+  } catch {
+    // a notification failure never breaks the panel
+  }
+}
+
+function celebrate() {
+  // left and right bursts, GitHub-merge style
+  void confetti({ particleCount: 90, spread: 70, origin: { x: 0.2, y: 0.7 }, colors: ['#3ecf8e', '#6d8dff', '#e8ecf3'] })
+  void confetti({ particleCount: 90, spread: 70, origin: { x: 0.8, y: 0.7 }, colors: ['#3ecf8e', '#6d8dff', '#e8ecf3'] })
+}
+
+function eventText(event: DashboardEvent): { title: string; body: string } {
+  const repo = event.repo_name || '未知仓库'
+  const pr = `PR #${event.pr_number}${event.pr_title ? ` · ${event.pr_title}` : ''}`
+  switch (event.event_type) {
+    case 'review.requested':
+      return { title: `收到新的审查请求 · ${repo}`, body: `${pr}${event.sender ? `（${event.sender} 触发）` : ''}` }
+    case 'review.completed': {
+      const verdict = event.verdict === 'APPROVE' ? '✅ 审查通过' : event.verdict === 'REQUEST_CHANGES' ? '⚠️ 要求修改' : '审查完成'
+      return { title: `${verdict} · ${repo}`, body: pr }
+    }
+    case 'review.failed':
+      return { title: `❌ 审查失败 · ${repo}`, body: pr }
+    case 'review.skipped':
+      return { title: `审查已跳过 · ${repo}`, body: pr }
+    case 'review.reply':
+      return { title: `${event.sender || '有人'} 回复了审查的 PR · ${repo}`, body: pr }
+    default:
+      return { title: `仪表盘事件 · ${repo}`, body: pr }
+  }
+}
+
+/**
+ * Listens to the shared SSE event dispatch and turns review-lifecycle events
+ * into toasts, desktop notifications and — when a review passes — confetti.
+ * Mount once inside DashboardLayout.
+ */
+export function useEventNotifications() {
+  const toast = useToast()
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    return onDashboardEvent((event) => {
+      const { title, body } = eventText(event)
+      const detail = event.review_id ? `${body}（点击通知查看详情）` : body
+      const openDetail = () => {
+        if (event.review_id) navigate(`/dashboard/reviews/${event.review_id}`)
+      }
+      if (event.event_type === 'review.completed') {
+        if (event.verdict === 'APPROVE') {
+          toast.success(title, detail)
+          celebrate()
+        } else {
+          toast.info(title, detail)
+        }
+      } else if (event.event_type === 'review.failed') {
+        toast.error(title, detail)
+      } else {
+        toast.info(title, detail)
+      }
+      notify(title, body, `review-${event.request_id || event.id}`, openDetail)
+    })
+  }, [toast, navigate])
+}

@@ -11,6 +11,7 @@ front end can wire them up before the backing features ship.
 import asyncio
 import hashlib
 import hmac
+import json
 import os
 import secrets
 import threading
@@ -20,7 +21,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, Cookie, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StrictBool
 
 from pr_agent.config_loader import get_settings
@@ -44,6 +45,14 @@ MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 15 * 60
 MAX_SQLITE_INTEGER = 2 ** 63 - 1
 MAX_DASHBOARD_REQUEST_BYTES = 64 * 1024
+# SSE stream pacing: how often each connection polls shared SQLite for new
+# events, and how often a comment heartbeat frame keeps proxies from closing
+# the idle stream. The poll is a cheap indexed read on a per-connection
+# coroutine, not the request event loop.
+SSE_POLL_SECONDS = 1.0
+SSE_HEARTBEAT_SECONDS = 25.0
+SSE_STREAM_LIMIT_SECONDS = 3600.0
+SSE_BATCH_LIMIT = 200
 # Everything the panel serves: the JSON API and the SPA bundle under /dashboard.
 DASHBOARD_PATH_PREFIXES = ("/api/v1/dashboard", "/dashboard")
 # Number of trusted proxy hops in front of this service. The deployment sits
@@ -692,6 +701,73 @@ async def audit_logs(request: Request, dashboard_session: Optional[str] = Cookie
     items = await _dashboard_storage_read(
         "list_audit_logs", limit=max(1, min(limit, 500)))
     return _ok({"items": items})
+
+
+# ------------------------------------------------------------ live event stream
+
+def _sse_frame(event: Dict[str, Any]) -> bytes:
+    """One event as an SSE frame: id enables Last-Event-ID resume, then data."""
+    payload = {key: value for key, value in event.items() if key != "payload"}
+    payload.update(event.get("payload") or {})
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"id: {event['id']}\nevent: dashboard\ndata: {body}\n\n".encode("utf-8")
+
+
+@router.get("/events/stream")
+async def events_stream(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+    """Server-sent events for the review lifecycle (request → outcome).
+
+    The events themselves are written to shared SQLite by whichever gunicorn
+    worker runs the review, so the stream reads "everything after id N" and
+    needs no in-process pub/sub. Browsers auto-reconnect with Last-Event-ID;
+    both that header and a `?lastEventId=` query parameter are honored (the
+    query form also covers the first frame after a login redirect, before
+    EventSource has an id to replay). The stream self-terminates after an hour
+    so EventSource's transparent reconnect also revalidates the session.
+    """
+    await require_auth(request, dashboard_session)
+    try:
+        cursor = int(request.headers.get("last-event-id") or
+                     request.query_params.get("lastEventId") or 0)
+    except ValueError:
+        cursor = 0
+    cursor = max(0, min(cursor, MAX_SQLITE_INTEGER))
+
+    async def _generate():
+        nonlocal cursor
+        last_beat = time.monotonic()
+        started_at = last_beat
+        yield b""
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                events = await asyncio.to_thread(
+                    _storage_call, "list_events", after_id=cursor, limit=SSE_BATCH_LIMIT)
+            except DashboardStorageReadError:
+                # A transient read error must not kill the connection; the
+                # browser keeps its id and the next poll retries the range.
+                events = []
+            for event in events:
+                cursor = event["id"]
+                yield _sse_frame(event)
+            now = time.monotonic()
+            if now - last_beat >= SSE_HEARTBEAT_SECONDS:
+                last_beat = now
+                yield b": heartbeat\n\n"
+            if now - started_at >= SSE_STREAM_LIMIT_SECONDS and not events:
+                # only exit on an idle tick, never between events: a reconnect
+                # that arrives mid-burst still receives everything
+                return
+            await asyncio.sleep(SSE_POLL_SECONDS)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        })
 
 
 # --------------------------------------------------------------- playground
