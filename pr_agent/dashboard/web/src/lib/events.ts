@@ -107,6 +107,7 @@ export function useDashboardEvents() {
     // backup restarts the sequence lower, and a stale-high cursor would
     // silently filter out every new event until the sequence caught up.
     let attempt = 0
+    let retryTimer: number | null = null
     const resolveHead = () => {
       api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
         .then((data) => {
@@ -119,20 +120,21 @@ export function useDashboardEvents() {
           if (closed) return
           // A failed head lookup must NOT fall back to connecting blindly —
           // cursor 0 would replay retained history, a stale saved cursor may
-          // be ahead of a rebuilt database. Retry with backoff, and give up
-          // into polling mode (the status signal keeps queries polling).
-          if (attempt < 3) {
-            attempt += 1
-            window.setTimeout(resolveHead, attempt * 2000)
-          } else {
-            dispatchEventsStatus('polling')
-          }
+          // be ahead of a rebuilt database. Keep retrying with capped
+          // backoff while polling (an established EventSource reconnects on
+          // its own; this initialization path must recover the same way),
+          // and give up never — cleanup cancels the pending timer.
+          dispatchEventsStatus('polling')
+          attempt += 1
+          const delay = Math.min(30_000, attempt * 2000)
+          retryTimer = window.setTimeout(resolveHead, delay)
         })
     }
     resolveHead()
 
     return () => {
       closed = true
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
       source?.close()
       dispatchEventsStatus('polling')
     }

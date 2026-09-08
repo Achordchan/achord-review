@@ -237,6 +237,20 @@ def pr_generate_compressed_diff(top_langs: list, token_handler: TokenHandler, mo
         new_file_content_str = file.head_file
         patch = file.patch
         if not patch:
+            # A file with additions but no patch (GitHub omits diffs above its
+            # size limit, and the contents API caps at 1MB so the fallback
+            # diff is empty too) must not vanish silently: the model would see
+            # every reference to it as pointing at a file that was never added.
+            # Keep a minimal entry carrying the name and the +/- statistics.
+            if file.edit_type == EDIT_TYPE.ADDED and (file.num_plus_lines or 0) > 0:
+                summary = (f"New file (content omitted: exceeds diff size limits), "
+                           f"+{file.num_plus_lines} lines.")
+                file_dict[file.filename] = {
+                    'patch': summary, 'tokens': token_handler.count_tokens(summary),
+                    'edit_type': file.edit_type}
+            elif file.edit_type == EDIT_TYPE.DELETED and (file.num_minus_lines or 0) > 0:
+                if file.filename not in deleted_files_list:
+                    deleted_files_list.append(file.filename)
             continue
 
         # removing delete-only hunks
