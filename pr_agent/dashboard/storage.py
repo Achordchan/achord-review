@@ -48,6 +48,11 @@ MAX_FINDING_FILE_BYTES = 4 * 1024
 MAX_FINDING_SUMMARY_BYTES = 16 * 1024
 MAX_FINDING_SUGGESTION_BYTES = 64 * 1024
 MAX_DASHBOARD_SESSIONS = 1000
+# SSE event bus rows. The autoincrement id doubles as the SSE event id, so the
+# retention window only bounds disk usage; a browser that reconnects inside it
+# resumes exactly where it stopped.
+MAX_DASHBOARD_EVENT_ROWS = bounded_env_int("DASHBOARD_MAX_EVENT_ROWS", 5000, 100)
+DASHBOARD_EVENT_RETENTION_DAYS = bounded_env_int("DASHBOARD_EVENT_RETENTION_DAYS", 7, 1)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reviews (
@@ -126,6 +131,16 @@ CREATE TABLE IF NOT EXISTS dashboard_login_attempts (
     lockout_key TEXT NOT NULL,
     attempted_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS dashboard_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    request_id TEXT NOT NULL DEFAULT '',
+    review_id INTEGER,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
 
 CREATE INDEX IF NOT EXISTS idx_reviews_repo_pr ON reviews(repo_name, pr_number);
 CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
@@ -392,6 +407,18 @@ class DashboardStorage:
             " (SELECT id FROM reviews WHERE status != 'RUNNING' ORDER BY id DESC LIMIT ?)",
             (terminal_limit,))
         self._maintain_audit_logs(conn, now)
+        self._maintain_event_rows(conn, now)
+
+    @staticmethod
+    def _maintain_event_rows(conn: sqlite3.Connection, now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        conn.execute(
+            "DELETE FROM dashboard_events WHERE created_at < ?",
+            (_utc_at(now - DASHBOARD_EVENT_RETENTION_DAYS * 24 * 3600),))
+        conn.execute(
+            "DELETE FROM dashboard_events WHERE id NOT IN"
+            " (SELECT id FROM dashboard_events ORDER BY id DESC LIMIT ?)",
+            (MAX_DASHBOARD_EVENT_ROWS,))
 
     @staticmethod
     def _maintain_audit_logs(conn: sqlite3.Connection, now: Optional[float] = None) -> None:
@@ -403,6 +430,63 @@ class DashboardStorage:
             "DELETE FROM audit_logs WHERE id NOT IN"
             " (SELECT id FROM audit_logs ORDER BY id DESC LIMIT ?)",
             (MAX_AUDIT_LOG_ROWS,))
+
+    # ------------------------------------------------------------------- events
+
+    def add_event(self, event_type: str, request_id: str = "", review_id: Optional[int] = None,
+                  payload: Optional[Dict[str, Any]] = None) -> int:
+        """Append one review-lifecycle event for the dashboard event stream.
+
+        The autoincrement id is the SSE event id: the stream endpoint reads
+        "everything after id N", so ordering and resume position come for free.
+        Fail-safe like every other write here — the event bus must never
+        disturb the review flow that produced the event.
+        """
+        bounded_payload = {}
+        for key, value in (payload or {}).items():
+            if value is None:
+                continue
+            # numbers and booleans pass through unchanged; the frontend reads
+            # pr_number/review_id as real JSON numbers, everything text is bounded
+            bounded_payload[key] = (
+                value if isinstance(value, (int, float, bool))
+                else _truncate_text_bytes(value, 2000))
+        inserted = self._write(
+            "INSERT INTO dashboard_events (event_type, request_id, review_id, payload_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (event_type, request_id or "", review_id,
+             json.dumps(bounded_payload, ensure_ascii=False, separators=(",", ":")),
+             _utcnow()),
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+        return inserted or 0
+
+    def list_events(self, after_id: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+        """Events with id greater than after_id, oldest first (SSE send order)."""
+        limit = max(1, min(limit, 500))
+        rows = self._read(
+            "SELECT id, event_type, request_id, review_id, payload_json, created_at"
+            " FROM dashboard_events WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (max(0, after_id), limit))
+        for row in rows:
+            try:
+                row["payload"] = json.loads(row.pop("payload_json") or "{}")
+            except ValueError:
+                row["payload"] = {}
+        return rows
+
+    def latest_event_id(self) -> int:
+        """Current head of the event stream (0 when empty)."""
+        rows = self._read("SELECT MAX(id) AS max_id FROM dashboard_events")
+        return int(rows[0]["max_id"] or 0) if rows else 0
+
+    def latest_request_id_for_pr(self, repo_name: str, pr_number: int) -> Optional[str]:
+        """Most recent review run on a PR, for attributing a comment event."""
+        if not repo_name or not pr_number:
+            return None
+        rows = self._read(
+            "SELECT request_id FROM reviews WHERE repo_name = ? AND pr_number = ?"
+            " ORDER BY id DESC LIMIT 1", (repo_name, int(pr_number)))
+        return rows[0]["request_id"] if rows else None
 
     def _write(self, sql: str, params: tuple = (), timeout_seconds: float = _DEFAULT_DB_TIMEOUT_SECONDS,
                max_retry: int = _MAX_RETRY) -> Optional[int]:
@@ -745,10 +829,17 @@ class DashboardStorage:
     def _finish_without_issues(self, request_id: str, status: str, message: str,
                                model: str = "", reasoning_effort: str = "",
                                prompt_tokens: int = 0, completion_tokens: int = 0,
-                               total_tokens: int = 0, duration_ms: int = 0) -> None:
-        """Atomically persist usage and a FAILED/SKIPPED terminal state."""
+                               total_tokens: int = 0, duration_ms: int = 0) -> bool:
+        """Atomically persist usage and a FAILED/SKIPPED terminal state.
+
+        True only when a RUNNING row actually transitioned; callers use this
+        to decide whether a terminal event may be announced.
+        """
+        transitioned = False
+
         def _finish(conn: sqlite3.Connection) -> None:
-            conn.execute(
+            nonlocal transitioned
+            cursor = conn.execute(
                 "UPDATE reviews SET status=?, error_message=?,"
                 " model=COALESCE(NULLIF(?, ''), model),"
                 " reasoning_effort=COALESCE(NULLIF(?, ''), reasoning_effort),"
@@ -761,19 +852,20 @@ class DashboardStorage:
                  prompt_tokens, prompt_tokens, completion_tokens, completion_tokens,
                  total_tokens, total_tokens, duration_ms, duration_ms,
                  _utcnow(), request_id))
+            transitioned = cursor.rowcount == 1
 
-        self._transaction(
+        return self._transaction(
             _finish, f"{status.lower()}-review transaction",
-            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS) and transitioned
 
-    def fail_review(self, request_id: str, error_message: str, **usage) -> None:
-        self._finish_without_issues(request_id, "FAILED", error_message, **usage)
+    def fail_review(self, request_id: str, error_message: str, **usage) -> bool:
+        return self._finish_without_issues(request_id, "FAILED", error_message, **usage)
 
-    def skip_review(self, request_id: str, reason: str, **usage) -> None:
+    def skip_review(self, request_id: str, reason: str, **usage) -> bool:
         """Close a RUNNING record that exited before publishing (no files,
         incremental gate, empty model output). Distinct from FAILED so a
         genuine model/transport error stays distinguishable in the history."""
-        self._finish_without_issues(request_id, "SKIPPED", reason, **usage)
+        return self._finish_without_issues(request_id, "SKIPPED", reason, **usage)
 
     def set_review_usage(self, request_id: str, model: str = "", reasoning_effort: str = "",
                          prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0,
@@ -820,20 +912,23 @@ class DashboardStorage:
                       raw_prediction: str = "", model: str = "", reasoning_effort: str = "",
                       prompt_tokens: int = 0, completion_tokens: int = 0,
                       total_tokens: int = 0, duration_ms: int = 0,
-                      review_comment_url: str = "") -> None:
+                      review_comment_url: str = "") -> bool:
         """Atomically persist usage, findings and the terminal COMPLETED state.
 
         One transaction so a reader that sees status=COMPLETED also sees every
         finding — the detail page polls on status and would otherwise render a
         permanent empty/partial finding list for a review finished mid-write.
         Usage columns accept the run's live values; a stored value wins when
-        the incoming one is empty/zero.
+        the incoming one is empty/zero. True only when a RUNNING row actually
+        transitioned, so callers announce completion only when it persisted.
         """
         markdown_output = _truncate_payload(markdown_output)
         raw_prediction = _truncate_payload(raw_prediction)
         issues = _bounded_review_issues(issues)
+        transitioned = False
 
         def _finish(conn: sqlite3.Connection) -> None:
+            nonlocal transitioned
             cursor = conn.execute(
                 "UPDATE reviews SET status='COMPLETED', verdict=?, verdict_reason=?,"
                 " markdown_output=?, raw_prediction=?,"
@@ -852,6 +947,7 @@ class DashboardStorage:
                  _utcnow(), request_id))
             if cursor.rowcount != 1:
                 return
+            transitioned = True
             row = conn.execute("SELECT id FROM reviews WHERE request_id = ?",
                                (request_id,)).fetchone()
             if row is not None and issues:
@@ -865,8 +961,9 @@ class DashboardStorage:
                       issue.get("issue_summary"), issue.get("suggestion"), now)
                      for issue in issues])
 
-        self._transaction(
-            _finish, "finish-review transaction", timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS)
+        return self._transaction(
+            _finish, "finish-review transaction",
+            timeout_seconds=_AUDIT_DB_TIMEOUT_SECONDS) and transitioned
 
     def get_review_request_id(self, review_id: int) -> Optional[str]:
         """The correlation id for a review row, used to grep its log lines."""
@@ -874,7 +971,8 @@ class DashboardStorage:
         return rows[0]["request_id"] if rows else None
 
     def get_review_by_request_id(self, request_id: str, summary_only: bool = False) -> Optional[Dict[str, Any]]:
-        columns = "id, repo_name, pr_number" if summary_only else "*"
+        columns = ("id, repo_name, pr_number, pr_title, status, verdict"
+                   if summary_only else "*")
         rows = self._read(f"SELECT {columns} FROM reviews WHERE request_id = ?", (request_id,))
         return rows[0] if rows else None
 

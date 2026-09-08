@@ -6,6 +6,7 @@ import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/compon
 import { CanvasRenderer } from 'echarts/renderers'
 import EChart from 'echarts-for-react/esm/core'
 import { api } from '../lib/api'
+import { useEventsStatus } from '../lib/events'
 import type { StatsOverview } from '../lib/types'
 import { Card, CardHeader, Skeleton, StatCard } from '../components/ui'
 import { formatDuration, formatTokens } from '../lib/format'
@@ -99,10 +100,13 @@ function TrendChart({ trend }: { trend: Record<string, { count: number; tokens: 
 }
 
 export default function OverviewPage() {
+  const eventsStatus = useEventsStatus()
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['stats-overview'],
     queryFn: () => api.get<StatsOverview>('/api/v1/dashboard/stats/overview'),
-    refetchInterval: 30_000,
+    // slow reconciliation even while live: guards against a dropped
+    // fail-safe event write leaving the stats permanently stale
+    refetchInterval: () => (eventsStatus === 'live' ? 60_000 : 30_000),
   })
 
   if (isLoading) {
@@ -136,7 +140,10 @@ export default function OverviewPage() {
     <div className="space-y-5">
       <div className="flex items-baseline justify-between">
         <h1 className="text-xl font-semibold text-text">总览大盘</h1>
-        <p className="text-xs text-muted">数据截至 {data.generated_for_date}，每 30 秒自动刷新</p>
+        <p className="text-xs text-muted">
+          数据截至 {data.generated_for_date}
+          {eventsStatus === 'live' ? '，实时推送驱动刷新' : '，每 30 秒自动刷新'}
+        </p>
       </div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

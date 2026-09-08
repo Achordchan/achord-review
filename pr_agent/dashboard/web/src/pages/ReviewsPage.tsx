@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { ExternalLink, RefreshCw, RotateCcw, Search } from 'lucide-react'
 import { api } from '../lib/api'
+import { useEventsStatus } from '../lib/events'
 import type { ReviewListData, ReviewRow } from '../lib/types'
 import { Card, Skeleton } from '../components/ui'
 import { SeveritySummary, StatusBadge, TriggerBadge, VerdictBadge } from '../components/badges'
@@ -29,6 +30,9 @@ export default function ReviewsPage() {
   const [verdict, setVerdict] = useState('')
   const [page, setPage] = useState(0)
   const pageSize = 25
+  // SSE drives the refresh while the stream is live; polling is only the
+  // fallback for a dead connection
+  const eventsStatus = useEventsStatus()
 
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ['reviews', repo, status, verdict, page],
@@ -42,6 +46,11 @@ export default function ReviewsPage() {
       return api.get<ReviewListData>(`/api/v1/dashboard/reviews?${params.toString()}`)
     },
     refetchInterval: (query) => {
+      if (eventsStatus === 'live') {
+        // slow reconciliation while live: event writes are fail-safe, so a
+        // dropped completion event must still surface eventually
+        return 60_000
+      }
       // poll while any visible row is still running
       const rows = query.state.data?.items ?? []
       return rows.some((r: ReviewRow) => r.status === 'RUNNING') ? 10_000 : 60_000
@@ -201,7 +210,9 @@ export default function ReviewsPage() {
       )}
       <p className="flex items-center gap-1.5 text-xs text-muted">
         <RotateCcw size={11} />
-        有进行中的审查时每 10 秒自动刷新，其余每 60 秒
+        {eventsStatus === 'live'
+          ? '实时推送已连接，列表随事件自动刷新（每 60 秒对账兜底）'
+          : '实时连接断开：有进行中的审查时每 10 秒轮询，其余每 60 秒'}
       </p>
     </div>
   )

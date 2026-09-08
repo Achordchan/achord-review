@@ -105,6 +105,51 @@ def normalize_mention_command(comment_body: str) -> str:
     return command
 
 
+def _record_review_reply_event_sync(body: Dict[str, Any], sender: str) -> None:
+    """Blocking half of the reply event, run on the audit executor.
+
+    SQLite reads/writes with their timeout-and-retry behavior must stay off
+    the webhook event loop; the same reasoning that gave dashboard auditing
+    its own pool applies to the event bus it feeds. Only a comment on a PR
+    that this service has actually reviewed is announced: a reply event with
+    no correlated review row carries no detail link while the panel's copy
+    claims a reviewed PR, and comments on plain issues (no PR in the URL)
+    are not review replies at all.
+    """
+    try:
+        from pr_agent.dashboard import audit
+        pr_url = body.get("issue", {}).get("html_url") or body.get("comment", {}).get("html_url", "")
+        parsed_repo, pr_number = audit._parse_pr_url(pr_url)
+        if not parsed_repo or not pr_number:
+            get_logger().debug("Dashboard reply event skipped: not a PR comment")
+            return
+        review = audit._run_audit()
+        if review is None:
+            return
+        request_id = review.latest_request_id_for_pr(parsed_repo, pr_number)
+        if not request_id:
+            get_logger().debug(
+                f"Dashboard reply event skipped: no reviewed record for {parsed_repo}#{pr_number}")
+            return
+        pr_title = body.get("issue", {}).get("title", "")
+        audit._record_event(
+            "review.reply", request_id=request_id, repo_name=parsed_repo,
+            pr_number=pr_number, pr_title=pr_title, sender=sender)
+    except Exception as e:
+        get_logger().debug(f"Dashboard reply event failed, error: {e}")
+
+
+async def _record_review_reply_event(body: Dict[str, Any], sender: str) -> None:
+    """Notify the dashboard stream that a human replied on a reviewed PR.
+
+    The comment path has already decided not to run a command, so this only
+    feeds the event bus — the dashboard never broke on a notification failure
+    and the webhook path must not either.
+    """
+    from pr_agent.dashboard.audit import run_audit_work
+    await run_audit_work(lambda: _record_review_reply_event_sync(body, sender))
+
+
 async def handle_comments_on_pr(body: Dict[str, Any],
                                 event: str,
                                 sender: str,
@@ -124,6 +169,7 @@ async def handle_comments_on_pr(body: Dict[str, Any],
             get_logger().info(f"Reformatting comment_body so command is at the beginning: {comment_body}")
         else:
             get_logger().info("Ignoring comment not starting with /")
+            await _record_review_reply_event(body, sender)
             return {}
     disable_eyes = False
     if "issue" in body and "pull_request" in body["issue"] and "url" in body["issue"]["pull_request"]:

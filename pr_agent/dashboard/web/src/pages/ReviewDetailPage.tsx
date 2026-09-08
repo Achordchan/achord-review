@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, Ban, ChevronDown, ChevronUp, ExternalLink, Terminal } from 'lucide-react'
 import { prHtmlUrl, repoHtmlUrl } from '../lib/github'
 import { api, ApiError } from '../lib/api'
+import { useEventsStatus } from '../lib/events'
 import type { ReviewDetail, ReviewLogData } from '../lib/types'
 import { Card, CardHeader, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/Dialogs'
@@ -48,11 +49,19 @@ export default function ReviewDetailPage() {
   const queryClient = useQueryClient()
   const [confirmStop, setConfirmStop] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const eventsStatus = useEventsStatus()
   const { data, isLoading, isError } = useQuery({
     queryKey: ['review-detail', reviewId],
     queryFn: () => api.get<ReviewDetail>(`/api/v1/dashboard/reviews/${reviewId}`),
     enabled: Number.isInteger(reviewId) && reviewId > 0,
-    refetchInterval: (query) => (query.state.data?.status === 'RUNNING' ? 8_000 : false),
+    refetchInterval: (query) => {
+      if (eventsStatus === 'live') {
+        // event writes are fail-safe; a dropped completion event must not
+        // leave this page showing RUNNING forever, so reconcile slowly
+        return query.state.data?.status === 'RUNNING' ? 30_000 : false
+      }
+      return query.state.data?.status === 'RUNNING' ? 8_000 : false
+    },
   })
 
   const logsQuery = useQuery({
@@ -60,6 +69,8 @@ export default function ReviewDetailPage() {
     queryFn: () => api.get<ReviewLogData>(`/api/v1/dashboard/reviews/${reviewId}/logs`),
     enabled: Number.isInteger(reviewId) && reviewId > 0,
     // Keep pace with a running review; settle to a slow refresh once it ends.
+    // Log tailing stays on polling by design — a high-frequency append stream
+    // is the one place where SSE event granularity buys nothing.
     refetchInterval: () => (data?.status === 'RUNNING' ? 8_000 : false),
   })
   const logLines = logsQuery.data?.lines ?? []

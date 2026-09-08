@@ -3,14 +3,17 @@ import type { ReactNode } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Activity, Beaker, ChevronsLeft, ChevronsRight, FlaskConical, GitPullRequestArrow,
+  Activity, Beaker, Bell, BellOff, ChevronsLeft, ChevronsRight, FlaskConical, GitPullRequestArrow,
   LayoutDashboard, LogOut, Moon, Settings, ShieldCheck, Sun, TerminalSquare, X,
 } from 'lucide-react'
 import { useAuth } from '../lib/auth'
 import { api } from '../lib/api'
+import { useDashboardEvents } from '../lib/events'
 import type { VersionInfo } from '../lib/types'
 import { ComingSoonBadge } from './badges'
 import { VersionCenter } from './VersionCenter'
+import { enableNotifications, notificationPermission, useEventNotifications } from './Notifications'
+import { useEventsStatus } from '../lib/events'
 import { getStoredTheme, setTheme, type Theme } from '../lib/theme'
 import { useToast } from './Toast'
 
@@ -92,6 +95,10 @@ export default function DashboardLayout() {
   const { version, logout } = useAuth()
   const navigate = useNavigate()
   const toast = useToast()
+  useDashboardEvents()
+  useEventNotifications()
+  const eventsStatus = useEventsStatus()
+  const [notifyPermission, setNotifyPermission] = useState(() => notificationPermission())
   const [pendingItem, setPendingItem] = useState<NavItem | null>(null)
   const [logoutPending, setLogoutPending] = useState(false)
   const [versionOpen, setVersionOpen] = useState(false)
@@ -150,6 +157,22 @@ export default function DashboardLayout() {
       setLogoutPending(false)
     }
   }
+
+  const handleEnableNotifications = async () => {
+    const permission = await enableNotifications()
+    setNotifyPermission(permission)
+    if (permission === 'granted') {
+      toast.success('桌面通知已开启', '新审查请求、完成与失败都会弹出系统通知')
+    } else if (permission === 'denied') {
+      toast.error('通知被浏览器拒绝', '请在 Chrome 站点设置中手动允许通知后刷新页面')
+    }
+  }
+
+  const notifyTitle =
+    notifyPermission === 'granted' ? '桌面通知已开启'
+    : notifyPermission === 'denied' ? '通知已被拒绝，请在浏览器设置中允许后刷新'
+    : notifyPermission === 'unsupported' ? '当前浏览器不支持桌面通知'
+    : '开启桌面通知（新审查请求 / 完成 / 失败 / 回复）'
 
   return (
     <div className="flex h-full">
@@ -245,11 +268,21 @@ export default function DashboardLayout() {
       {/* main */}
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between border-b border-line bg-surface-1/80 px-6 backdrop-blur">
-          <div className="flex items-center gap-2 text-sm text-muted">
-            <span className="h-2 w-2 rounded-full bg-good" />
-            服务运行中
+          <div className="flex items-center gap-2 text-sm text-muted" title={eventsStatus === 'live' ? 'SSE 实时推送已连接' : eventsStatus === 'polling' ? '实时连接断开，已回退轮询' : '正在连接实时事件流'}>
+            <span className={`h-2 w-2 rounded-full ${eventsStatus === 'live' ? 'bg-good' : eventsStatus === 'polling' ? 'bg-bad' : 'bg-warn'}`} />
+            {eventsStatus === 'live' ? '实时推送' : eventsStatus === 'polling' ? '轮询降级中' : '连接中'}
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => void handleEnableNotifications()}
+              title={notifyTitle}
+              aria-label="桌面通知"
+              className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-line bg-surface-2 transition-colors hover:text-text ${
+                notifyPermission === 'granted' ? 'text-good' : notifyPermission === 'denied' ? 'text-bad' : 'text-muted'
+              }`}
+            >
+              {notifyPermission === 'denied' ? <BellOff size={15} /> : <Bell size={15} />}
+            </button>
             <button
               onClick={toggleTheme}
               title={theme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
