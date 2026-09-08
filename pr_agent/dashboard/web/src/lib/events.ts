@@ -105,6 +105,22 @@ export function useDashboardEvents() {
 
     const connect = (fromId: number) => {
       cursor = fromId
+      // Invalidation debounce: an event replay backlog can deliver hundreds
+      // of events per poll tick, and each invalidation restarts active
+      // refetches — unbatched that is a request storm. Coalesce them into
+      // one invalidation pass per burst (short trailing window); cursor
+      // advancement, notifications and confetti stay per-event.
+      let invalidateTimer: number | null = null
+      const invalidateSoon = () => {
+        if (invalidateTimer !== null) return
+        invalidateTimer = window.setTimeout(() => {
+          invalidateTimer = null
+          queryClient.invalidateQueries({ queryKey: ['reviews'] })
+          queryClient.invalidateQueries({ queryKey: ['review-detail'] })
+          queryClient.invalidateQueries({ queryKey: ['review-logs'] })
+          queryClient.invalidateQueries({ queryKey: ['stats-overview'] })
+        }, 100)
+      }
       source = new EventSource(`/api/v1/dashboard/events/stream?lastEventId=${fromId}`)
       dispatchEventsStatus('connecting')
       source.addEventListener('open', () => {
@@ -122,10 +138,7 @@ export function useDashboardEvents() {
         }
         cursor = event.id
         storeLastEventId(event.id)
-        queryClient.invalidateQueries({ queryKey: ['reviews'] })
-        queryClient.invalidateQueries({ queryKey: ['review-detail'] })
-        queryClient.invalidateQueries({ queryKey: ['review-logs'] })
-        queryClient.invalidateQueries({ queryKey: ['stats-overview'] })
+        invalidateSoon()
         window.dispatchEvent(new CustomEvent<DashboardEvent>(DASHBOARD_EVENT, { detail: event }))
       })
       source.addEventListener('error', () => {
