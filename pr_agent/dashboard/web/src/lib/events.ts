@@ -73,8 +73,28 @@ export function useDashboardEvents() {
   useEffect(() => {
     let source: EventSource | null = null
     let closed = false
+    let attempt = 0
+    let retryTimer: number | null = null
+    // The connection's authoritative cursor. localStorage is only a
+    // bootstrap for a brand-new subscription: it is written opportunistically
+    // per frame but never read back here — writes can fail, and multiple
+    // dashboard tabs share one key, so a sibling tab's cursor must not
+    // advance this tab past events it has not received.
+    let cursor: number | null = null
+
+    const scheduleRetry = (delayMs: number, resetBackoff: boolean) => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
+      if (resetBackoff) attempt = 0
+      retryTimer = window.setTimeout(() => {
+        // clear the reference BEFORE resolving, so a stream that recovers
+        // now can schedule its own reconnection when it later drops
+        retryTimer = null
+        resolveHead()
+      }, delayMs)
+    }
 
     const connect = (fromId: number) => {
+      cursor = fromId
       source = new EventSource(`/api/v1/dashboard/events/stream?lastEventId=${fromId}`)
       dispatchEventsStatus('connecting')
       source.addEventListener('open', () => dispatchEventsStatus('live'))
@@ -87,6 +107,7 @@ export function useDashboardEvents() {
         } catch {
           return
         }
+        cursor = event.id
         storeLastEventId(event.id)
         queryClient.invalidateQueries({ queryKey: ['reviews'] })
         queryClient.invalidateQueries({ queryKey: ['review-detail'] })
@@ -105,14 +126,7 @@ export function useDashboardEvents() {
         source?.close()
         source = null
         dispatchEventsStatus('polling')
-        attempt = 0
-        if (retryTimer === null) {
-          const delay = Math.min(5_000, 1000)
-          retryTimer = window.setTimeout(() => {
-            retryTimer = null
-            resolveHead()
-          }, delay)
-        }
+        scheduleRetry(1000, true)
       })
     }
 
@@ -121,31 +135,27 @@ export function useDashboardEvents() {
     // validated against it — a database recreated or restored from an older
     // backup restarts the sequence lower, and a stale-high cursor would
     // silently filter out every new event until the sequence caught up.
-    // The cursor is re-read on every resolution, so the reconnection path
-    // validates the position the stream actually reached, not the one at
-    // mount time.
-    let attempt = 0
-    let retryTimer: number | null = null
+    // Reconnection re-resolves with the in-memory cursor this connection
+    // actually reached; events created during an outage are picked up from
+    // there, not skipped by jumping to the new head.
     const resolveHead = () => {
       api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
         .then((data) => {
           if (closed) return
           const head = Math.max(0, data.last_event_id ?? 0)
-          const saved = readLastEventId()
+          const saved = cursor ?? readLastEventId()
           const fromId = saved === null || saved > head ? head : saved
           connect(fromId)
         })
         .catch(() => {
           if (closed) return
           // A failed head lookup must NOT fall back to connecting blindly —
-          // cursor 0 would replay retained history, a stale saved cursor may
-          // be ahead of a rebuilt database. Keep retrying with capped
-          // backoff while polling, and give up never — cleanup cancels the
-          // pending timer.
+          // cursor 0 would replay retained history, a stale cursor may be
+          // ahead of a rebuilt database. Keep retrying with capped backoff
+          // while polling, and give up never — cleanup cancels the timer.
           dispatchEventsStatus('polling')
           attempt += 1
-          const delay = Math.min(30_000, attempt * 2000)
-          retryTimer = window.setTimeout(resolveHead, delay)
+          scheduleRetry(Math.min(30_000, attempt * 2000), false)
         })
     }
     resolveHead()
