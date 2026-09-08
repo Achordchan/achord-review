@@ -12,7 +12,7 @@ import { useDashboardEvents } from '../lib/events'
 import type { VersionInfo } from '../lib/types'
 import { ComingSoonBadge } from './badges'
 import { VersionCenter } from './VersionCenter'
-import { enableNotifications, notificationPermission, useEventNotifications } from './Notifications'
+import { disableNotifications, enableNotifications, notificationPermission, notificationsEnabled, useEventNotifications } from './Notifications'
 import { useEventsStatus } from '../lib/events'
 import { getStoredTheme, setTheme, type Theme } from '../lib/theme'
 import { useToast } from './Toast'
@@ -99,6 +99,7 @@ export default function DashboardLayout() {
   useEventNotifications()
   const eventsStatus = useEventsStatus()
   const [notifyPermission, setNotifyPermission] = useState(() => notificationPermission())
+  const [notifyEnabled, setNotifyOn] = useState(() => notificationsEnabled())
   const [pendingItem, setPendingItem] = useState<NavItem | null>(null)
   const [logoutPending, setLogoutPending] = useState(false)
   const [versionOpen, setVersionOpen] = useState(false)
@@ -159,19 +160,43 @@ export default function DashboardLayout() {
   }
 
   const handleEnableNotifications = async () => {
-    const permission = await enableNotifications()
-    setNotifyPermission(permission)
-    if (permission === 'granted') {
-      toast.success('桌面通知已开启', '新审查请求、完成与失败都会弹出系统通知')
-    } else if (permission === 'denied') {
+    const permission = notificationPermission()
+    if (permission === 'unsupported') {
+      toast.error('当前浏览器不支持桌面通知')
+      return
+    }
+    if (permission === 'denied') {
       toast.error('通知被浏览器拒绝', '请在 Chrome 站点设置中手动允许通知后刷新页面')
+      return
+    }
+    if (permission === 'default') {
+      const result = await enableNotifications()
+      setNotifyPermission(result)
+      if (result === 'granted') {
+        setNotifyOn(true)
+        toast.success('桌面通知已开启', '新审查请求、完成与失败都会弹出系统通知；再点一次可关闭')
+      } else {
+        toast.info('未授权桌面通知', '页面内 Toast 提醒仍然有效')
+      }
+      return
+    }
+    // already granted: the bell is the on/off switch
+    if (notificationsEnabled()) {
+      disableNotifications()
+      setNotifyOn(false)
+      toast.info('桌面通知已关闭', '浏览器权限保留，页面内 Toast 仍会提示；再点一次重新开启')
+    } else {
+      await enableNotifications()
+      setNotifyOn(true)
+      toast.success('桌面通知已重新开启')
     }
   }
 
+  const notifyOn = notifyPermission === 'granted' && notifyEnabled
   const notifyTitle =
-    notifyPermission === 'granted' ? '桌面通知已开启'
-    : notifyPermission === 'denied' ? '通知已被拒绝，请在浏览器设置中允许后刷新'
+    notifyPermission === 'denied' ? '通知已被拒绝，请在浏览器设置中允许后刷新'
     : notifyPermission === 'unsupported' ? '当前浏览器不支持桌面通知'
+    : notifyPermission === 'granted' ? (notifyOn ? '桌面通知开启中，点击关闭' : '桌面通知已关闭，点击开启')
     : '开启桌面通知（新审查请求 / 完成 / 失败 / 回复）'
 
   return (
@@ -278,10 +303,10 @@ export default function DashboardLayout() {
               title={notifyTitle}
               aria-label="桌面通知"
               className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-line bg-surface-2 transition-colors hover:text-text ${
-                notifyPermission === 'granted' ? 'text-good' : notifyPermission === 'denied' ? 'text-bad' : 'text-muted'
+                notifyPermission === 'denied' ? 'text-bad' : notifyOn ? 'text-good' : 'text-muted'
               }`}
             >
-              {notifyPermission === 'denied' ? <BellOff size={15} /> : <Bell size={15} />}
+              {notifyPermission === 'denied' || (notifyPermission === 'granted' && !notifyOn) ? <BellOff size={15} /> : <Bell size={15} />}
             </button>
             <button
               onClick={toggleTheme}

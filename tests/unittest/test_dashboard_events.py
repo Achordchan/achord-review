@@ -167,6 +167,11 @@ class TestEventsStream:
         assert payload["event_type"] == "review.requested"
         assert payload["repo_name"] == "octo/repo"
         assert payload["pr_number"] == 42
+        # created_at must carry an explicit UTC marker: browsers parse the
+        # naive space-separated form as local time, which skewed events by the
+        # client's offset and made the replay filter silence notifications
+        assert payload["created_at"].endswith("Z")
+        assert "T" in payload["created_at"]
 
     def test_stream_resumes_from_query_parameter(self, client, storage, monkeypatch):
         monkeypatch.setattr(dashboard_api, "SSE_POLL_SECONDS", 0)

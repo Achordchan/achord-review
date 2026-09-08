@@ -713,6 +713,13 @@ def _sse_frame(event: Dict[str, Any]) -> bytes:
     """One event as an SSE frame: id enables Last-Event-ID resume, then data."""
     payload = {key: value for key, value in event.items() if key != "payload"}
     payload.update(event.get("payload") or {})
+    created_at = payload.get("created_at")
+    # The database stores naive UTC; emit ISO-8601 with an explicit Z. Browsers
+    # parse the space-separated form as LOCAL time, which skewed every event
+    # by the client's UTC offset and made the replay filter silence all
+    # notifications for users outside UTC.
+    if isinstance(created_at, str) and "T" not in created_at and created_at:
+        payload["created_at"] = f"{created_at.replace(' ', 'T', 1)}Z"
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"id: {event['id']}\nevent: dashboard\ndata: {body}\n\n".encode("utf-8")
 

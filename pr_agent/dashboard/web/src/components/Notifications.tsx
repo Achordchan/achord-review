@@ -22,7 +22,9 @@ export function notificationPermission(): PermissionState {
 export function notificationsEnabled(): boolean {
   if (notificationPermission() !== 'granted') return false
   try {
-    return localStorage.getItem(NOTIFICATION_PREF_KEY) === 'on' || sessionNotificationsEnabled
+    // granted permission means the user opted in (bell or browser padlock);
+    // only an explicit 'off' set by the bell toggle disables
+    return localStorage.getItem(NOTIFICATION_PREF_KEY) !== 'off' || sessionNotificationsEnabled
   } catch {
     return sessionNotificationsEnabled
   }
@@ -41,6 +43,16 @@ export async function enableNotifications(): Promise<PermissionState> {
     }
   }
   return permission
+}
+
+/** The bell's off switch: keep the browser permission, silence this panel. */
+export function disableNotifications() {
+  sessionNotificationsEnabled = false
+  try {
+    localStorage.setItem(NOTIFICATION_PREF_KEY, 'off')
+  } catch {
+    // toggling off still applies for this session via the flag above
+  }
 }
 
 function notify(title: string, body: string, tag: string, onClick: () => void) {
@@ -91,8 +103,26 @@ function eventText(event: DashboardEvent): { title: string; body: string } {
 // completes minutes after its request, so a fresh event is always recent.
 const REPLAY_MAX_AGE_MS = 5 * 60_000
 
+/**
+ * Parse the event timestamp as UTC, whatever the server sent.
+ *
+ * The database stores naive UTC ("2026-09-08 08:11:18") and Date.parse reads
+ * that space-separated form as LOCAL time — for a UTC+8 user every event
+ * looked 8 hours old, the replay filter classified all of them as backlog,
+ * and no notification ever fired. New frames carry ISO-8601 with a Z suffix;
+ * the replace keeps older-format strings (and any stale rows) correct too.
+ * An unparseable timestamp fails open: better one extra notification than
+ * one silently dropped.
+ */
+function eventTimeMs(event: DashboardEvent): number {
+  const raw = (event.created_at || '').trim()
+  if (!raw) return Number.NaN
+  const asUtc = raw.includes('T') ? raw : `${raw.replace(' ', 'T')}Z`
+  return Date.parse(asUtc)
+}
+
 function isReplayed(event: DashboardEvent): boolean {
-  const createdAt = Date.parse(event.created_at)
+  const createdAt = eventTimeMs(event)
   return Number.isFinite(createdAt) && Date.now() - createdAt > REPLAY_MAX_AGE_MS
 }
 
