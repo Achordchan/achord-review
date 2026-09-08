@@ -212,6 +212,13 @@ export function useDashboardEvents() {
     }
 
     const connect = (fromId: number) => {
+      // never overwrite a live source: an orphaned stream keeps dispatching
+      // frames, cannot be closed by cleanup, and its error handler can take
+      // down the replacement connection
+      if (source) {
+        source.close()
+        source = null
+      }
       cursor = fromId
       // Persist the validated starting position immediately: if the tab
       // closes before any event arrives, a returning subscription resumes
@@ -267,17 +274,22 @@ export function useDashboardEvents() {
     // Reconnection re-resolves with the in-memory cursor this connection
     // actually reached; events created during an outage are picked up from
     // there, not skipped by jumping to the new head.
+    // The term guard rejects answers from a previous leadership term: a slow
+    // head request whose tab lost and regained leadership must not connect
+    // over the new term's stream.
+    let term = 0
     const resolveHead = () => {
+      const myTerm = term
       api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
         .then((data) => {
-          if (closed || !leader) return
+          if (closed || !leader || myTerm !== term) return
           const head = Math.max(0, data.last_event_id ?? 0)
           const saved = cursor ?? readLastEventId()
           const fromId = saved === null || saved > head ? head : saved
           connect(fromId)
         })
         .catch(() => {
-          if (closed || !leader) return
+          if (closed || !leader || myTerm !== term) return
           // A failed head lookup must NOT fall back to connecting blindly —
           // cursor 0 would replay retained history, a stale cursor may be
           // ahead of a rebuilt database. Keep retrying with capped backoff
@@ -325,6 +337,7 @@ export function useDashboardEvents() {
 
     const stopLeading = () => {
       leader = false
+      term += 1 // reject in-flight head requests from the previous term
       if (leaseTimer !== null) window.clearInterval(leaseTimer)
       leaseTimer = null
       stopStream()
@@ -334,6 +347,7 @@ export function useDashboardEvents() {
     const becomeLeader = () => {
       if (leader || closed) return
       leader = true
+      term += 1
       dispatchEventsStatus('connecting')
       resolveHead()
       if (!channel) return // single-tab fallback: no lease to defend
