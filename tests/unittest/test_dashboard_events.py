@@ -3,17 +3,16 @@
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
 import pr_agent.dashboard.audit as audit_module
 import pr_agent.dashboard.storage as storage_module
 import pr_agent.servers.dashboard_api as dashboard_api
-from pr_agent.dashboard.storage import DashboardStorage
-
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 @pytest.fixture()
 def storage(tmp_path):
-    store = DashboardStorage(db_path=str(tmp_path / "events_test.db"))
+    store = storage_module.DashboardStorage(db_path=str(tmp_path / "events_test.db"))
     store.initialize()
     return store
 
@@ -25,7 +24,6 @@ def client(storage, monkeypatch):
     # point it at the fixture store so tests can emit real events
     monkeypatch.setattr(storage_module, "_storage", storage)
     monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "test-pass-123")
-    from fastapi import FastAPI
 
     app = FastAPI()
     app.include_router(dashboard_api.router)
@@ -152,8 +150,7 @@ class TestEventsStream:
         headers = _login_headers(client)
 
         def _failing_read(*args, **kwargs):
-            from pr_agent.dashboard import storage as _storage_mod
-            raise _storage_mod.DashboardStorageReadError("dashboard storage read failed")
+            raise storage_module.DashboardStorageReadError("dashboard storage read failed")
 
         monkeypatch.setattr(storage, "list_events", _failing_read)
         response = client.get("/api/v1/dashboard/events/stream", headers=headers)
