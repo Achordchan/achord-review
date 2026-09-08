@@ -101,8 +101,13 @@ export default function DashboardLayout() {
   const [notifyPermission, setNotifyPermission] = useState(() => notificationPermission())
   const [notifyEnabled, setNotifyOn] = useState(() => notificationsEnabled())
   // the preference is shared across tabs via localStorage; the storage event
-  // fires in every other tab on change, keeping this bell's display honest
-  useEffect(() => onNotificationPrefChange(() => setNotifyOn(notificationsEnabled())), [])
+  // fires in every other tab on change, keeping this bell's display honest.
+  // A bell grant in another tab also moves the browser permission, so the
+  // cached permission refreshes alongside the on/off state.
+  useEffect(() => onNotificationPrefChange(() => {
+    setNotifyPermission(notificationPermission())
+    setNotifyOn(notificationsEnabled())
+  }), [])
   const [pendingItem, setPendingItem] = useState<NavItem | null>(null)
   const [logoutPending, setLogoutPending] = useState(false)
   const [versionOpen, setVersionOpen] = useState(false)
@@ -163,7 +168,10 @@ export default function DashboardLayout() {
   }
 
   const handleEnableNotifications = async () => {
+    // the cached permission can be stale (granted in another tab, or via the
+    // browser padlock); read the live value before branching
     const permission = notificationPermission()
+    setNotifyPermission(permission)
     if (permission === 'unsupported') {
       toast.error('当前浏览器不支持桌面通知')
       return
