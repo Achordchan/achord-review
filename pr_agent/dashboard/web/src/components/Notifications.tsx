@@ -9,18 +9,23 @@ const NOTIFICATION_PREF_KEY = 'dashboard-notifications'
 
 type PermissionState = 'default' | 'granted' | 'denied' | 'unsupported'
 
+// Session fallback when localStorage is blocked: the user granted permission
+// via an explicit click, so the preference must survive storage failure for
+// the rest of the tab session — otherwise "enabled" silently means "off".
+let sessionNotificationsEnabled = false
+
 export function notificationPermission(): PermissionState {
   if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported'
   return Notification.permission
 }
 
 export function notificationsEnabled(): boolean {
+  if (notificationPermission() !== 'granted') return false
   try {
-    if (localStorage.getItem(NOTIFICATION_PREF_KEY) !== 'on') return false
+    return localStorage.getItem(NOTIFICATION_PREF_KEY) === 'on' || sessionNotificationsEnabled
   } catch {
-    return false
+    return sessionNotificationsEnabled
   }
-  return notificationPermission() === 'granted'
 }
 
 export async function enableNotifications(): Promise<PermissionState> {
@@ -28,10 +33,11 @@ export async function enableNotifications(): Promise<PermissionState> {
   // requestPermission must come from a user gesture — this is the click handler
   const permission = await Notification.requestPermission()
   if (permission === 'granted') {
+    sessionNotificationsEnabled = true
     try {
       localStorage.setItem(NOTIFICATION_PREF_KEY, 'on')
     } catch {
-      // preference won't persist; session notifications still work
+      // preference won't persist across reloads; this session still works
     }
   }
   return permission
