@@ -90,23 +90,24 @@ export function useEventNotifications() {
   useEffect(() => {
     return onDashboardEvent((event) => {
       const { title, body } = eventText(event)
-      const detail = event.review_id ? `${body}（点击通知查看详情）` : body
-      const openDetail = () => {
-        if (event.review_id) navigate(`/dashboard/reviews/${event.review_id}`)
-      }
+      const detail = event.review_id ? `${body}（点击查看详情）` : body
+      const openDetail = event.review_id
+        ? () => navigate(`/dashboard/reviews/${event.review_id}`)
+        : undefined
       if (event.event_type === 'review.completed') {
         if (event.verdict === 'APPROVE') {
-          toast.success(title, detail)
+          toast.success(title, detail, openDetail)
           celebrate()
         } else {
-          toast.info(title, detail)
+          toast.info(title, detail, openDetail)
         }
       } else if (event.event_type === 'review.failed') {
-        toast.error(title, detail)
+        toast.error(title, detail, openDetail)
       } else {
-        toast.info(title, detail)
+        toast.info(title, detail, openDetail)
       }
-      notify(title, body, `review-${event.request_id || event.id}`, openDetail)
+      notify(title, body, `review-${event.request_id || event.id}`,
+             openDetail ?? (() => {}))
     })
   }, [toast, navigate])
 }
