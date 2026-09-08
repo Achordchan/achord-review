@@ -105,12 +105,12 @@ def normalize_mention_command(comment_body: str) -> str:
     return command
 
 
-def _record_review_reply_event(body: Dict[str, Any], sender: str) -> None:
-    """Notify the dashboard stream that a human replied on a reviewed PR.
+def _record_review_reply_event_sync(body: Dict[str, Any], sender: str) -> None:
+    """Blocking half of the reply event, run on the audit executor.
 
-    The comment path has already decided not to run a command, so this only
-    feeds the event bus — the dashboard never broke on a notification failure
-    and the webhook path must not either.
+    SQLite reads/writes with their timeout-and-retry behavior must stay off
+    the webhook event loop; the same reasoning that gave dashboard auditing
+    its own pool applies to the event bus it feeds.
     """
     try:
         from pr_agent.dashboard import audit
@@ -128,6 +128,17 @@ def _record_review_reply_event(body: Dict[str, Any], sender: str) -> None:
             pr_number=pr_number, pr_title=pr_title, sender=sender)
     except Exception as e:
         get_logger().debug(f"Dashboard reply event failed, error: {e}")
+
+
+async def _record_review_reply_event(body: Dict[str, Any], sender: str) -> None:
+    """Notify the dashboard stream that a human replied on a reviewed PR.
+
+    The comment path has already decided not to run a command, so this only
+    feeds the event bus — the dashboard never broke on a notification failure
+    and the webhook path must not either.
+    """
+    from pr_agent.dashboard.audit import run_audit_work
+    await run_audit_work(lambda: _record_review_reply_event_sync(body, sender))
 
 
 async def handle_comments_on_pr(body: Dict[str, Any],
@@ -149,7 +160,7 @@ async def handle_comments_on_pr(body: Dict[str, Any],
             get_logger().info(f"Reformatting comment_body so command is at the beginning: {comment_body}")
         else:
             get_logger().info("Ignoring comment not starting with /")
-            _record_review_reply_event(body, sender)
+            await _record_review_reply_event(body, sender)
             return {}
     disable_eyes = False
     if "issue" in body and "pull_request" in body["issue"] and "url" in body["issue"]["pull_request"]:

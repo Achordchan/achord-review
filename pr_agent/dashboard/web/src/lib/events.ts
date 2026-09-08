@@ -104,16 +104,27 @@ export function useDashboardEvents() {
     if (saved !== null) {
       connect(saved)
     } else {
-      // fresh subscription: skip history, start at the current head
-      api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
-        .then((data) => {
-          if (!closed) connect(data.last_event_id ?? 0)
-        })
-        .catch(() => {
-          // head lookup failed (storage outage); 0 is safe — the stream
-          // endpoint still requires auth and events arrive from now on
-          if (!closed) connect(0)
-        })
+      // fresh subscription: skip history, start at the current head. A failed
+      // head lookup must NOT fall back to 0 — that would replay every retained
+      // event as notifications. Retry with backoff, and give up into polling
+      // mode (the status signal keeps queries polling) rather than subscribe.
+      let attempt = 0
+      const resolveHead = () => {
+        api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
+          .then((data) => {
+            if (!closed) connect(data.last_event_id ?? 0)
+          })
+          .catch(() => {
+            if (closed) return
+            if (attempt < 3) {
+              attempt += 1
+              window.setTimeout(resolveHead, attempt * 2000)
+            } else {
+              dispatchEventsStatus('polling')
+            }
+          })
+      }
+      resolveHead()
     }
 
     return () => {
