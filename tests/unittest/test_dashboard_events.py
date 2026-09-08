@@ -38,6 +38,12 @@ def _login_headers(client):
     return {"Authorization": f"Bearer {resp.cookies.get(dashboard_api.SESSION_COOKIE)}"}
 
 
+async def _require_auth_stub(request, dashboard_session=None):
+    # entry check stub for revocation-mid-stream tests: the door always
+    # passes; the in-stream revalidation is what must catch the dead session
+    return None
+
+
 class TestEventStorage:
     def test_add_and_list_events_in_id_order(self, storage):
         storage.add_event("review.requested", request_id="r1", review_id=1,
@@ -156,4 +162,43 @@ class TestEventsStream:
         response = client.get("/api/v1/dashboard/events/stream", headers=headers)
         # the connection completes without erroring and emits no events
         assert response.status_code == 200
-        assert "data:" not in response.text
+
+    def test_stream_terminates_when_the_session_is_revoked(self, client, storage, monkeypatch):
+        # simulate revocation after the stream opened: the entry check passes,
+        # then the first in-stream revalidation sees the session dead. With a
+        # zero revalidation interval that is the very first loop tick, so no
+        # event is streamed to the dead session.
+        monkeypatch.setattr(dashboard_api, "SSE_POLL_SECONDS", 0)
+        monkeypatch.setattr(dashboard_api, "SSE_STREAM_LIMIT_SECONDS", 3600.0)
+        monkeypatch.setattr(dashboard_api, "SSE_SESSION_REVALIDATION_SECONDS", 0)
+        storage.add_event("review.requested")
+        headers = _login_headers(client)
+        calls = {"n": 0}
+
+        def _session_dead_after_entry(token):
+            # sync on purpose: the stream revalidates via asyncio.to_thread,
+            # which must receive a blocking callable like the real _session_valid
+            calls["n"] += 1
+            return False  # entry is stubbed; every in-stream check is dead
+
+        monkeypatch.setattr(dashboard_api, "_session_valid", _session_dead_after_entry)
+        monkeypatch.setattr(dashboard_api, "require_auth", _require_auth_stub)
+        response = client.get("/api/v1/dashboard/events/stream", headers=headers)
+        # the door passed (stub) but the stream terminated at the first
+        # revalidation tick instead of streaming events to a dead session
+        assert response.status_code == 200
+        assert calls["n"] == 1
+        assert "event: dashboard" not in response.text
+
+    def test_stream_lifetime_limit_is_unconditional(self, client, storage, monkeypatch):
+        # event traffic must not postpone the lifetime cap: with a zero limit
+        # and a pending event, the stream still drains that event and exits
+        # on the very same tick instead of streaming forever
+        monkeypatch.setattr(dashboard_api, "SSE_POLL_SECONDS", 0)
+        monkeypatch.setattr(dashboard_api, "SSE_STREAM_LIMIT_SECONDS", 0)
+        monkeypatch.setattr(dashboard_api, "SSE_SESSION_REVALIDATION_SECONDS", 3600.0)
+        storage.add_event("review.requested")
+        headers = _login_headers(client)
+        response = client.get("/api/v1/dashboard/events/stream", headers=headers)
+        assert response.status_code == 200
+        assert "event: dashboard" in response.text

@@ -52,6 +52,10 @@ MAX_DASHBOARD_REQUEST_BYTES = 64 * 1024
 SSE_POLL_SECONDS = 1.0
 SSE_HEARTBEAT_SECONDS = 25.0
 SSE_STREAM_LIMIT_SECONDS = 3600.0
+# Re-authenticate the open stream periodically: a revoked session (logout,
+# password rotation, storage purge) otherwise keeps streaming repository
+# names and PR titles for up to the stream lifetime.
+SSE_SESSION_REVALIDATION_SECONDS = 120.0
 SSE_BATCH_LIMIT = 200
 # Everything the panel serves: the JSON API and the SPA bundle under /dashboard.
 DASHBOARD_PATH_PREFIXES = ("/api/v1/dashboard", "/dashboard")
@@ -734,8 +738,10 @@ async def events_stream(request: Request, dashboard_session: Optional[str] = Coo
     needs no in-process pub/sub. Browsers auto-reconnect with Last-Event-ID;
     both that header and a `?lastEventId=` query parameter are honored (the
     query form also covers the first frame after a login redirect, before
-    EventSource has an id to replay). The stream self-terminates after an hour
-    so EventSource's transparent reconnect also revalidates the session.
+    EventSource has an id to replay). The stream revalidates the session
+    periodically and self-terminates after an hour regardless of event
+    traffic, so a revoked session loses the stream within minutes and
+    EventSource's transparent reconnect re-authenticates on the next cycle.
     """
     await require_auth(request, dashboard_session)
     try:
@@ -744,15 +750,27 @@ async def events_stream(request: Request, dashboard_session: Optional[str] = Coo
     except ValueError:
         cursor = 0
     cursor = max(0, min(cursor, MAX_SQLITE_INTEGER))
+    token = dashboard_session or (request.headers.get("authorization", "")[7:].strip()
+                                  if request.headers.get("authorization", "").startswith("Bearer ")
+                                  else "")
 
     async def _generate():
         nonlocal cursor
         last_beat = time.monotonic()
         started_at = last_beat
+        last_revalidation = last_beat
         yield b""
         while True:
             if await request.is_disconnected():
                 return
+            now = time.monotonic()
+            if now - last_revalidation >= SSE_SESSION_REVALIDATION_SECONDS:
+                last_revalidation = now
+                if not await asyncio.to_thread(_session_valid, token):
+                    # revoked (logout, password rotation, storage purge):
+                    # closing the stream is the honest outcome — the browser
+                    # reconnects, hits 401, and the auth layer takes over
+                    return
             try:
                 events = await asyncio.to_thread(
                     _storage_call, "list_events", after_id=cursor, limit=SSE_BATCH_LIMIT)
@@ -763,13 +781,14 @@ async def events_stream(request: Request, dashboard_session: Optional[str] = Coo
             for event in events:
                 cursor = event["id"]
                 yield _sse_frame(event)
-            now = time.monotonic()
             if now - last_beat >= SSE_HEARTBEAT_SECONDS:
                 last_beat = now
                 yield b": heartbeat\n\n"
-            if now - started_at >= SSE_STREAM_LIMIT_SECONDS and not events:
-                # only exit on an idle tick, never between events: a reconnect
-                # that arrives mid-burst still receives everything
+            # a lifetime limit that could be postponed forever by event
+            # traffic would keep a long-lived stream authenticated past any
+            # revocation, so the hour cap is unconditional; the reconnect
+            # then re-authenticates and picks up at the saved cursor
+            if now - started_at >= SSE_STREAM_LIMIT_SECONDS:
                 return
             await asyncio.sleep(SSE_POLL_SECONDS)
 
