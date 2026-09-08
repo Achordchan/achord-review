@@ -713,6 +713,18 @@ def _sse_frame(event: Dict[str, Any]) -> bytes:
     return f"id: {event['id']}\nevent: dashboard\ndata: {body}\n\n".encode("utf-8")
 
 
+@router.get("/events/head")
+async def events_head(request: Request, dashboard_session: Optional[str] = Cookie(None)):
+    """Current head of the event stream, for fresh subscribers.
+
+    A browser with no saved cursor must not replay retained history as live
+    notifications; it reads the head first and subscribes from there. A saved
+    cursor (reconnect/sleep-wake) keeps its explicit position.
+    """
+    await require_auth(request, dashboard_session)
+    return _ok({"last_event_id": await _dashboard_storage_read("latest_event_id")})
+
+
 @router.get("/events/stream")
 async def events_stream(request: Request, dashboard_session: Optional[str] = Cookie(None)):
     """Server-sent events for the review lifecycle (request → outcome).

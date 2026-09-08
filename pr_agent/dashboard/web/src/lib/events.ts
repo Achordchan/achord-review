@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { api } from './api'
 
 export type DashboardEvent = {
   id: number
@@ -21,11 +22,19 @@ const LAST_EVENT_ID_KEY = 'dashboard-last-event-id'
 export const EVENTS_STATUS_EVENT = 'dashboard:events-status'
 export const DASHBOARD_EVENT = 'dashboard:event'
 
-function readLastEventId(): number {
+// The live status is module-scoped, not hook-scoped: a subscriber mounted
+// after the connection already opened (page navigation within the panel)
+// must initialize from the current value, not wait for the next transition.
+let sharedStatus: EventsStatus = 'connecting'
+
+function readLastEventId(): number | null {
   try {
-    return Number(localStorage.getItem(LAST_EVENT_ID_KEY) ?? '') || 0
+    const raw = localStorage.getItem(LAST_EVENT_ID_KEY)
+    if (raw === null) return null
+    const value = Number(raw)
+    return Number.isFinite(value) && value > 0 ? value : null
   } catch {
-    return 0
+    return null
   }
 }
 
@@ -38,48 +47,78 @@ function storeLastEventId(id: number) {
 }
 
 export function dispatchEventsStatus(status: EventsStatus) {
+  sharedStatus = status
   window.dispatchEvent(new CustomEvent<EventsStatus>(EVENTS_STATUS_EVENT, { detail: status }))
+}
+
+export function currentEventsStatus(): EventsStatus {
+  return sharedStatus
 }
 
 /**
  * The single SSE connection for the whole panel, mounted in DashboardLayout.
  *
- * On every dashboard event it (1) invalidates the affected react-query caches
- * and (2) re-dispatches the event for the notification layer. EventSource
- * reconnects on its own with Last-Event-ID; while the connection is down the
- * status event tells data queries to fall back to their polling intervals.
+ * A fresh subscriber (no saved cursor) starts at the stream's current head
+ * via /events/head so retained history is never replayed as notifications;
+ * a saved cursor (reconnect after sleep, reload) resumes exactly where it
+ * stopped. On every dashboard event the hook (1) invalidates the affected
+ * react-query caches and (2) re-dispatches the event for the notification
+ * layer. EventSource reconnects on its own with Last-Event-ID; while the
+ * connection is down the status signal tells data queries to fall back to
+ * their polling intervals.
  */
 export function useDashboardEvents() {
   const queryClient = useQueryClient()
 
   useEffect(() => {
-    const source = new EventSource(`/api/v1/dashboard/events/stream?lastEventId=${readLastEventId()}`)
-    dispatchEventsStatus('connecting')
+    let source: EventSource | null = null
+    let closed = false
 
-    source.addEventListener('open', () => dispatchEventsStatus('live'))
-    source.addEventListener('dashboard', (raw) => {
-      dispatchEventsStatus('live')
-      const frame = raw as MessageEvent<string>
-      let event: DashboardEvent
-      try {
-        event = JSON.parse(frame.data) as DashboardEvent
-      } catch {
-        return
-      }
-      storeLastEventId(event.id)
-      queryClient.invalidateQueries({ queryKey: ['reviews'] })
-      queryClient.invalidateQueries({ queryKey: ['review-detail'] })
-      queryClient.invalidateQueries({ queryKey: ['review-logs'] })
-      queryClient.invalidateQueries({ queryKey: ['stats-overview'] })
-      window.dispatchEvent(new CustomEvent<DashboardEvent>(DASHBOARD_EVENT, { detail: event }))
-    })
-    source.addEventListener('error', () => {
-      // EventSource auto-reconnects; until it does, queries poll instead
-      dispatchEventsStatus('polling')
-    })
+    const connect = (fromId: number) => {
+      source = new EventSource(`/api/v1/dashboard/events/stream?lastEventId=${fromId}`)
+      dispatchEventsStatus('connecting')
+      source.addEventListener('open', () => dispatchEventsStatus('live'))
+      source.addEventListener('dashboard', (raw) => {
+        dispatchEventsStatus('live')
+        const frame = raw as MessageEvent<string>
+        let event: DashboardEvent
+        try {
+          event = JSON.parse(frame.data) as DashboardEvent
+        } catch {
+          return
+        }
+        storeLastEventId(event.id)
+        queryClient.invalidateQueries({ queryKey: ['reviews'] })
+        queryClient.invalidateQueries({ queryKey: ['review-detail'] })
+        queryClient.invalidateQueries({ queryKey: ['review-logs'] })
+        queryClient.invalidateQueries({ queryKey: ['stats-overview'] })
+        window.dispatchEvent(new CustomEvent<DashboardEvent>(DASHBOARD_EVENT, { detail: event }))
+      })
+      source.addEventListener('error', () => {
+        // EventSource auto-reconnects; until it does, queries poll instead
+        dispatchEventsStatus('polling')
+      })
+    }
+
+    const saved = readLastEventId()
+    if (saved !== null) {
+      connect(saved)
+    } else {
+      // fresh subscription: skip history, start at the current head
+      api.get<{ last_event_id: number }>('/api/v1/dashboard/events/head')
+        .then((data) => {
+          if (!closed) connect(data.last_event_id ?? 0)
+        })
+        .catch(() => {
+          // head lookup failed (storage outage); 0 is safe — the stream
+          // endpoint still requires auth and events arrive from now on
+          if (!closed) connect(0)
+        })
+    }
 
     return () => {
-      source.close()
+      closed = true
+      source?.close()
       dispatchEventsStatus('polling')
     }
   }, [queryClient])
@@ -98,7 +137,7 @@ export function onEventsStatus(handler: (status: EventsStatus) => void) {
 }
 
 export function useEventsStatus(): EventsStatus {
-  const [status, setStatus] = useState<EventsStatus>('connecting')
+  const [status, setStatus] = useState<EventsStatus>(sharedStatus)
   useEffect(() => onEventsStatus(setStatus), [])
   return status
 }

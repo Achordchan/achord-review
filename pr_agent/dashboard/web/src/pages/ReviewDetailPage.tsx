@@ -55,7 +55,11 @@ export default function ReviewDetailPage() {
     queryFn: () => api.get<ReviewDetail>(`/api/v1/dashboard/reviews/${reviewId}`),
     enabled: Number.isInteger(reviewId) && reviewId > 0,
     refetchInterval: (query) => {
-      if (eventsStatus === 'live') return false
+      if (eventsStatus === 'live') {
+        // event writes are fail-safe; a dropped completion event must not
+        // leave this page showing RUNNING forever, so reconcile slowly
+        return query.state.data?.status === 'RUNNING' ? 30_000 : false
+      }
       return query.state.data?.status === 'RUNNING' ? 8_000 : false
     },
   })

@@ -46,7 +46,11 @@ export default function ReviewsPage() {
       return api.get<ReviewListData>(`/api/v1/dashboard/reviews?${params.toString()}`)
     },
     refetchInterval: (query) => {
-      if (eventsStatus === 'live') return false
+      if (eventsStatus === 'live') {
+        // slow reconciliation while live: event writes are fail-safe, so a
+        // dropped completion event must still surface eventually
+        return 60_000
+      }
       // poll while any visible row is still running
       const rows = query.state.data?.items ?? []
       return rows.some((r: ReviewRow) => r.status === 'RUNNING') ? 10_000 : 60_000
@@ -207,7 +211,7 @@ export default function ReviewsPage() {
       <p className="flex items-center gap-1.5 text-xs text-muted">
         <RotateCcw size={11} />
         {eventsStatus === 'live'
-          ? '实时推送已连接，列表随事件自动刷新'
+          ? '实时推送已连接，列表随事件自动刷新（每 60 秒对账兜底）'
           : '实时连接断开：有进行中的审查时每 10 秒轮询，其余每 60 秒'}
       </p>
     </div>

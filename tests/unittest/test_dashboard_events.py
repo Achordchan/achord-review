@@ -5,6 +5,8 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+import pr_agent.dashboard.audit as audit_module
+import pr_agent.dashboard.storage as storage_module
 import pr_agent.servers.dashboard_api as dashboard_api
 from pr_agent.dashboard.storage import DashboardStorage
 
@@ -21,7 +23,6 @@ def client(storage, monkeypatch):
     monkeypatch.setattr(dashboard_api, "get_storage", lambda: storage)
     # the audit layer resolves storage through its own module-level singleton;
     # point it at the fixture store so tests can emit real events
-    import pr_agent.dashboard.storage as storage_module
     monkeypatch.setattr(storage_module, "_storage", storage)
     monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "test-pass-123")
     from fastapi import FastAPI
@@ -78,7 +79,7 @@ class TestEventStorage:
         assert storage.latest_request_id_for_pr("", 5) is None
 
     def test_event_retention_bounds_row_count(self, storage, monkeypatch):
-        monkeypatch.setattr(storage_module(), "MAX_DASHBOARD_EVENT_ROWS", 2)
+        monkeypatch.setattr(storage_module, "MAX_DASHBOARD_EVENT_ROWS", 2)
         for index in range(5):
             storage.add_event("review.requested", payload={"pr_number": index})
         storage.reconcile_stale_reviews(force=True)
@@ -87,14 +88,23 @@ class TestEventStorage:
         assert events[-1]["payload"]["pr_number"] == 4
 
 
-def storage_module():
-    import pr_agent.dashboard.storage as module
-    return module
-
-
 class TestEventsStream:
     def test_stream_requires_auth(self, client):
         assert client.get("/api/v1/dashboard/events/stream").status_code == 401
+
+    def test_events_head_requires_auth(self, client):
+        assert client.get("/api/v1/dashboard/events/head").status_code == 401
+
+    def test_events_head_reports_the_current_head(self, client, storage):
+        storage.add_event("review.requested")
+        storage.add_event("review.requested")
+        response = client.get("/api/v1/dashboard/events/head", headers=_login_headers(client))
+        assert response.status_code == 200
+        assert response.json()["data"] == {"last_event_id": 2}
+
+    def test_events_head_is_zero_when_the_stream_is_empty(self, client, storage):
+        response = client.get("/api/v1/dashboard/events/head", headers=_login_headers(client))
+        assert response.json()["data"] == {"last_event_id": 0}
 
     def test_stream_emits_events_as_sse_frames(self, client, storage, monkeypatch):
         # a fast clock and instant idle make the generator drain existing
@@ -104,9 +114,7 @@ class TestEventsStream:
         monkeypatch.setattr(dashboard_api, "SSE_POLL_SECONDS", 0)
         monkeypatch.setattr(dashboard_api, "SSE_STREAM_LIMIT_SECONDS", 0)
         monkeypatch.setenv("DASHBOARD_DB_PATH", storage.db_path)
-        from pr_agent.dashboard import audit
-
-        audit.review_started("https://github.com/octo/repo/pull/42",
+        audit_module.review_started("https://github.com/octo/repo/pull/42",
                              sender="alice", pr_title="Test PR")
         headers = _login_headers(client)
         response = client.get("/api/v1/dashboard/events/stream", headers=headers)
@@ -128,10 +136,8 @@ class TestEventsStream:
         monkeypatch.setattr(dashboard_api, "SSE_POLL_SECONDS", 0)
         monkeypatch.setattr(dashboard_api, "SSE_STREAM_LIMIT_SECONDS", 0)
         monkeypatch.setenv("DASHBOARD_DB_PATH", storage.db_path)
-        from pr_agent.dashboard import audit
-
-        audit.review_started("https://github.com/octo/repo/pull/1")
-        audit.review_started("https://github.com/octo/repo/pull/2")
+        audit_module.review_started("https://github.com/octo/repo/pull/1")
+        audit_module.review_started("https://github.com/octo/repo/pull/2")
         headers = _login_headers(client)
         response = client.get("/api/v1/dashboard/events/stream?lastEventId=1", headers=headers)
         first_frame = next(frame for frame in response.text.split("\n\n") if frame.strip())
@@ -146,8 +152,8 @@ class TestEventsStream:
         headers = _login_headers(client)
 
         def _failing_read(*args, **kwargs):
-            from pr_agent.dashboard.storage import DashboardStorageReadError
-            raise DashboardStorageReadError("dashboard storage read failed")
+            from pr_agent.dashboard import storage as _storage_mod
+            raise _storage_mod.DashboardStorageReadError("dashboard storage read failed")
 
         monkeypatch.setattr(storage, "list_events", _failing_read)
         response = client.get("/api/v1/dashboard/events/stream", headers=headers)

@@ -104,7 +104,9 @@ export default function OverviewPage() {
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['stats-overview'],
     queryFn: () => api.get<StatsOverview>('/api/v1/dashboard/stats/overview'),
-    refetchInterval: () => (eventsStatus === 'live' ? false : 30_000),
+    // slow reconciliation even while live: guards against a dropped
+    // fail-safe event write leaving the stats permanently stale
+    refetchInterval: () => (eventsStatus === 'live' ? 60_000 : 30_000),
   })
 
   if (isLoading) {
