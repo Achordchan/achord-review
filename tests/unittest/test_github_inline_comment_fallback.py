@@ -71,7 +71,9 @@ def test_summary_and_verdict_survive_when_a_finding_cannot_be_anchored(monkeypat
 
     # The verdict review must still have been posted, on its own, in the fallback.
     fallback_call = provider.pr.create_review.call_args_list[-1]
-    assert fallback_call.kwargs.get("body") == "## Summary\n\n**Verdict:** blocking."
+    assert fallback_call.kwargs["body"].startswith("## Summary\n\n**Verdict:** blocking.")
+    assert "Findings without an inline location" in fallback_call.kwargs["body"]
+    assert "finding" in fallback_call.kwargs["body"]
     assert fallback_call.kwargs.get("event") == "COMMENT"
     assert "comments" not in fallback_call.kwargs  # nothing anchorable, but the review still lands
 
@@ -89,3 +91,24 @@ def test_verified_findings_ride_with_the_summary_in_one_review(monkeypatch):
     assert fallback_call.kwargs.get("body") == "SUMMARY"
     assert fallback_call.kwargs.get("event") == "REQUEST_CHANGES"
     assert fallback_call.kwargs.get("comments") == comments
+
+
+def test_mixed_findings_preserve_only_rejected_content_in_summary(monkeypatch):
+    comments = [
+        {"body": "[P2] valid detail", "path": "a.py", "line": 1, "side": "RIGHT"},
+        {"body": "[P1] rejected detail", "path": "a.py", "line": 999, "side": "RIGHT"},
+    ]
+    provider = _make_provider([_Status422Error("mixed"), None])
+    monkeypatch.setattr(provider, "_verify_code_comments",
+                        lambda c: ([c[0]], [(c[1], _Status422Error("outside diff"))]))
+    repair = MagicMock()
+    monkeypatch.setattr(provider, "_try_fix_invalid_inline_comments", repair)
+
+    provider.publish_inline_comments(comments, review_body="SUMMARY", review_event="REQUEST_CHANGES")
+
+    result = provider.pr.create_review.call_args.kwargs
+    assert result["comments"] == comments[:1]
+    assert "[P1] rejected detail" in result["body"]
+    assert "[P2] valid detail" not in result["body"]
+    assert result["event"] == "REQUEST_CHANGES"
+    repair.assert_not_called()

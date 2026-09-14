@@ -1,6 +1,7 @@
 import copy
 import difflib
 import hashlib
+import html
 import itertools
 import json
 import os
@@ -788,7 +789,8 @@ class GithubProvider(GitProvider):
         """
         Check each inline comment separately against the GitHub API and discard of invalid comments,
         then publish all the remaining valid comments in a single review.
-        For invalid comments, also try removing the suggestion part and posting the comment just on the first line.
+        Preserve invalid comments in the review body when submitting a combined review.
+        For standalone suggestions, try repairing invalid comments onto the first line.
 
         review_body/review_event ride along on this review too. The combined create_review that
         failed carried the summary and verdict, and without folding them back in they are lost
@@ -796,6 +798,14 @@ class GithubProvider(GitProvider):
         with no trace. They are posted even when nothing verified, so the verdict always lands.
         """
         verified_comments, invalid_comments = self._verify_code_comments(comments)
+
+        # Preserve rejected findings in the submitted review instead of publishing
+        # a verdict whose supporting comment was discarded by GitHub.
+        if review_body is not None and invalid_comments:
+            review_body += "\n\n### Findings without an inline location\n\n"
+            review_body += "\n\n---\n\n".join(
+                f"<code>{html.escape(comment.get('path', ''))}</code>\n\n{comment['body']}"
+                for comment, _ in invalid_comments)
 
         # publish as a group the verified comments, carrying the summary and verdict along
         review_kwargs = {"commit": self.last_commit_id}
@@ -818,7 +828,7 @@ class GithubProvider(GitProvider):
                 self._record_published_review(review)
 
         # try to publish one by one the invalid comments as a one-line code comment
-        if invalid_comments and get_settings().github.try_fix_invalid_inline_comments:
+        if review_body is None and invalid_comments and get_settings().github.try_fix_invalid_inline_comments:
             fixed_comments_as_one_liner = self._try_fix_invalid_inline_comments(
                 [comment for comment, _ in invalid_comments])
             for comment in fixed_comments_as_one_liner:

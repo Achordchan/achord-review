@@ -459,17 +459,24 @@ def convert_to_markdown_v2(output_data: dict,
                     try:
                         if not issue or not isinstance(issue, dict):
                             continue
-                        relevant_file = issue.get('relevant_file', '').strip()
-                        issue_header = issue.get('issue_header', '').strip()
+                        relevant_file = (issue.get('relevant_file') or '').strip()
+                        issue_header = (issue.get('issue_header') or '').strip()
                         if issue_header.lower() == 'possible bug':
                             issue_header = 'Possible Issue'  # Make the header less frightening
                         severity_badge = format_severity_badge(issue.get('severity'), gfm_supported)
                         issue_content = issue.get('issue_content', '').strip()
-                        start_line = int(str(issue.get('start_line', 0)).strip())
-                        end_line = int(str(issue.get('end_line', 0)).strip())
+                        try:
+                            start_line = int(str(issue.get('start_line', 0)).strip())
+                            end_line = int(str(issue.get('end_line', 0)).strip())
+                        except (ValueError, TypeError):
+                            start_line, end_line = 0, 0
+                        if start_line < 1 or end_line < start_line:
+                            start_line, end_line = 0, 0
 
-                        relevant_lines_str = extract_relevant_lines_str(end_line, files, relevant_file, start_line, dedent=True)
-                        if git_provider:
+                        relevant_lines_str = (
+                            extract_relevant_lines_str(end_line, files, relevant_file, start_line, dedent=True)
+                            if start_line > 0 else "")
+                        if git_provider and start_line > 0:
                             reference_link = git_provider.get_line_link(relevant_file, start_line, end_line)
                         else:
                             reference_link = None

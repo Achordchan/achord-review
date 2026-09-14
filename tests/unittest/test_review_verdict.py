@@ -3,7 +3,12 @@ from unittest.mock import MagicMock
 import pytest
 from jinja2 import Environment, StrictUndefined
 
-from pr_agent.algo.utils import CLEAN_REVIEW_MESSAGES, clean_review_message, format_severity_badge
+from pr_agent.algo.utils import (
+    CLEAN_REVIEW_MESSAGES,
+    clean_review_message,
+    convert_to_markdown_v2,
+    format_severity_badge,
+)
 from pr_agent.config_loader import get_settings
 from pr_agent.git_providers.git_provider import OwnVerdict
 from pr_agent.git_providers.github_provider import GithubProvider
@@ -34,6 +39,19 @@ def _issue(severity):
 def _verdict(review):
     # _determine_review_verdict only reads its argument and the settings, never self
     return PRReviewer._determine_review_verdict(object(), {"review": review})
+
+
+@pytest.mark.parametrize("lines", [(None, None), ("", ""), ("unknown", "unknown"), (0, 0), (5, 2)])
+def test_summary_keeps_finding_without_usable_lines(lines):
+    issue = _issue("P1")
+    issue.update(start_line=lines[0], end_line=lines[1], issue_content="Required failure detail")
+    provider = MagicMock()
+    rendered = convert_to_markdown_v2(
+        {"review": {"key_issues_to_review": [issue]}},
+        gfm_supported=True, git_provider=provider, files=[])
+    assert "Required failure detail" in rendered
+    assert 'alt="P1"' in rendered
+    provider.get_line_link.assert_not_called()
 
 
 class TestDetermineReviewVerdict:
@@ -415,6 +433,8 @@ class TestSingleReviewSubmission:
         reviewer._publish_single_review("SUMMARY")
         assert len(provider.suggestion_calls) == 1
         assert len(provider.verdict_calls) == 1, "the review must still reach the PR"
+        assert "finding" in provider.verdict_calls[0][1]
+        assert "Findings without an inline location" in provider.verdict_calls[0][1]
 
 
 class TestVerdictMarkerTravelsWithTheVerdict:
