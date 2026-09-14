@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import datetime
+import html
 import math
 import os
 import re
@@ -754,7 +755,11 @@ class PRReviewer:
         if comments:
             if self.git_provider.publish_code_suggestions(comments, review_body=body, review_event=event):
                 return
-            get_logger().warning("Single review submission failed; falling back to a verdict-only review")
+            get_logger().warning("Single review submission failed; preserving findings in the review body")
+            body += "\n\n### Findings without an inline location\n\n"
+            body += "\n\n---\n\n".join(
+                f"<code>{html.escape(comment.get('relevant_file', ''))}</code>\n\n{comment['body']}"
+                for comment in comments)
         if not self.git_provider.submit_review_verdict(event, body):
             get_logger().info(f"Review verdict {event} was not submitted")
 
