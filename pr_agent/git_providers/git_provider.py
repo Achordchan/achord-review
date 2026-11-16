@@ -246,6 +246,17 @@ class GitProvider(ABC):
     def get_diff_files(self) -> list[FilePatchInfo]:
         pass
 
+    def get_omitted_diff_files(self) -> list[FilePatchInfo]:
+        """Files this PR changes that get_diff_files() leaves out.
+
+        Lockfiles, generated output, binary assets and [ignore] matches are kept
+        out of the diff to save tokens, but they are still part of the PR. Entries
+        carry the name, edit type and line counts only - never content - so the
+        prompt can say "changed, content omitted" instead of staying silent, which
+        a model reads as "unchanged". Providers that do not track this return [].
+        """
+        return list(getattr(self, "omitted_diff_files", None) or [])
+
     def get_incremental_commits(self, is_incremental):
         pass
 

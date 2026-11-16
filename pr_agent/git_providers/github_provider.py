@@ -50,6 +50,15 @@ VERDICT_MARKER = "<!-- pr-agent-review-verdict"
 VERDICT_MARKER_RE = re.compile(r"<!-- pr-agent-review-verdict(?::\s*([0-9a-f]{7,40}))? -->")
 
 
+def _edit_type_from_status(status: str) -> EDIT_TYPE:
+    return {
+        "added": EDIT_TYPE.ADDED,
+        "removed": EDIT_TYPE.DELETED,
+        "renamed": EDIT_TYPE.RENAMED,
+        "modified": EDIT_TYPE.MODIFIED,
+    }.get(status, EDIT_TYPE.UNKNOWN)
+
+
 class GithubProvider(GitProvider):
     def __init__(self, pr_url: Optional[str] = None):
         self.repo_obj = None
@@ -67,6 +76,7 @@ class GithubProvider(GitProvider):
         self.issue_main = None
         self.github_user_id = None
         self.diff_files = None
+        self.omitted_diff_files = []
         self.git_files = None
         self.incremental = IncrementalPR(False)
         self._check_run_ids: dict = {}
@@ -267,6 +277,11 @@ class GithubProvider(GitProvider):
             # filter files using [ignore] patterns
             files_original = self.get_files()
             files = filter_ignored(files_original)
+            # Files kept out of the diff are still part of the PR: remember them by
+            # name so the prompt can say so (see get_omitted_diff_files).
+            kept_names = {file.filename for file in files}
+            omitted_diff_files = [self._omitted_file_info(file) for file in files_original
+                                  if file.filename not in kept_names]
             if files_original != files:
                 try:
                     names_original = [file.filename for file in files_original]
@@ -301,6 +316,7 @@ class GithubProvider(GitProvider):
             for file in files:
                 if not is_valid_file(file.filename):
                     invalid_files_names.append(file.filename)
+                    omitted_diff_files.append(self._omitted_file_info(file))
                     continue
 
                 patch = file.patch
@@ -338,17 +354,9 @@ class GithubProvider(GitProvider):
                             patch = load_large_diff(file.filename, new_file_content_str, original_file_content_str)
 
 
-                if file.status == 'added':
-                    edit_type = EDIT_TYPE.ADDED
-                elif file.status == 'removed':
-                    edit_type = EDIT_TYPE.DELETED
-                elif file.status == 'renamed':
-                    edit_type = EDIT_TYPE.RENAMED
-                elif file.status == 'modified':
-                    edit_type = EDIT_TYPE.MODIFIED
-                else:
+                edit_type = _edit_type_from_status(file.status)
+                if edit_type == EDIT_TYPE.UNKNOWN:
                     get_logger().error(f"Unknown edit type: {file.status}")
-                    edit_type = EDIT_TYPE.UNKNOWN
 
                 # count number of lines added and removed
                 if hasattr(file, 'additions') and hasattr(file, 'deletions'):
@@ -369,8 +377,10 @@ class GithubProvider(GitProvider):
                 get_logger().info(f"Filtered out files with invalid extensions: {invalid_files_names}")
 
             self.diff_files = diff_files
+            self.omitted_diff_files = omitted_diff_files
             try:
                 context["diff_files"] = diff_files
+                context["omitted_diff_files"] = omitted_diff_files
             except Exception:
                 pass
 
@@ -380,6 +390,29 @@ class GithubProvider(GitProvider):
             get_logger().error(f"Failing to get diff files: {e}",
                                artifact={"traceback": traceback.format_exc()})
             raise RateLimitExceeded("Rate limit exceeded for GitHub API.") from e
+
+    @staticmethod
+    def _omitted_file_info(file) -> FilePatchInfo:
+        """Name, edit type and line counts of a file left out of the diff - no content is fetched."""
+        is_renamed = file.status == "renamed" and getattr(file, "previous_filename", None)
+        return FilePatchInfo("", "", "", file.filename,
+                             edit_type=_edit_type_from_status(file.status),
+                             old_filename=file.previous_filename if is_renamed else None,
+                             num_plus_lines=getattr(file, "additions", -1),
+                             num_minus_lines=getattr(file, "deletions", -1))
+
+    def get_omitted_diff_files(self) -> list[FilePatchInfo]:
+        # get_diff_files() may have been answered from the request context by another
+        # provider instance; the omitted list is cached alongside it for that case.
+        try:
+            omitted = context.get("omitted_diff_files", None)
+            if omitted is not None and context.get("diff_files", None):
+                return list(omitted)
+        except Exception:
+            pass
+        if getattr(self, "diff_files", None) is None:
+            self.get_diff_files()
+        return list(getattr(self, "omitted_diff_files", None) or [])
 
     def publish_description(self, pr_title: str, pr_body: str):
         if pr_title is None:
