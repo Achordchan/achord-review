@@ -47,6 +47,29 @@ def cap_and_log_extra_lines(value, direction) -> int:
     return value
 
 
+_LINE_BREAKING_CHARS = {"\x85", "\u2028", "\u2029"}
+
+
+def _escape_filename(name: str) -> str:
+    """One visible line per name: control and line-breaking characters become \\xNN / \\uNNNN.
+
+    Git allows a newline in a filename. These names sit outside any file-content
+    framing, so one carrying its own newline and headings could pass for review
+    instructions or extra diff. They are escaped rather than dropped: dropping a
+    file is the silence this list exists to remove.
+    """
+    escaped = []
+    for ch in str(name):
+        code = ord(ch)
+        if code < 0x20 or code == 0x7f:
+            escaped.append(f"\\x{code:02x}")
+        elif ch in _LINE_BREAKING_CHARS:
+            escaped.append(f"\\u{code:04x}")
+        else:
+            escaped.append(ch)
+    return "".join(escaped)
+
+
 def _describe_omitted_file(file) -> str:
     edit_type = getattr(file, "edit_type", EDIT_TYPE.UNKNOWN)
     status = {
@@ -56,11 +79,11 @@ def _describe_omitted_file(file) -> str:
         EDIT_TYPE.RENAMED: "renamed",
     }.get(edit_type, "changed")
     if edit_type == EDIT_TYPE.RENAMED and getattr(file, "old_filename", None):
-        status = f"renamed from {file.old_filename}"
+        status = f"renamed from {_escape_filename(file.old_filename)}"
     plus, minus = getattr(file, "num_plus_lines", -1), getattr(file, "num_minus_lines", -1)
     has_counts = isinstance(plus, int) and isinstance(minus, int) and plus >= 0 and minus >= 0
     counts = f", +{plus} -{minus}" if has_counts else ""
-    return f"- {file.filename} ({status}{counts})"
+    return f"- {_escape_filename(file.filename)} ({status}{counts})"
 
 
 def get_omitted_files_section(git_provider: GitProvider, diff_files: list, pr_languages: list) -> str:
