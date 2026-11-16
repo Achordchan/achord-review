@@ -808,7 +808,14 @@ class PRReviewer:
             # carries GitHub's previous_filename (see GithubProvider.get_diff_files).
             # previous_filename is read too so a provider that hands back a raw file
             # object — rather than a FilePatchInfo — is still covered.
-            for file in (self.git_provider.get_diff_files() or []):
+            # Files kept out of the diff (go.sum and other lockfiles) are changed too.
+            # Leaving them out here would let retrieval attach their base version as
+            # "unchanged" context - exactly the stale copy that contradicts the PR.
+            files = list(self.git_provider.get_diff_files() or [])
+            get_omitted = getattr(self.git_provider, "get_omitted_diff_files", None)
+            if callable(get_omitted):
+                files += list(get_omitted() or [])
+            for file in files:
                 for attribute in ("filename", "old_filename", "previous_filename"):
                     path = getattr(file, attribute, "")
                     if path and path not in paths:

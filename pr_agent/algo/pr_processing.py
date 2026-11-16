@@ -25,6 +25,10 @@ MORE_MODIFIED_FILES_ = "Additional modified files (insufficient token budget to 
 
 ADDED_FILES_ = "Additional added files (insufficient token budget to process):\n"
 
+OMITTED_FILES_ = ("Other files changed in this PR, content omitted (dependency lockfiles, generated, vendored "
+                  "or binary files). They ARE modified by this PR - do not treat them as unchanged or missing:\n")
+MAX_OMITTED_FILES_LISTED = 50
+
 OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD = 1500
 OUTPUT_BUFFER_TOKENS_HARD_THRESHOLD = 1000
 MAX_EXTRA_LINES = 10
@@ -41,6 +45,80 @@ def cap_and_log_extra_lines(value, direction) -> int:
         get_logger().warning(f"patch_extra_lines_{direction} was {value}, capping to {MAX_EXTRA_LINES}")
         return MAX_EXTRA_LINES
     return value
+
+
+_LINE_BREAKING_CHARS = {"\x85", "\u2028", "\u2029"}
+
+
+def _escape_filename(name: str) -> str:
+    """One visible line per name: control and line-breaking characters become \\xNN / \\uNNNN.
+
+    Git allows a newline in a filename. These names sit outside any file-content
+    framing, so one carrying its own newline and headings could pass for review
+    instructions or extra diff. They are escaped rather than dropped: dropping a
+    file is the silence this list exists to remove.
+    """
+    escaped = []
+    for ch in str(name):
+        code = ord(ch)
+        if code < 0x20 or code == 0x7f:
+            escaped.append(f"\\x{code:02x}")
+        elif ch in _LINE_BREAKING_CHARS:
+            escaped.append(f"\\u{code:04x}")
+        else:
+            escaped.append(ch)
+    return "".join(escaped)
+
+
+def _describe_omitted_file(file) -> str:
+    edit_type = getattr(file, "edit_type", EDIT_TYPE.UNKNOWN)
+    status = {
+        EDIT_TYPE.ADDED: "added",
+        EDIT_TYPE.DELETED: "deleted",
+        EDIT_TYPE.MODIFIED: "modified",
+        EDIT_TYPE.RENAMED: "renamed",
+    }.get(edit_type, "changed")
+    if edit_type == EDIT_TYPE.RENAMED and getattr(file, "old_filename", None):
+        status = f"renamed from {_escape_filename(file.old_filename)}"
+    plus, minus = getattr(file, "num_plus_lines", -1), getattr(file, "num_minus_lines", -1)
+    has_counts = isinstance(plus, int) and isinstance(minus, int) and plus >= 0 and minus >= 0
+    counts = f", +{plus} -{minus}" if has_counts else ""
+    return f"- {_escape_filename(file.filename)} ({status}{counts})"
+
+
+def get_omitted_files_section(git_provider: GitProvider, diff_files: list, pr_languages: list) -> str:
+    """List changed files whose content never reaches the prompt.
+
+    Lockfiles such as go.sum are dropped from the diff to save tokens. Dropping them
+    silently makes the model conclude they were not touched - e.g. "go.sum was not
+    updated for the new dependency" on a PR that did update it. Naming them, with
+    their line counts and no content, costs a few tokens and removes that reading.
+    """
+    omitted = []
+    try:
+        get_omitted = getattr(git_provider, "get_omitted_diff_files", None)
+        if callable(get_omitted):
+            omitted = list(get_omitted() or [])
+    except Exception as e:
+        get_logger().warning(f"Could not list files omitted from the diff: {e}")
+    # sort_files_by_main_languages() drops bad extensions once more, for providers
+    # whose get_diff_files() does not filter on its own.
+    kept = {file.filename for language in (pr_languages or []) for file in language.get("files", [])}
+    omitted += [file for file in (diff_files or []) if file.filename not in kept]
+
+    lines, seen = [], set()
+    for file in omitted:
+        filename = getattr(file, "filename", None)
+        if not filename or filename in seen:
+            continue
+        seen.add(filename)
+        lines.append(_describe_omitted_file(file))
+    if not lines:
+        return ""
+    extra = len(lines) - MAX_OMITTED_FILES_LISTED
+    if extra > 0:
+        lines = lines[:MAX_OMITTED_FILES_LISTED] + [f"- ... and {extra} more"]
+    return OMITTED_FILES_ + "\n".join(lines)
 
 
 def get_pr_diff(git_provider: GitProvider, token_handler: TokenHandler,
@@ -72,16 +150,24 @@ def get_pr_diff(git_provider: GitProvider, token_handler: TokenHandler,
         except Exception as e:
             pass
 
+    omitted_files_str = get_omitted_files_section(git_provider, diff_files, pr_languages)
+    if omitted_files_str:
+        get_logger().info(f"Files changed but omitted from the diff content:\n{omitted_files_str}")
+    omitted_files_tokens = token_handler.count_tokens(omitted_files_str) + 2 if omitted_files_str else 0
+
     # generate a standard diff string, with patch extension
     patches_extended, total_tokens, patches_extended_tokens = pr_generate_extended_diff(
         pr_languages, token_handler, add_line_numbers_to_hunks,
         patch_extra_lines_before=PATCH_EXTRA_LINES_BEFORE, patch_extra_lines_after=PATCH_EXTRA_LINES_AFTER)
 
     # if we are under the limit, return the full diff
-    if total_tokens + OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD < get_max_tokens(model):
+    if total_tokens + omitted_files_tokens + OUTPUT_BUFFER_TOKENS_SOFT_THRESHOLD < get_max_tokens(model):
         get_logger().info(f"Tokens: {total_tokens}, total tokens under limit: {get_max_tokens(model)}, "
                           f"returning full diff.")
-        return "\n".join(patches_extended)
+        full_diff = "\n".join(patches_extended)
+        if full_diff and omitted_files_str:
+            full_diff = full_diff + "\n\n" + omitted_files_str
+        return full_diff
 
     # if we are over the limit, start pruning (If we got here, we will not extend the patches with extra lines)
     get_logger().info(f"Tokens: {total_tokens}, total tokens over limit: {get_max_tokens(model)}, "
@@ -141,6 +227,11 @@ def get_pr_diff(git_provider: GitProvider, token_handler: TokenHandler,
     deleted_list_str = clip_tokens(deleted_list_str, max_tokens - curr_token)
     if deleted_list_str:
         final_diff = final_diff + "\n\n" + deleted_list_str
+        curr_token += token_handler.count_tokens(deleted_list_str) + 2
+    if final_diff and omitted_files_str and (max_tokens - curr_token) > delta_tokens:
+        omitted_files_str = clip_tokens(omitted_files_str, max_tokens - curr_token)
+        if omitted_files_str:
+            final_diff = final_diff + "\n\n" + omitted_files_str
 
     get_logger().debug(f"After pruning, added_list_str: {added_list_str}, modified_list_str: {modified_list_str}, "
                        f"deleted_list_str: {deleted_list_str}")
